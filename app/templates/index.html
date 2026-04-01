@@ -9,11 +9,20 @@
 </head>
 <body>
   <main class="container">
-    <h1>Jira-GitHub 자동화 PoC</h1>
-    <p class="desc">설정 저장, 백로그 조회, 브랜치/커밋 준비 정보를 Web UI에서 테스트합니다.</p>
+    <section class="hero">
+      <p class="eyebrow">Jira x GitHub PoC</p>
+      <h1>설정 수집부터 작업 준비까지 한 화면에서 확인합니다.</h1>
+      <p class="desc">Jira, GitHub, 로컬 레포 정보를 저장하기 전에 어디서 값을 찾아야 하는지 모달 가이드로 안내하고, 바로 입력칸으로 연결합니다.</p>
+    </section>
 
     <section class="card">
-      <h2>1. 연결 정보 입력</h2>
+      <div class="card-header">
+        <div>
+          <p class="section-kicker">Setup</p>
+          <h2>1. 연결 정보 입력</h2>
+        </div>
+        <button id="open_setup_guide" type="button" class="secondary-button">설정 가이드 보기</button>
+      </div>
       <div class="grid">
         <label>Jira Base URL<input id="jira_base_url" type="text" placeholder="https://your-domain.atlassian.net"></label>
         <label>Jira Email<input id="jira_email" type="email" placeholder="user@example.com"></label>
@@ -26,18 +35,24 @@
         <label class="wide">Local Repo Path<input id="local_repo_path" type="text" placeholder="/workspace/your-repo"></label>
       </div>
       <div class="actions">
-        <button id="load_config">저장값 불러오기</button>
-        <button id="validate_config">필수값 검사</button>
-        <button id="save_config">암호화 저장</button>
+        <button id="load_config" type="button">저장값 불러오기</button>
+        <button id="validate_config" type="button">필수값 검사</button>
+        <button id="save_config" type="button">암호화 저장</button>
       </div>
       <pre id="config_result" class="result"></pre>
+      <div id="config_result_actions" class="result-actions"></div>
     </section>
 
     <section class="card">
-      <h2>2. Jira 백로그 조회</h2>
+      <div class="card-header">
+        <div>
+          <p class="section-kicker">Jira</p>
+          <h2>2. Jira 백로그 조회</h2>
+        </div>
+      </div>
       <div class="actions">
         <label><input id="mock_mode" type="checkbox" checked> Mock 모드 사용</label>
-        <button id="load_backlog">백로그 조회</button>
+        <button id="load_backlog" type="button">백로그 조회</button>
       </div>
       <table>
         <thead><tr><th>Issue Key</th><th>Summary</th><th>Status</th><th>선택</th></tr></thead>
@@ -47,14 +62,52 @@
     </section>
 
     <section class="card">
-      <h2>3. GitHub/로컬 레포 확인 및 워크플로 준비</h2>
+      <div class="card-header">
+        <div>
+          <p class="section-kicker">Workflow</p>
+          <h2>3. GitHub/로컬 레포 확인 및 워크플로 준비</h2>
+        </div>
+      </div>
       <div class="actions">
-        <button id="check_repo">레포 상태 확인</button>
-        <button id="prepare_workflow">선택 이슈로 준비</button>
+        <button id="check_repo" type="button">레포 상태 확인</button>
+        <button id="prepare_workflow" type="button">선택 이슈로 준비</button>
       </div>
       <pre id="workflow_result" class="result"></pre>
     </section>
   </main>
+
+  <div id="setup_guide_modal" class="modal-shell" aria-hidden="true">
+    <div class="modal-backdrop" data-close-guide="true"></div>
+    <section class="guide-modal" role="dialog" aria-modal="true" aria-labelledby="guide_modal_title">
+      <div class="guide-modal__header">
+        <div>
+          <p class="eyebrow">Guided Setup</p>
+          <h2 id="guide_modal_title">설정 수집 가이드</h2>
+          <p id="guide_modal_summary" class="guide-modal__summary">Jira, GitHub, 로컬 레포 정보를 어디서 확인할지 단계별로 안내합니다.</p>
+        </div>
+        <button id="close_setup_guide" type="button" class="ghost-button">닫기</button>
+      </div>
+
+      <div id="guide_tabs" class="guide-tabs" role="tablist" aria-label="설정 가이드 섹션"></div>
+
+      <div class="guide-layout">
+        <aside class="guide-sidebar">
+          <div class="guide-progress">
+            <div class="guide-progress__meta">
+              <span class="guide-progress__label">진행 상태</span>
+              <span id="guide_progress_label" class="guide-progress__count"></span>
+            </div>
+            <div class="guide-progress__track" aria-hidden="true">
+              <span id="guide_progress_fill" class="guide-progress__fill"></span>
+            </div>
+          </div>
+          <div id="guide_steps" class="guide-steps"></div>
+        </aside>
+
+        <section id="guide_detail" class="guide-detail" aria-live="polite"></section>
+      </div>
+    </section>
+  </div>
 
   <script src="{{ url_for('static', filename='app.js') }}"></script>
 </body>
