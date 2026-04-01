@@ -4,6 +4,7 @@ import base64
 import json
 import logging
 import os
+import queue
 import re
 import shutil
 import sqlite3
@@ -31,6 +32,7 @@ CODEX_TIMEOUT_SECONDS = 20 * 60
 TEST_TIMEOUT_SECONDS = 10 * 60
 MAX_DIFF_CHARS = 60000
 MAX_OUTPUT_CHARS = 12000
+MAX_WORKFLOW_EVENTS = 160
 SETUP_GUIDE_VERSION = 3
 VALID_REASONING_EFFORTS = ("low", "medium", "high", "xhigh")
 WORKFLOW_HEARTBEAT_SECONDS = 10
@@ -440,6 +442,8 @@ def _new_workflow_run() -> dict[str, Any]:
 
 def _append_workflow_event(run: dict[str, Any], phase: str, message: str) -> None:
     run["events"].append({"timestamp": _utcnow_iso(), "phase": phase, "message": message})
+    if len(run["events"]) > MAX_WORKFLOW_EVENTS:
+        run["events"] = run["events"][-MAX_WORKFLOW_EVENTS:]
     run["message"] = message
 
 
@@ -852,7 +856,8 @@ def _mock_jira_issue_detail(issue_key: str) -> dict[str, Any] | None:
 
 
 def _fetch_jira_issue_detail(config: JiraConfig, issue_key: str) -> dict[str, Any]:
-    response = requests.get(
+    response = _request_with_logging(
+        "GET",
         f"{config.base_url}/rest/api/3/issue/{issue_key}",
         headers=_jira_headers(config),
         params={
@@ -910,6 +915,29 @@ def _combined_output(stdout: str, stderr: str) -> str:
     return "\n\n".join(sections)
 
 
+def _short_text(text: str, limit: int = 180) -> str:
+    compact = " ".join(str(text or "").split())
+    if len(compact) <= limit:
+        return compact
+    return compact[: max(limit - 3, 0)] + "..."
+
+
+def _request_with_logging(method: str, url: str, **kwargs: Any) -> requests.Response:
+    started_at = time.monotonic()
+    timeout = kwargs.get("timeout")
+    LOGGER.info("HTTP %s start: url=%s timeout=%s", method.upper(), url, timeout if timeout is not None else "-")
+    try:
+        response = requests.request(method, url, **kwargs)
+    except requests.RequestException:
+        elapsed = time.monotonic() - started_at
+        LOGGER.exception("HTTP %s failed after %.2fs: url=%s", method.upper(), elapsed, url)
+        raise
+
+    elapsed = time.monotonic() - started_at
+    LOGGER.info("HTTP %s end: url=%s status=%s elapsed=%.2fs", method.upper(), url, response.status_code, elapsed)
+    return response
+
+
 def _run_process(
     command: list[str],
     *,
@@ -918,18 +946,47 @@ def _run_process(
     timeout: int | None = None,
     input_text: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        command,
-        cwd=str(cwd) if cwd else None,
-        env=env,
-        input=input_text,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        timeout=timeout,
-        check=False,
+    started_at = time.monotonic()
+    display_command = _display_command(command)
+    LOGGER.info(
+        "Process start: cwd=%s timeout=%s command=%s",
+        str(cwd) if cwd else os.getcwd(),
+        timeout if timeout is not None else "-",
+        display_command,
     )
+    try:
+        result = subprocess.run(
+            command,
+            cwd=str(cwd) if cwd else None,
+            env=env,
+            input=input_text,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        elapsed = time.monotonic() - started_at
+        LOGGER.warning(
+            "Process timeout: cwd=%s timeout=%s elapsed=%.2fs command=%s",
+            str(cwd) if cwd else os.getcwd(),
+            timeout if timeout is not None else "-",
+            elapsed,
+            display_command,
+        )
+        raise
+
+    elapsed = time.monotonic() - started_at
+    LOGGER.info(
+        "Process end: cwd=%s returncode=%s elapsed=%.2fs command=%s",
+        str(cwd) if cwd else os.getcwd(),
+        result.returncode,
+        elapsed,
+        display_command,
+    )
+    return result
 
 
 def _run_with_heartbeat(
@@ -1103,6 +1160,225 @@ def _display_command(command: list[str]) -> str:
     return subprocess.list2cmdline(command) if os.name == "nt" else " ".join(command)
 
 
+def _summarize_command(command: str) -> str:
+    summary = _short_text(command, limit=140)
+    return summary or "command"
+
+
+def _should_skip_codex_stderr(line: str) -> bool:
+    lowered = line.lower()
+    return "shell_snapshot" in lowered and "powershell" in lowered
+
+
+def _describe_codex_event(event: dict[str, Any]) -> tuple[str, str] | None:
+    event_type = str(event.get("type", "")).strip()
+    if event_type == "thread.started":
+        return None
+    if event_type == "turn.started":
+        return ("codex_turn", "Codex is planning the task.")
+    if event_type == "turn.completed":
+        usage = event.get("usage") or {}
+        output_tokens = usage.get("output_tokens")
+        detail = f" output_tokens={output_tokens}" if output_tokens is not None else ""
+        return ("codex_turn", f"Codex finished a response turn.{detail}".strip())
+
+    item = event.get("item")
+    if not isinstance(item, dict):
+        return None
+
+    item_type = str(item.get("type", "")).strip()
+    status = str(item.get("status", "")).strip()
+    if item_type == "reasoning":
+        return None
+    if item_type == "agent_message":
+        text = _short_text(str(item.get("text", "")).strip())
+        return ("codex_message", f"Codex: {text}") if text else None
+    if item_type == "command_execution":
+        command = _summarize_command(str(item.get("command", "")).strip())
+        if event_type == "item.started" or status == "in_progress":
+            return ("codex_command", f"Command started: {command}")
+        if event_type == "item.completed" or status == "completed":
+            exit_code = item.get("exit_code")
+            suffix = f" exit={exit_code}" if exit_code is not None else ""
+            return ("codex_command", f"Command completed:{suffix} {command}".strip())
+        return None
+    if item_type == "file_change":
+        changes = item.get("changes")
+        if isinstance(changes, list):
+            rendered = []
+            for change in changes[:6]:
+                if not isinstance(change, dict):
+                    continue
+                path_text = str(change.get("path", "")).strip()
+                if not path_text:
+                    continue
+                kind = str(change.get("kind", "")).strip() or "update"
+                rendered.append(f"{Path(path_text).name}({kind})")
+            if rendered:
+                return ("codex_file_change", "Files changed: " + ", ".join(rendered))
+        return ("codex_file_change", "Files changed.")
+    return None
+
+
+def _stream_reader(stream_name: str, pipe: Any, sink: list[str], output_queue: queue.Queue[tuple[str, str | None]]) -> None:
+    try:
+        for line in iter(pipe.readline, ""):
+            sink.append(line)
+            output_queue.put((stream_name, line))
+    finally:
+        try:
+            pipe.close()
+        except Exception:  # pragma: no cover - defensive cleanup
+            pass
+        output_queue.put((stream_name, None))
+
+
+def _run_codex_command(
+    command: list[str],
+    *,
+    cwd: Path,
+    timeout: int,
+    input_text: str,
+    reporter: Any = None,
+) -> dict[str, Any]:
+    started_at = time.monotonic()
+    display_command = _display_command(command)
+    LOGGER.info("Codex process start: cwd=%s timeout=%s command=%s", str(cwd), timeout, display_command)
+    process = subprocess.Popen(
+        command,
+        cwd=str(cwd),
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+
+    if process.stdin is not None:
+        process.stdin.write(input_text)
+        process.stdin.close()
+
+    stdout_lines: list[str] = []
+    stderr_lines: list[str] = []
+    activity_lines: list[str] = []
+    output_queue: queue.Queue[tuple[str, str | None]] = queue.Queue()
+    last_agent_message = ""
+    last_progress_message = ""
+    progress_event_count = 0
+
+    readers = [
+        threading.Thread(
+            target=_stream_reader,
+            args=("stdout", process.stdout, stdout_lines, output_queue),
+            name="codex-stdout-reader",
+            daemon=True,
+        ),
+        threading.Thread(
+            target=_stream_reader,
+            args=("stderr", process.stderr, stderr_lines, output_queue),
+            name="codex-stderr-reader",
+            daemon=True,
+        ),
+    ]
+    for reader in readers:
+        reader.start()
+
+    eof_count = 0
+    timed_out = False
+    while eof_count < 2:
+        remaining = timeout - (time.monotonic() - started_at)
+        if remaining <= 0:
+            timed_out = True
+            process.kill()
+            LOGGER.warning("Codex process timeout after %.2fs: cwd=%s command=%s", time.monotonic() - started_at, str(cwd), display_command)
+            break
+
+        try:
+            stream_name, line = output_queue.get(timeout=min(0.25, max(remaining, 0.01)))
+        except queue.Empty:
+            if process.poll() is not None and not any(reader.is_alive() for reader in readers):
+                break
+            continue
+
+        if line is None:
+            eof_count += 1
+            continue
+
+        stripped = line.rstrip("\r\n")
+        if stream_name == "stdout":
+            try:
+                event = json.loads(stripped)
+            except json.JSONDecodeError:
+                message = _short_text(stripped)
+                if message:
+                    activity_lines.append(message)
+                    last_progress_message = message
+                    progress_event_count += 1
+                    LOGGER.info("Codex stdout: %s", message)
+                    if reporter:
+                        reporter("codex_output", message)
+                continue
+
+            LOGGER.info("Codex event: %s", _short_text(stripped, limit=240))
+            item = event.get("item")
+            if isinstance(item, dict) and str(item.get("type", "")).strip() == "agent_message":
+                last_agent_message = str(item.get("text", "")).strip()
+            described = _describe_codex_event(event)
+            if described is None:
+                continue
+            phase, message = described
+            activity_lines.append(message)
+            last_progress_message = message
+            progress_event_count += 1
+            if reporter:
+                reporter(phase, message)
+        else:
+            if _should_skip_codex_stderr(stripped):
+                LOGGER.info("Codex stderr(skip): %s", stripped)
+                continue
+            message = _short_text(stripped, limit=220)
+            if not message:
+                continue
+            LOGGER.warning("Codex stderr: %s", message)
+            activity_lines.append(f"[stderr] {message}")
+            last_progress_message = message
+
+    try:
+        returncode = process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        returncode = process.wait(timeout=5)
+
+    for reader in readers:
+        reader.join(timeout=1)
+
+    combined = _combined_output("".join(stdout_lines), "".join(stderr_lines))
+    activity_log = "\n".join(activity_lines)
+    activity_log, activity_log_truncated = _truncate_text(activity_log or combined, MAX_OUTPUT_CHARS)
+    elapsed = int(time.monotonic() - started_at)
+    LOGGER.info(
+        "Codex process end: cwd=%s returncode=%s timed_out=%s elapsed=%ss command=%s",
+        str(cwd),
+        None if timed_out else returncode,
+        timed_out,
+        elapsed,
+        display_command,
+    )
+    return {
+        "returncode": None if timed_out else returncode,
+        "timed_out": timed_out,
+        "elapsed_seconds": elapsed,
+        "stdout": "".join(stdout_lines),
+        "stderr": "".join(stderr_lines),
+        "activity_log": activity_log,
+        "activity_log_truncated": activity_log_truncated,
+        "last_agent_message": last_agent_message,
+        "last_progress_message": last_progress_message,
+        "progress_event_count": progress_event_count,
+    }
+
+
 def _build_codex_prompt(payload: dict[str, Any], repo_path: Path) -> str:
     acceptance = str(payload.get("acceptance_criteria", "")).strip() or "별도 수용 기준 없음"
     checklist = str(payload.get("commit_checklist", "")).strip() or "별도 체크리스트 없음"
@@ -1195,13 +1471,14 @@ def _run_codex_edit(repo_path: Path, payload: dict[str, Any], reporter: Any = No
             command.extend(["-c", f'model_reasoning_effort="{codex_settings["resolved_reasoning_effort"]}"'])
         command.extend(
             [
-            "--output-schema",
-            str(schema_path),
-            "-o",
-            str(output_path),
-            "--color",
-            "never",
-            "-",
+                "--json",
+                "--output-schema",
+                str(schema_path),
+                "--output-last-message",
+                str(output_path),
+                "--color",
+                "never",
+                "-",
             ]
         )
         if reporter:
@@ -1211,13 +1488,16 @@ def _run_codex_edit(repo_path: Path, payload: dict[str, Any], reporter: Any = No
                 f"model={codex_settings['resolved_model'] or 'CLI default'}, "
                 f"reasoning={codex_settings['resolved_reasoning_effort'] or 'CLI default'}",
             )
-        result, elapsed_seconds = _run_with_heartbeat(
-            lambda: _run_process(command, cwd=repo_path, timeout=CODEX_TIMEOUT_SECONDS, input_text=prompt),
+        result = _run_codex_command(
+            command,
+            cwd=repo_path,
+            timeout=CODEX_TIMEOUT_SECONDS,
+            input_text=prompt,
             reporter=reporter,
-            phase="codex_running",
-            label="Codex CLI",
         )
         final_message = output_path.read_text(encoding="utf-8") if output_path.exists() else ""
+        if not final_message.strip():
+            final_message = str(result.get("last_agent_message", "")).strip()
         parsed: dict[str, Any] = {}
         if final_message.strip():
             try:
@@ -1225,8 +1505,8 @@ def _run_codex_edit(repo_path: Path, payload: dict[str, Any], reporter: Any = No
             except json.JSONDecodeError:
                 parsed = {}
 
-    combined = _combined_output(result.stdout, result.stderr)
-    output_tail, output_truncated = _truncate_text(combined, MAX_OUTPUT_CHARS)
+    output_tail = str(result.get("activity_log", "")).strip()
+    output_truncated = bool(result.get("activity_log_truncated", False))
     if reporter:
         reporter("codex_end", f"Codex CLI 종료(returncode={result.returncode}, elapsed={elapsed_seconds}초)")
 
@@ -1240,6 +1520,95 @@ def _run_codex_edit(repo_path: Path, payload: dict[str, Any], reporter: Any = No
         "output_truncated": output_truncated,
         **codex_settings,
     }
+
+
+def _run_codex_edit_stream(repo_path: Path, payload: dict[str, Any], reporter: Any = None) -> dict[str, Any]:
+    launcher = _find_codex_launcher()
+    prompt = _build_codex_prompt(payload, repo_path)
+    codex_settings = _resolve_codex_execution_settings(payload)
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="codex-run-", dir=DATA_DIR) as temp_dir_name:
+        temp_dir = Path(temp_dir_name)
+        schema_path = temp_dir / "output-schema.json"
+        output_path = temp_dir / "last-message.json"
+        schema_path.write_text(json.dumps(_codex_output_schema(), indent=2), encoding="utf-8")
+
+        command = [
+            *launcher,
+            "exec",
+            "-c",
+            'approval_policy="never"',
+            "-s",
+            "workspace-write",
+        ]
+        if codex_settings["resolved_model"]:
+            command.extend(["-m", codex_settings["resolved_model"]])
+        if codex_settings["resolved_reasoning_effort"]:
+            command.extend(["-c", f'model_reasoning_effort="{codex_settings["resolved_reasoning_effort"]}"'])
+        command.extend(
+            [
+                "--json",
+                "--output-schema",
+                str(schema_path),
+                "--output-last-message",
+                str(output_path),
+                "--color",
+                "never",
+                "-",
+            ]
+        )
+        if reporter:
+            reporter(
+                "codex_start",
+                "Codex CLI 실행 시작: "
+                f"model={codex_settings['resolved_model'] or 'CLI default'}, "
+                f"reasoning={codex_settings['resolved_reasoning_effort'] or 'CLI default'}",
+            )
+
+        result = _run_codex_command(
+            command,
+            cwd=repo_path,
+            timeout=CODEX_TIMEOUT_SECONDS,
+            input_text=prompt,
+            reporter=reporter,
+        )
+        final_message = output_path.read_text(encoding="utf-8") if output_path.exists() else ""
+        if not final_message.strip():
+            final_message = str(result.get("last_agent_message", "")).strip()
+        parsed: dict[str, Any] = {}
+        if final_message.strip():
+            try:
+                parsed = json.loads(final_message)
+            except json.JSONDecodeError:
+                parsed = {}
+
+    output_tail = str(result.get("activity_log", "")).strip()
+    output_truncated = bool(result.get("activity_log_truncated", False))
+    if result["timed_out"] and reporter:
+        timeout_message = f"Codex CLI timeout({CODEX_TIMEOUT_SECONDS}초)"
+        last_progress = str(result.get("last_progress_message", "")).strip()
+        if last_progress:
+            timeout_message += f" - last progress: {last_progress}"
+        reporter("codex_timeout", timeout_message)
+    if reporter:
+        reporter("codex_end", f"Codex CLI 종료(returncode={result['returncode']}, elapsed={result['elapsed_seconds']}초)")
+
+    return {
+        "returncode": result["returncode"],
+        "timed_out": bool(result["timed_out"]),
+        "elapsed_seconds": result["elapsed_seconds"],
+        "command": _display_command(command),
+        "final_message": parsed,
+        "raw_final_message": final_message,
+        "output_tail": output_tail,
+        "output_truncated": output_truncated,
+        "last_progress_message": str(result.get("last_progress_message", "")).strip(),
+        "progress_event_count": int(result.get("progress_event_count", 0) or 0),
+        **codex_settings,
+    }
+
+
+_run_codex_edit = _run_codex_edit_stream
 
 
 def _stage_changes(repo_path: Path) -> None:
@@ -1266,6 +1635,18 @@ def _test_changes(repo_path: Path, command: str, reporter: Any = None) -> dict[s
     output = _combined_output(result.stdout, result.stderr)
     output, truncated = _truncate_text(output, MAX_OUTPUT_CHARS)
     return {"returncode": result.returncode, "output": output, "output_truncated": truncated, "elapsed_seconds": elapsed_seconds}
+
+
+def _test_changes_plain(repo_path: Path, command: str, reporter: Any = None) -> dict[str, Any]:
+    started_at = time.monotonic()
+    result = _run_shell_command(command, cwd=repo_path, timeout=TEST_TIMEOUT_SECONDS)
+    elapsed_seconds = int(time.monotonic() - started_at)
+    output = _combined_output(result.stdout, result.stderr)
+    output, truncated = _truncate_text(output, MAX_OUTPUT_CHARS)
+    return {"returncode": result.returncode, "output": output, "output_truncated": truncated, "elapsed_seconds": elapsed_seconds}
+
+
+_test_changes = _test_changes_plain
 
 
 def _commit_changes(repo_path: Path, commit_message: str, identity: dict[str, str]) -> dict[str, Any]:
@@ -1333,6 +1714,8 @@ def _execute_coding_workflow(repo_path: Path, github_config: GithubConfig, paylo
     if reporter:
         reporter("branch_prepare", f"작업 브랜치 준비: {branch_name}")
     branch_info = _prepare_branch(repo_path, github_config.base_branch, branch_name)
+    if reporter:
+        reporter("branch_ready", f"Branch ready: {branch_info['active_branch']}")
     start_sha = branch_info["head_sha"]
     codex_result = _run_codex_edit(repo_path, {**payload, "branch_name": branch_name}, reporter=reporter)
 
@@ -1340,6 +1723,8 @@ def _execute_coding_workflow(repo_path: Path, github_config: GithubConfig, paylo
         reporter("stage_changes", "Codex 변경을 stage 하고 diff를 수집합니다.")
     _stage_changes(repo_path)
     processed_files, staged_diff, staged_diff_truncated = _collect_staged_changes(repo_path)
+    if reporter:
+        reporter("stage_ready", f"Stage ready: {len(processed_files)} file(s)")
     final_message = codex_result["final_message"] if isinstance(codex_result["final_message"], dict) else {}
 
     response: dict[str, Any] = {
@@ -1361,6 +1746,7 @@ def _execute_coding_workflow(repo_path: Path, github_config: GithubConfig, paylo
         "resolved_reasoning_effort": codex_result["resolved_reasoning_effort"],
         "codex_default_model": codex_result["codex_default_model"],
         "codex_default_reasoning_effort": codex_result["codex_default_reasoning_effort"],
+        "codex_timed_out": codex_result["timed_out"],
         "model_intent": str(final_message.get("intent_summary", "")).strip(),
         "implementation_summary": str(final_message.get("implementation_summary", "")).strip(),
         "validation_summary": str(final_message.get("validation_summary", "")).strip(),
@@ -1371,6 +1757,8 @@ def _execute_coding_workflow(repo_path: Path, github_config: GithubConfig, paylo
         "codex_command": codex_result["command"],
         "codex_returncode": codex_result["returncode"],
         "codex_elapsed_seconds": codex_result["elapsed_seconds"],
+        "codex_last_progress_message": codex_result["last_progress_message"],
+        "codex_progress_event_count": codex_result["progress_event_count"],
         "execution_log_tail": codex_result["output_tail"],
         "execution_log_truncated": codex_result["output_truncated"],
         "test_command": str(payload.get("test_command", "")).strip(),
@@ -1384,6 +1772,11 @@ def _execute_coding_workflow(repo_path: Path, github_config: GithubConfig, paylo
         "git_author_name": "",
         "git_author_email": "",
     }
+
+    if codex_result["timed_out"]:
+        response["status"] = "codex_timeout"
+        response["message"] = "Codex execution timed out. Check the last progress message and execution log."
+        return response
 
     if codex_result["returncode"] != 0:
         response["status"] = "codex_failed"
@@ -1602,7 +1995,8 @@ def create_app() -> Flask:
             return jsonify({"error": "jira_config_not_found"}), 400
 
         config = JiraConfig(**jira_payload)
-        response = requests.post(
+        response = _request_with_logging(
+            "POST",
             f"{config.base_url}/rest/api/3/search/jql",
             headers=_jira_headers(config),
             json={"jql": config.jql, "maxResults": 20, "fields": ["summary", "status"]},
@@ -1653,12 +2047,14 @@ def create_app() -> Flask:
             return jsonify({"error": "github_config_not_found"}), 400
 
         config, local_repo_path = _load_repo_context(github_payload)
-        repo_response = requests.get(
+        repo_response = _request_with_logging(
+            "GET",
             f"https://api.github.com/repos/{config.repo_owner}/{config.repo_name}",
             headers=_github_headers(config),
             timeout=DEFAULT_TIMEOUT,
         )
-        branch_response = requests.get(
+        branch_response = _request_with_logging(
+            "GET",
             f"https://api.github.com/repos/{config.repo_owner}/{config.repo_name}/branches/{config.base_branch}",
             headers=_github_headers(config),
             timeout=DEFAULT_TIMEOUT,

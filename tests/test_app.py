@@ -396,3 +396,60 @@ def test_repo_dirty_entries_ignores_internal_workflow_run_files(monkeypatch, tmp
 
     dirty_entries = main_module._repo_dirty_entries(repo_path)
     assert dirty_entries == []
+
+
+def test_describe_codex_event_filters_reasoning_and_formats_command() -> None:
+    assert main_module._describe_codex_event({"type": "item.completed", "item": {"type": "reasoning", "text": "hidden"}}) is None
+
+    described = main_module._describe_codex_event(
+        {
+            "type": "item.completed",
+            "item": {
+                "type": "command_execution",
+                "status": "completed",
+                "command": "python -m pytest -q",
+                "exit_code": 0,
+            },
+        }
+    )
+
+    assert described == ("codex_command", "Command completed: exit=0 python -m pytest -q")
+
+
+def test_run_codex_edit_uses_streamed_progress(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(main_module, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(main_module, "_find_codex_launcher", lambda: ["codex"])
+
+    def fake_run_codex_command(command, **kwargs):  # noqa: ANN001
+        assert "--json" in command
+        assert "--output-last-message" in command
+        return {
+            "returncode": 0,
+            "timed_out": False,
+            "elapsed_seconds": 12,
+            "stdout": "",
+            "stderr": "",
+            "activity_log": "Codex: planning\nCommand started: python -m pytest -q",
+            "activity_log_truncated": False,
+            "last_agent_message": json.dumps(
+                {
+                    "intent_summary": "intent",
+                    "implementation_summary": "implementation",
+                    "validation_summary": "validation",
+                    "risks": [],
+                }
+            ),
+            "last_progress_message": "Command started: python -m pytest -q",
+            "progress_event_count": 2,
+        }
+
+    monkeypatch.setattr(main_module, "_run_codex_command", fake_run_codex_command)
+
+    result = main_module._run_codex_edit(tmp_path, {"issue_key": "DEMO-30", "issue_summary": "stream"})
+    assert result["returncode"] == 0
+    assert result["timed_out"] is False
+    assert result["elapsed_seconds"] == 12
+    assert result["progress_event_count"] == 2
+    assert result["last_progress_message"] == "Command started: python -m pytest -q"
+    assert "planning" in result["output_tail"]
+    assert result["final_message"]["intent_summary"] == "intent"

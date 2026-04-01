@@ -38,6 +38,30 @@ const workflowState = {
   activeRunId: null,
 };
 
+const HIDDEN_WORKFLOW_PHASES = new Set(["codex_running", "test_running"]);
+const WORKFLOW_PHASE_LABELS = {
+  queued: "Queued",
+  running: "Running",
+  completed: "Completed",
+  failed: "Failed",
+  branch_prepare: "Branch Prepare",
+  branch_ready: "Branch Ready",
+  codex_start: "Codex Start",
+  codex_turn: "Codex Turn",
+  codex_message: "Codex Message",
+  codex_command: "Command",
+  codex_file_change: "File Change",
+  codex_output: "Output",
+  codex_timeout: "Codex Timeout",
+  codex_end: "Codex End",
+  stage_changes: "Stage Collect",
+  stage_ready: "Stage Ready",
+  test_start: "Test Start",
+  test_end: "Test End",
+  commit_start: "Commit Start",
+  commit_end: "Commit End",
+};
+
 function collectConfig() {
   return {
     jira_base_url: $("#jira_base_url").val().trim(),
@@ -581,17 +605,23 @@ function setSummaryCard(title, value, detail) {
 }
 
 function eventLogText(events) {
-  const items = events || [];
+  const items = (events || [])
+    .filter((event) => !HIDDEN_WORKFLOW_PHASES.has(String(event.phase || "")))
+    .slice(-60);
   if (!items.length) {
     return "실행 로그 없음";
   }
   return items
-    .map((event) => `[${event.timestamp}] ${event.phase}: ${event.message}`)
+    .map((event) => {
+      const phase = String(event.phase || "");
+      const label = WORKFLOW_PHASE_LABELS[phase] || phase || "Log";
+      return `[${event.timestamp}] ${label}: ${event.message}`;
+    })
     .join("\n");
 }
 
 function latestWorkflowEvent(data) {
-  const events = (data && data.events) || [];
+  const events = ((data && data.events) || []).filter((event) => !HIDDEN_WORKFLOW_PHASES.has(String(event.phase || "")));
   return events.length ? events[events.length - 1] : null;
 }
 
@@ -669,6 +699,7 @@ function renderAutomationResult(data) {
     setSummaryCard("브랜치", payload.branch_name || "-", payload.current_branch ? `현재 브랜치: ${payload.current_branch}` : ""),
     setSummaryCard("커밋", payload.commit_sha || "-", payload.commit_message || ""),
     setSummaryCard("테스트", payload.test_returncode == null ? "-" : String(payload.test_returncode), payload.test_command || ""),
+    setSummaryCard("Recent Progress", payload.codex_last_progress_message || "-", payload.codex_progress_event_count ? `events: ${payload.codex_progress_event_count}` : ""),
   ].join("");
 
   $("#automation_overview").html(cards);

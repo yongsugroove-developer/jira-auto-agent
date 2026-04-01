@@ -370,6 +370,11 @@ tbody tr:hover {
   min-height: 280px;
 }
 
+.result-scroll {
+  max-height: 320px;
+  overflow: auto;
+}
+
 .result-callout {
   display: flex;
   flex-wrap: wrap;
