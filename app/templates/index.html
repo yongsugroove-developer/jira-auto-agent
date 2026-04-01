@@ -80,6 +80,15 @@
         <label class="wide">Issue Summary<input id="issue_summary" type="text" placeholder="브랜치 생성 API 추가"></label>
         <label>Branch Name<input id="branch_name" type="text" placeholder="feature/DEMO-102-branch-create-api"></label>
         <label class="wide">Commit Message<input id="commit_message" type="text" placeholder="DEMO-102: 브랜치 생성 API 추가"></label>
+        <label>Codex Model<input id="codex_model" type="text" placeholder="비우면 로컬 기본값 사용{% if codex_defaults.model %} ({{ codex_defaults.model }}){% endif %}"></label>
+        <label>Reasoning Effort
+          <select id="codex_reasoning_effort">
+            <option value="">로컬 기본값 사용{% if codex_defaults.model_reasoning_effort %} ({{ codex_defaults.model_reasoning_effort }}){% endif %}</option>
+            {% for effort in valid_reasoning_efforts %}
+            <option value="{{ effort }}">{{ effort }}</option>
+            {% endfor %}
+          </select>
+        </label>
         <label class="wide">작업 지시 상세<textarea id="work_instruction" rows="4" placeholder="변경할 기능, 유지해야 할 제약, 수정 금지 범위를 구체적으로 적어 주세요."></textarea></label>
         <label class="wide">수용 기준<textarea id="acceptance_criteria" rows="4" placeholder="완료 조건이 있으면 줄 단위로 적어 주세요."></textarea></label>
         <label class="wide">로컬 테스트 명령<input id="test_command" type="text" placeholder="PYTHONPATH=. pytest -q"></label>

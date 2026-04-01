@@ -30,7 +30,8 @@ CODEX_TIMEOUT_SECONDS = 20 * 60
 TEST_TIMEOUT_SECONDS = 10 * 60
 MAX_DIFF_CHARS = 60000
 MAX_OUTPUT_CHARS = 12000
-SETUP_GUIDE_VERSION = 2
+SETUP_GUIDE_VERSION = 3
+VALID_REASONING_EFFORTS = ("low", "medium", "high", "xhigh")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 LOGGER = logging.getLogger(__name__)
@@ -47,6 +48,8 @@ FIELD_GUIDES: dict[str, dict[str, str]] = {
     "local_repo_path": {"label": "Local Repo Path", "guide_section": "local_repo", "guide_step_id": "local-repo-path"},
     "branch_name": {"label": "Branch Name", "guide_section": "automation", "guide_step_id": "automation-branch-commit"},
     "commit_message": {"label": "Commit Message", "guide_section": "automation", "guide_step_id": "automation-branch-commit"},
+    "codex_model": {"label": "Codex Model", "guide_section": "automation", "guide_step_id": "automation-codex-model"},
+    "codex_reasoning_effort": {"label": "Reasoning Effort", "guide_section": "automation", "guide_step_id": "automation-codex-model"},
     "work_instruction": {"label": "작업 지시 상세", "guide_section": "automation", "guide_step_id": "automation-work-instruction"},
     "acceptance_criteria": {"label": "수용 기준", "guide_section": "automation", "guide_step_id": "automation-acceptance-criteria"},
     "test_command": {"label": "로컬 테스트 명령", "guide_section": "automation", "guide_step_id": "automation-test-command"},
@@ -217,8 +220,19 @@ def _setup_guide_sections() -> list[dict[str, Any]]:
         {
             "id": "automation",
             "title": "자동화 입력 준비",
-            "summary": "Codex 자동 작업과 자동 커밋에 필요한 브랜치, 지시 사항, 테스트 명령, 커밋 작성자 정보를 준비합니다.",
-            "fields": ["branch_name", "commit_message", "work_instruction", "acceptance_criteria", "test_command", "commit_checklist", "git_author_name", "git_author_email"],
+            "summary": "Codex 자동 작업과 자동 커밋에 필요한 브랜치, 모델, 지시 사항, 테스트 명령, 커밋 작성자 정보를 준비합니다.",
+            "fields": [
+                "branch_name",
+                "commit_message",
+                "codex_model",
+                "codex_reasoning_effort",
+                "work_instruction",
+                "acceptance_criteria",
+                "test_command",
+                "commit_checklist",
+                "git_author_name",
+                "git_author_email",
+            ],
             "steps": [
                 _guide_step(
                     "automation-branch-commit",
@@ -232,6 +246,19 @@ def _setup_guide_sections() -> list[dict[str, Any]]:
                     "브랜치명은 기본 브랜치와 같으면 안 되고, 커밋 메시지는 팀 규칙이 있다면 그 규칙을 우선합니다.",
                     "branch: feature/DEMO-102-branch-create-api / commit: DEMO-102: 브랜치 생성 API 추가",
                     ["branch_name", "commit_message"],
+                ),
+                _guide_step(
+                    "automation-codex-model",
+                    "Codex 모델과 추론 강도 선택",
+                    "작업별로 사용할 모델과 추론 강도를 정하거나 로컬 Codex 기본값을 그대로 사용할 수 있습니다.",
+                    [
+                        "기본값은 로컬 ~/.codex/config.toml 에 설정된 model 과 model_reasoning_effort 를 따릅니다.",
+                        "특정 작업만 다른 모델로 실행하려면 Codex Model 칸에 모델명을 직접 입력합니다.",
+                        "Reasoning Effort 는 low, medium, high, xhigh 중 하나를 선택하고, 비우면 로컬 기본값을 사용합니다.",
+                    ],
+                    "모델과 추론 강도를 비우면 서버가 로컬 Codex 기본값을 그대로 사용합니다.",
+                    "model: gpt-5.4 / reasoning: xhigh",
+                    ["codex_model", "codex_reasoning_effort"],
                 ),
                 _guide_step(
                     "automation-work-instruction",
@@ -491,6 +518,57 @@ def _build_requested_information(fields: list[str]) -> list[dict[str, str]]:
     return requested_information
 
 
+def _codex_config_path() -> Path:
+    codex_home = str(os.getenv("CODEX_HOME", "")).strip()
+    if codex_home:
+        return Path(codex_home).expanduser() / "config.toml"
+    return Path.home() / ".codex" / "config.toml"
+
+
+def _load_codex_cli_defaults() -> dict[str, str]:
+    config_path = _codex_config_path()
+    defaults = {"model": "", "model_reasoning_effort": ""}
+    if not config_path.exists():
+        return defaults
+
+    try:
+        config_text = config_path.read_text(encoding="utf-8")
+    except OSError:
+        LOGGER.warning("Failed to read Codex config: %s", config_path)
+        return defaults
+
+    patterns = {
+        "model": r'^\s*model\s*=\s*["\']([^"\']+)["\']\s*$',
+        "model_reasoning_effort": r'^\s*model_reasoning_effort\s*=\s*["\']([^"\']+)["\']\s*$',
+    }
+    for key, pattern in patterns.items():
+        match = re.search(pattern, config_text, flags=re.MULTILINE)
+        if match:
+            defaults[key] = match.group(1).strip()
+
+    normalized_effort = defaults["model_reasoning_effort"].lower()
+    defaults["model_reasoning_effort"] = normalized_effort if normalized_effort in VALID_REASONING_EFFORTS else ""
+    return defaults
+
+
+def _normalize_reasoning_effort(value: Any) -> str:
+    return str(value or "").strip().lower()
+
+
+def _resolve_codex_execution_settings(payload: dict[str, Any]) -> dict[str, str]:
+    defaults = _load_codex_cli_defaults()
+    requested_model = str(payload.get("codex_model", "")).strip()
+    requested_reasoning_effort = _normalize_reasoning_effort(payload.get("codex_reasoning_effort"))
+    return {
+        "requested_model": requested_model,
+        "requested_reasoning_effort": requested_reasoning_effort,
+        "resolved_model": requested_model or defaults["model"],
+        "resolved_reasoning_effort": requested_reasoning_effort or defaults["model_reasoning_effort"],
+        "codex_default_model": defaults["model"],
+        "codex_default_reasoning_effort": defaults["model_reasoning_effort"],
+    }
+
+
 def _to_jira_config(payload: dict[str, Any]) -> JiraConfig:
     return JiraConfig(
         base_url=str(payload["jira_base_url"]).strip().rstrip("/"),
@@ -745,6 +823,7 @@ def _codex_output_schema() -> dict[str, Any]:
 def _run_codex_edit(repo_path: Path, payload: dict[str, Any], reporter: Any = None) -> dict[str, Any]:
     launcher = _find_codex_launcher()
     prompt = _build_codex_prompt(payload, repo_path)
+    codex_settings = _resolve_codex_execution_settings(payload)
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="codex-run-", dir=DATA_DIR) as temp_dir_name:
         temp_dir = Path(temp_dir_name)
@@ -759,6 +838,13 @@ def _run_codex_edit(repo_path: Path, payload: dict[str, Any], reporter: Any = No
             'approval_policy="never"',
             "-s",
             "workspace-write",
+        ]
+        if codex_settings["resolved_model"]:
+            command.extend(["-m", codex_settings["resolved_model"]])
+        if codex_settings["resolved_reasoning_effort"]:
+            command.extend(["-c", f'model_reasoning_effort="{codex_settings["resolved_reasoning_effort"]}"'])
+        command.extend(
+            [
             "--output-schema",
             str(schema_path),
             "-o",
@@ -766,9 +852,15 @@ def _run_codex_edit(repo_path: Path, payload: dict[str, Any], reporter: Any = No
             "--color",
             "never",
             "-",
-        ]
+            ]
+        )
         if reporter:
-            reporter("codex_start", f"Codex CLI 실행 시작: {_display_command(command)}")
+            reporter(
+                "codex_start",
+                "Codex CLI 실행 시작: "
+                f"model={codex_settings['resolved_model'] or 'CLI default'}, "
+                f"reasoning={codex_settings['resolved_reasoning_effort'] or 'CLI default'}",
+            )
         result = _run_process(command, cwd=repo_path, timeout=CODEX_TIMEOUT_SECONDS, input_text=prompt)
         final_message = output_path.read_text(encoding="utf-8") if output_path.exists() else ""
         parsed: dict[str, Any] = {}
@@ -790,6 +882,7 @@ def _run_codex_edit(repo_path: Path, payload: dict[str, Any], reporter: Any = No
         "raw_final_message": final_message,
         "output_tail": output_tail,
         "output_truncated": output_truncated,
+        **codex_settings,
     }
 
 
@@ -901,6 +994,12 @@ def _execute_coding_workflow(repo_path: Path, github_config: GithubConfig, paylo
         "end_sha": _git_output(repo_path, "rev-parse", "HEAD"),
         "commit_message": str(payload.get("commit_message", "")).strip(),
         "auto_commit": bool(payload.get("allow_auto_commit", True)),
+        "requested_model": codex_result["requested_model"],
+        "requested_reasoning_effort": codex_result["requested_reasoning_effort"],
+        "resolved_model": codex_result["resolved_model"],
+        "resolved_reasoning_effort": codex_result["resolved_reasoning_effort"],
+        "codex_default_model": codex_result["codex_default_model"],
+        "codex_default_reasoning_effort": codex_result["codex_default_reasoning_effort"],
         "model_intent": str(final_message.get("intent_summary", "")).strip(),
         "implementation_summary": str(final_message.get("implementation_summary", "")).strip(),
         "validation_summary": str(final_message.get("validation_summary", "")).strip(),
@@ -1036,7 +1135,11 @@ def create_app() -> Flask:
 
     @app.get("/")
     def index() -> str:
-        return render_template("index.html")
+        return render_template(
+            "index.html",
+            codex_defaults=_load_codex_cli_defaults(),
+            valid_reasoning_efforts=VALID_REASONING_EFFORTS,
+        )
 
     @app.get("/api/setup-guide")
     def setup_guide() -> Any:
@@ -1175,6 +1278,7 @@ def create_app() -> Flask:
         except FileNotFoundError as exc:
             codex_launcher = str(exc)
             codex_available = False
+        codex_defaults = _load_codex_cli_defaults()
 
         return jsonify(
             {
@@ -1187,6 +1291,8 @@ def create_app() -> Flask:
                 "dirty_entries": dirty_entries,
                 "codex_available": codex_available,
                 "codex_launcher": codex_launcher,
+                "codex_default_model": codex_defaults["model"],
+                "codex_default_reasoning_effort": codex_defaults["model_reasoning_effort"],
                 "git_user_name": git_identity["name"],
                 "git_user_email": git_identity["email"],
                 "git_identity_missing_fields": missing_identity,
@@ -1200,6 +1306,7 @@ def create_app() -> Flask:
         issue_summary = str(payload.get("issue_summary", "")).strip()
         if not issue_key or not issue_summary:
             return jsonify({"error": "issue_key_and_summary_required"}), 400
+        codex_defaults = _load_codex_cli_defaults()
 
         return jsonify(
             {
@@ -1209,6 +1316,9 @@ def create_app() -> Flask:
                 "commit_message_template": f"{issue_key}: {issue_summary}",
                 "token_budget": DEFAULT_TOKEN_BUDGET,
                 "approval_mode": "auto-commit-after-tests",
+                "codex_model_default": codex_defaults["model"],
+                "codex_reasoning_effort_default": codex_defaults["model_reasoning_effort"],
+                "allowed_reasoning_efforts": list(VALID_REASONING_EFFORTS),
                 "requested_information": _build_requested_information(["work_instruction", "test_command", "commit_checklist"]),
             }
         )
@@ -1216,6 +1326,8 @@ def create_app() -> Flask:
     @app.post("/api/workflow/run")
     def run_workflow() -> Any:
         payload = request.get_json(silent=True) or {}
+        payload["codex_model"] = str(payload.get("codex_model", "")).strip()
+        payload["codex_reasoning_effort"] = _normalize_reasoning_effort(payload.get("codex_reasoning_effort"))
         missing = _required_workflow_fields(payload)
         if missing:
             return (
@@ -1225,6 +1337,21 @@ def create_app() -> Flask:
                         "error": "workflow_fields_missing",
                         "fields": missing,
                         "requested_information": _build_requested_information(missing),
+                    }
+                ),
+                400,
+            )
+
+        if payload["codex_reasoning_effort"] and payload["codex_reasoning_effort"] not in VALID_REASONING_EFFORTS:
+            return (
+                jsonify(
+                    {
+                        "ok": False,
+                        "error": "invalid_reasoning_effort",
+                        "fields": ["codex_reasoning_effort"],
+                        "requested_information": _build_requested_information(["codex_reasoning_effort"]),
+                        "allowed_values": list(VALID_REASONING_EFFORTS),
+                        "message": "Reasoning Effort 는 low, medium, high, xhigh 중 하나여야 합니다.",
                     }
                 ),
                 400,

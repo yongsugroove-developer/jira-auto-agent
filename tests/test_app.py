@@ -11,7 +11,7 @@ def test_setup_guide_contains_expected_sections_and_steps() -> None:
 
     data = response.get_json()
     assert data is not None
-    assert data["version"] == 2
+    assert data["version"] == 3
 
     sections = data["sections"]
     assert [section["id"] for section in sections] == ["jira", "github", "local_repo", "automation"]
@@ -20,6 +20,7 @@ def test_setup_guide_contains_expected_sections_and_steps() -> None:
     assert "jira-api-token" in step_ids
     assert "github-base-branch" in step_ids
     assert "local-repo-path" in step_ids
+    assert "automation-codex-model" in step_ids
     assert "automation-test-command" in step_ids
     assert "automation-git-author" in step_ids
 
@@ -56,6 +57,8 @@ def test_index_page_renders_automation_fields() -> None:
     assert 'id="setup_guide_modal"' in html
     assert 'id="guide_tabs"' in html
     assert 'id="run_automation"' in html
+    assert 'id="codex_model"' in html
+    assert 'id="codex_reasoning_effort"' in html
     assert 'id="work_instruction"' in html
     assert 'id="automation_diff"' in html
 
@@ -75,6 +78,9 @@ def test_prepare_workflow_branch_and_requested_information() -> None:
     assert data["branch_name"].startswith("feature/DEMO-123-")
     assert data["token_budget"] == 40000
     assert data["approval_mode"] == "auto-commit-after-tests"
+    assert "codex_model_default" in data
+    assert "codex_reasoning_effort_default" in data
+    assert data["allowed_reasoning_efforts"] == ["low", "medium", "high", "xhigh"]
     requested_fields = [item["field"] for item in data["requested_information"]]
     assert requested_fields == ["work_instruction", "test_command", "commit_checklist"]
 
@@ -93,6 +99,30 @@ def test_run_workflow_missing_fields_include_automation_guide() -> None:
     assert requested["work_instruction"]["guide_section"] == "automation"
     assert requested["work_instruction"]["guide_step_id"] == "automation-work-instruction"
     assert requested["test_command"]["guide_step_id"] == "automation-test-command"
+
+
+def test_run_workflow_rejects_invalid_reasoning_effort() -> None:
+    app = create_app()
+    client = app.test_client()
+
+    response = client.post(
+        "/api/workflow/run",
+        json={
+            "issue_key": "DEMO-9",
+            "issue_summary": "자동화 실행",
+            "branch_name": "feature/DEMO-9-run",
+            "commit_message": "DEMO-9: 자동화 실행",
+            "work_instruction": "버튼 클릭 시 API를 호출한다.",
+            "test_command": "pytest -q",
+            "codex_reasoning_effort": "ultra",
+        },
+    )
+    assert response.status_code == 400
+
+    data = response.get_json()
+    assert data is not None
+    assert data["error"] == "invalid_reasoning_effort"
+    assert data["requested_information"][0]["field"] == "codex_reasoning_effort"
 
 
 def test_run_workflow_returns_stubbed_automation_result(monkeypatch) -> None:
@@ -118,6 +148,12 @@ def test_run_workflow_returns_stubbed_automation_result(monkeypatch) -> None:
             "ok": True,
             "status": "committed",
             "message": "완료",
+            "requested_model": "gpt-5.4",
+            "requested_reasoning_effort": "xhigh",
+            "resolved_model": "gpt-5.4",
+            "resolved_reasoning_effort": "xhigh",
+            "codex_default_model": "gpt-5.4",
+            "codex_default_reasoning_effort": "xhigh",
             "model_intent": "사용자가 버튼 클릭 흐름을 자동화하고 결과를 커밋까지 원함",
             "implementation_summary": "버튼 핸들러와 API 호출 코드를 수정함",
             "validation_summary": "pytest -q 통과",
@@ -154,6 +190,8 @@ def test_run_workflow_returns_stubbed_automation_result(monkeypatch) -> None:
             "commit_message": "DEMO-9: 자동화 실행",
             "work_instruction": "버튼 클릭 시 API를 호출한다.",
             "test_command": "pytest -q",
+            "codex_model": "gpt-5.4",
+            "codex_reasoning_effort": "xhigh",
             "allow_auto_commit": True,
         },
     )
@@ -171,4 +209,6 @@ def test_run_workflow_returns_stubbed_automation_result(monkeypatch) -> None:
     assert status_data is not None
     assert status_data["status"] == "completed"
     assert status_data["result"]["status"] == "committed"
+    assert status_data["result"]["resolved_model"] == "gpt-5.4"
+    assert status_data["result"]["resolved_reasoning_effort"] == "xhigh"
     assert status_data["result"]["processed_files"] == ["app/static/app.js", "app/main.py"]

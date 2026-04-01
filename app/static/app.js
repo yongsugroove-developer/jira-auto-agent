@@ -10,6 +10,8 @@ const FIELD_LABELS = {
   local_repo_path: "Local Repo Path",
   branch_name: "Branch Name",
   commit_message: "Commit Message",
+  codex_model: "Codex Model",
+  codex_reasoning_effort: "Reasoning Effort",
   work_instruction: "작업 지시 상세",
   acceptance_criteria: "수용 기준",
   test_command: "로컬 테스트 명령",
@@ -50,6 +52,8 @@ function collectWorkflow() {
     issue_summary: $("#issue_summary").val().trim(),
     branch_name: $("#branch_name").val().trim(),
     commit_message: $("#commit_message").val().trim(),
+    codex_model: $("#codex_model").val().trim(),
+    codex_reasoning_effort: $("#codex_reasoning_effort").val().trim(),
     work_instruction: $("#work_instruction").val().trim(),
     acceptance_criteria: $("#acceptance_criteria").val().trim(),
     test_command: $("#test_command").val().trim(),
@@ -69,6 +73,8 @@ function requestedInfoForFields(fields) {
   const automationMap = {
     branch_name: { guide_section: "automation", guide_step_id: "automation-branch-commit" },
     commit_message: { guide_section: "automation", guide_step_id: "automation-branch-commit" },
+    codex_model: { guide_section: "automation", guide_step_id: "automation-codex-model" },
+    codex_reasoning_effort: { guide_section: "automation", guide_step_id: "automation-codex-model" },
     work_instruction: { guide_section: "automation", guide_step_id: "automation-work-instruction" },
     acceptance_criteria: { guide_section: "automation", guide_step_id: "automation-acceptance-criteria" },
     test_command: { guide_section: "automation", guide_step_id: "automation-test-command" },
@@ -117,7 +123,15 @@ function fillWorkflow(data) {
   Object.keys(data).forEach((key) => {
     const el = $("#" + key);
     if (el.length) {
-      el.val(data[key]);
+      const currentValue = String(el.val() || "").trim();
+      const nextValue = data[key];
+      if (nextValue == null) {
+        return;
+      }
+      if ((key === "codex_model" || key === "codex_reasoning_effort") && currentValue) {
+        return;
+      }
+      el.val(nextValue);
     }
   });
 }
@@ -513,8 +527,11 @@ function scheduleWorkflowPoll(runId, button) {
 
 function renderAutomationResult(data) {
   const payload = data.result || data.error || data;
+  const modelLabel = payload.resolved_model || payload.requested_model || payload.codex_default_model || "Codex CLI default";
+  const reasoningLabel = payload.resolved_reasoning_effort || payload.requested_reasoning_effort || payload.codex_default_reasoning_effort || "Codex CLI default";
   const cards = [
     setSummaryCard("상태", data.status || payload.status || "-", data.message || payload.message || ""),
+    setSummaryCard("모델", modelLabel, `reasoning: ${reasoningLabel}`),
     setSummaryCard("브랜치", payload.branch_name || "-", payload.current_branch ? `현재 브랜치: ${payload.current_branch}` : ""),
     setSummaryCard("커밋", payload.commit_sha || "-", payload.commit_message || ""),
     setSummaryCard("테스트", payload.test_returncode == null ? "-" : String(payload.test_returncode), payload.test_command || ""),
