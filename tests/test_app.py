@@ -1,5 +1,7 @@
 import json
+import subprocess
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import app.main as main_module
 from app.main import create_app
@@ -372,3 +374,25 @@ def test_stale_workflow_run_is_marked_interrupted(monkeypatch, tmp_path) -> None
     assert data is not None
     assert data["status"] == "failed"
     assert data["error"]["status"] == "workflow_interrupted"
+
+
+def test_repo_dirty_entries_ignores_internal_workflow_run_files(monkeypatch, tmp_path) -> None:
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+    subprocess.run(["git", "init"], cwd=repo_path, check=True, capture_output=True)
+    (repo_path / ".gitignore").write_text("data/workflow-runs/\n", encoding="utf-8")
+    subprocess.run(["git", "add", ".gitignore"], cwd=repo_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-c", "user.name=Tester", "-c", "user.email=tester@example.com", "commit", "-m", "init"],
+        cwd=repo_path,
+        check=True,
+        capture_output=True,
+    )
+
+    workflow_dir = repo_path / "data" / "workflow-runs"
+    workflow_dir.mkdir(parents=True)
+    (workflow_dir / "run.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(main_module, "WORKFLOW_RUNS_DIR", Path(workflow_dir))
+
+    dirty_entries = main_module._repo_dirty_entries(repo_path)
+    assert dirty_entries == []

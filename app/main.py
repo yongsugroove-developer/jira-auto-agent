@@ -1004,9 +1004,29 @@ def _git_optional_output(repo_path: Path, *args: str) -> str:
     return result.stdout.strip()
 
 
+def _repo_internal_runtime_prefixes(repo_path: Path) -> list[str]:
+    try:
+        relative_workflow_dir = WORKFLOW_RUNS_DIR.resolve().relative_to(repo_path.resolve())
+    except ValueError:
+        return []
+
+    normalized = relative_workflow_dir.as_posix().strip("/")
+    if not normalized:
+        return []
+    return [f"{normalized}/", f"{normalized}\\"]
+
+
 def _repo_dirty_entries(repo_path: Path) -> list[str]:
     status = _git_optional_output(repo_path, "status", "--short")
-    return [line for line in status.splitlines() if line.strip()]
+    ignored_prefixes = _repo_internal_runtime_prefixes(repo_path)
+    dirty_entries: list[str] = []
+    for line in status.splitlines():
+        if not line.strip():
+            continue
+        if ignored_prefixes and any(prefix in line for prefix in ignored_prefixes):
+            continue
+        dirty_entries.append(line)
+    return dirty_entries
 
 
 def _branch_exists(repo_path: Path, branch_name: str) -> bool:
