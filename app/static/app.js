@@ -7,6 +7,7 @@ const FIELD_LABELS = {
   github_repo: "GitHub Repo",
   github_base_branch: "Base Branch",
   github_token: "GitHub Token",
+  repo_mappings: "Space Repo Mappings",
   local_repo_path: "Local Repo Path",
   branch_name: "Branch Name",
   commit_message: "Commit Message",
@@ -72,6 +73,7 @@ function collectConfig() {
     github_repo: $("#github_repo").val().trim(),
     github_base_branch: $("#github_base_branch").val().trim(),
     github_token: $("#github_token").val().trim(),
+    repo_mappings: $("#repo_mappings").val().trim(),
     local_repo_path: $("#local_repo_path").val().trim(),
   };
 }
@@ -867,11 +869,13 @@ $(document).ready(function () {
   });
 
   $("#check_repo").on("click", function () {
+    const issue = selectedIssue();
+    const issueKey = issue ? issue.issue_key : $("#issue_key").val().trim();
     $.ajax({
       url: "/api/github/check",
       method: "POST",
       contentType: "application/json",
-      data: JSON.stringify({}),
+      data: JSON.stringify({ issue_key: issueKey }),
     })
       .done((data) => {
         setResult("#workflow_result", data);
