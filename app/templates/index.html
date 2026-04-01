@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Jira-GitHub PoC 콘솔</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+  <script src="https://code.jquery.com/jquery-3.7.1.min.js" integrity="sha256-/JqT3SQfawRcv/BIHPThkBvs0OEvtFFmqPF/lYI/Cxo=" crossorigin="anonymous"></script>
+</head>
+<body>
+  <main class="container">
+    <h1>Jira-GitHub 자동화 PoC</h1>
+    <p class="desc">설정 저장, 백로그 조회, 브랜치/커밋 준비 정보를 Web UI에서 테스트합니다.</p>
+
+    <section class="card">
+      <h2>1. 연결 정보 입력</h2>
+      <div class="grid">
+        <label>Jira Base URL<input id="jira_base_url" type="text" placeholder="https://your-domain.atlassian.net"></label>
+        <label>Jira Email<input id="jira_email" type="email" placeholder="user@example.com"></label>
+        <label>Jira API Token<input id="jira_api_token" type="password" placeholder="Jira API Token"></label>
+        <label>JQL<input id="jira_jql" type="text" placeholder="assignee = currentUser() AND status in (Backlog, 'To Do')"></label>
+        <label>GitHub Owner<input id="github_owner" type="text" placeholder="org-or-user"></label>
+        <label>GitHub Repo<input id="github_repo" type="text" placeholder="repository-name"></label>
+        <label>Base Branch<input id="github_base_branch" type="text" value="main"></label>
+        <label>GitHub Token<input id="github_token" type="password" placeholder="ghp_..."></label>
+        <label class="wide">Local Repo Path<input id="local_repo_path" type="text" placeholder="/workspace/your-repo"></label>
+      </div>
+      <div class="actions">
+        <button id="load_config">저장값 불러오기</button>
+        <button id="validate_config">필수값 검사</button>
+        <button id="save_config">암호화 저장</button>
+      </div>
+      <pre id="config_result" class="result"></pre>
+    </section>
+
+    <section class="card">
+      <h2>2. Jira 백로그 조회</h2>
+      <div class="actions">
+        <label><input id="mock_mode" type="checkbox" checked> Mock 모드 사용</label>
+        <button id="load_backlog">백로그 조회</button>
+      </div>
+      <table>
+        <thead><tr><th>Issue Key</th><th>Summary</th><th>Status</th><th>선택</th></tr></thead>
+        <tbody id="issue_table"></tbody>
+      </table>
+      <pre id="backlog_result" class="result"></pre>
+    </section>
+
+    <section class="card">
+      <h2>3. GitHub/로컬 레포 확인 및 워크플로 준비</h2>
+      <div class="actions">
+        <button id="check_repo">레포 상태 확인</button>
+        <button id="prepare_workflow">선택 이슈로 준비</button>
+      </div>
+      <pre id="workflow_result" class="result"></pre>
+    </section>
+  </main>
+
+  <script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>
