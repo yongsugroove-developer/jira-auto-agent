@@ -8,6 +8,14 @@ const FIELD_LABELS = {
   github_base_branch: "Base Branch",
   github_token: "GitHub Token",
   local_repo_path: "Local Repo Path",
+  branch_name: "Branch Name",
+  commit_message: "Commit Message",
+  work_instruction: "작업 지시 상세",
+  acceptance_criteria: "수용 기준",
+  test_command: "로컬 테스트 명령",
+  commit_checklist: "커밋 체크리스트",
+  git_author_name: "Git Author Name",
+  git_author_email: "Git Author Email",
 };
 
 const guideState = {
@@ -15,6 +23,11 @@ const guideState = {
   guidePromise: null,
   activeSectionId: null,
   activeStepId: null,
+};
+
+const workflowState = {
+  pollTimer: null,
+  activeRunId: null,
 };
 
 function collectConfig() {
@@ -31,6 +44,49 @@ function collectConfig() {
   };
 }
 
+function collectWorkflow() {
+  return {
+    issue_key: $("#issue_key").val().trim(),
+    issue_summary: $("#issue_summary").val().trim(),
+    branch_name: $("#branch_name").val().trim(),
+    commit_message: $("#commit_message").val().trim(),
+    work_instruction: $("#work_instruction").val().trim(),
+    acceptance_criteria: $("#acceptance_criteria").val().trim(),
+    test_command: $("#test_command").val().trim(),
+    commit_checklist: $("#commit_checklist").val().trim(),
+    git_author_name: $("#git_author_name").val().trim(),
+    git_author_email: $("#git_author_email").val().trim(),
+    allow_auto_commit: $("#allow_auto_commit").is(":checked"),
+  };
+}
+
+function workflowRequiredFields(payload) {
+  return ["issue_key", "issue_summary", "branch_name", "commit_message", "work_instruction", "test_command"]
+    .filter((field) => !String(payload[field] || "").trim());
+}
+
+function requestedInfoForFields(fields) {
+  const automationMap = {
+    branch_name: { guide_section: "automation", guide_step_id: "automation-branch-commit" },
+    commit_message: { guide_section: "automation", guide_step_id: "automation-branch-commit" },
+    work_instruction: { guide_section: "automation", guide_step_id: "automation-work-instruction" },
+    acceptance_criteria: { guide_section: "automation", guide_step_id: "automation-acceptance-criteria" },
+    test_command: { guide_section: "automation", guide_step_id: "automation-test-command" },
+    commit_checklist: { guide_section: "automation", guide_step_id: "automation-commit-checklist" },
+    git_author_name: { guide_section: "automation", guide_step_id: "automation-git-author" },
+    git_author_email: { guide_section: "automation", guide_step_id: "automation-git-author" },
+    issue_key: { guide_section: "automation", guide_step_id: "automation-branch-commit" },
+    issue_summary: { guide_section: "automation", guide_step_id: "automation-branch-commit" },
+  };
+
+  return fields.map((field) => ({
+    field,
+    label: fieldLabel(field),
+    guide_section: automationMap[field] ? automationMap[field].guide_section : "automation",
+    guide_step_id: automationMap[field] ? automationMap[field].guide_step_id : "",
+  }));
+}
+
 function escapeHtml(value) {
   return String(value)
     .replaceAll("&", "&amp;")
@@ -44,8 +100,8 @@ function setResult(id, payload) {
   $(id).text(JSON.stringify(payload, null, 2));
 }
 
-function clearResultActions() {
-  $("#config_result_actions").empty();
+function clearResultActions(targetId) {
+  $(targetId).empty();
 }
 
 function fillConfig(data) {
@@ -57,15 +113,30 @@ function fillConfig(data) {
   });
 }
 
+function fillWorkflow(data) {
+  Object.keys(data).forEach((key) => {
+    const el = $("#" + key);
+    if (el.length) {
+      el.val(data[key]);
+    }
+  });
+}
+
 function selectedIssue() {
   const checked = $("input[name='selected_issue']:checked");
-  if (!checked.length) {
+  if (checked.length) {
+    return {
+      issue_key: checked.data("key"),
+      issue_summary: checked.data("summary"),
+    };
+  }
+
+  const issueKey = $("#issue_key").val().trim();
+  const issueSummary = $("#issue_summary").val().trim();
+  if (!issueKey || !issueSummary) {
     return null;
   }
-  return {
-    issue_key: checked.data("key"),
-    issue_summary: checked.data("summary"),
-  };
+  return { issue_key: issueKey, issue_summary: issueSummary };
 }
 
 function prefersReducedMotion() {
@@ -299,8 +370,7 @@ function focusFields(fieldIds) {
     });
 
     if (firstInput && firstInput.length) {
-      const node = firstInput.get(0);
-      node.scrollIntoView({
+      firstInput.get(0).scrollIntoView({
         behavior: prefersReducedMotion() ? "auto" : "smooth",
         block: "center",
       });
@@ -309,33 +379,31 @@ function focusFields(fieldIds) {
   }, prefersReducedMotion() ? 0 : 120);
 }
 
-function renderValidationActions(data) {
-  clearResultActions();
-  if (data.valid || !data.requested_information || !data.requested_information.length) {
+function renderCallout(targetId, requestedInformation) {
+  clearResultActions(targetId);
+  if (!requestedInformation || !requestedInformation.length) {
     return;
   }
 
-  const firstMissing = data.requested_information[0];
-  const shortcuts = data.requested_information
-    .map((item) => {
-      return `
-        <button
-          type="button"
-          class="pill-button js-open-guide"
-          data-guide-section="${escapeHtml(item.guide_section || "")}"
-          data-guide-step-id="${escapeHtml(item.guide_step_id || "")}"
-        >
-          ${escapeHtml(item.label || item.field)}
-        </button>
-      `;
-    })
+  const firstMissing = requestedInformation[0];
+  const shortcuts = requestedInformation
+    .map((item) => `
+      <button
+        type="button"
+        class="pill-button js-open-guide"
+        data-guide-section="${escapeHtml(item.guide_section || "")}"
+        data-guide-step-id="${escapeHtml(item.guide_step_id || "")}"
+      >
+        ${escapeHtml(item.label || item.field)}
+      </button>
+    `)
     .join("");
 
-  $("#config_result_actions").html(`
+  $(targetId).html(`
     <div class="result-callout">
       <div>
-        <strong>누락된 항목을 가이드에서 바로 찾을 수 있습니다.</strong>
-        <p>첫 번째 누락 항목부터 단계별 위치 설명과 예시 값을 확인하세요.</p>
+        <strong>가이드에서 필요한 입력 항목을 바로 확인할 수 있습니다.</strong>
+        <p>첫 번째 항목부터 위치, 예시 값, 주의사항을 확인하고 입력하세요.</p>
       </div>
       <div class="result-callout__actions">
         <button
@@ -344,7 +412,7 @@ function renderValidationActions(data) {
           data-guide-section="${escapeHtml(firstMissing.guide_section || "")}"
           data-guide-step-id="${escapeHtml(firstMissing.guide_step_id || "")}"
         >
-          누락된 항목 안내 열기
+          첫 항목 안내 열기
         </button>
         <div class="pill-row">${shortcuts}</div>
       </div>
@@ -379,10 +447,125 @@ function setupIssueTable(data) {
     .join("");
 
   $("#issue_table").html(rows);
+  const issue = selectedIssue();
+  if (issue) {
+    fillWorkflow(issue);
+  }
+}
+
+function setSummaryCard(title, value, detail) {
+  if (!value && !detail) {
+    return "";
+  }
+  return `
+    <section class="summary-card">
+      <p class="summary-card__title">${escapeHtml(title)}</p>
+      <strong>${escapeHtml(value || "-")}</strong>
+      <span>${escapeHtml(detail || "")}</span>
+    </section>
+  `;
+}
+
+function eventLogText(events) {
+  const items = events || [];
+  if (!items.length) {
+    return "실행 로그 없음";
+  }
+  return items
+    .map((event) => `[${event.timestamp}] ${event.phase}: ${event.message}`)
+    .join("\n");
+}
+
+function stopWorkflowPolling() {
+  if (workflowState.pollTimer) {
+    window.clearTimeout(workflowState.pollTimer);
+    workflowState.pollTimer = null;
+  }
+}
+
+function scheduleWorkflowPoll(runId, button) {
+  stopWorkflowPolling();
+  workflowState.activeRunId = runId;
+  workflowState.pollTimer = window.setTimeout(() => {
+    $.getJSON(`/api/workflow/run/${encodeURIComponent(runId)}`)
+      .done((data) => {
+        const payload = data.result || data.error || {};
+        setResult("#workflow_result", data);
+        renderCallout("#workflow_result_actions", payload.requested_information || []);
+        renderAutomationResult(data);
+
+        if (data.status === "completed" || data.status === "failed") {
+          stopWorkflowPolling();
+          workflowState.activeRunId = null;
+          button.prop("disabled", false).text("Codex 자동 작업 실행");
+          return;
+        }
+        scheduleWorkflowPoll(runId, button);
+      })
+      .fail((xhr) => {
+        stopWorkflowPolling();
+        workflowState.activeRunId = null;
+        button.prop("disabled", false).text("Codex 자동 작업 실행");
+        setResult("#workflow_result", xhr.responseJSON || { ok: false, error: xhr.responseText });
+      });
+  }, 1500);
+}
+
+function renderAutomationResult(data) {
+  const payload = data.result || data.error || data;
+  const cards = [
+    setSummaryCard("상태", data.status || payload.status || "-", data.message || payload.message || ""),
+    setSummaryCard("브랜치", payload.branch_name || "-", payload.current_branch ? `현재 브랜치: ${payload.current_branch}` : ""),
+    setSummaryCard("커밋", payload.commit_sha || "-", payload.commit_message || ""),
+    setSummaryCard("테스트", payload.test_returncode == null ? "-" : String(payload.test_returncode), payload.test_command || ""),
+  ].join("");
+
+  $("#automation_overview").html(cards);
+  $("#automation_intent").text(payload.model_intent || "응답 없음");
+  $("#automation_implementation").text(payload.implementation_summary || "응답 없음");
+  $("#automation_validation").text(payload.validation_summary || "응답 없음");
+
+  const risks = payload.risks || [];
+  $("#automation_risks").html(
+    risks.length
+      ? risks.map((risk) => `<li>${escapeHtml(risk)}</li>`).join("")
+      : '<li class="file-list__empty">특이 리스크가 보고되지 않았습니다.</li>'
+  );
+
+  const files = payload.processed_files || [];
+  $("#automation_files").html(
+    files.length
+      ? files.map((file) => `<li>${escapeHtml(file)}</li>`).join("")
+      : '<li class="file-list__empty">변경 파일이 없습니다.</li>'
+  );
+
+  $("#automation_diff").text(payload.diff || "diff 없음");
+  $("#automation_test_output").text(payload.test_output || "테스트 출력 없음");
+  $("#automation_log").text(payload.execution_log_tail || eventLogText(data.events) || "실행 로그 없음");
+}
+
+function resetAutomationResult() {
+  $("#automation_overview").empty();
+  $("#automation_intent").text("자동 작업 실행 후 표시됩니다.");
+  $("#automation_implementation").text("자동 작업 실행 후 표시됩니다.");
+  $("#automation_validation").text("자동 작업 실행 후 표시됩니다.");
+  $("#automation_risks").html('<li class="file-list__empty">자동 작업 실행 후 표시됩니다.</li>');
+  $("#automation_files").html('<li class="file-list__empty">자동 작업 실행 후 표시됩니다.</li>');
+  $("#automation_diff").text("");
+  $("#automation_test_output").text("");
+  $("#automation_log").text("");
+}
+
+function withButtonBusy(button, callback) {
+  const originalText = button.text();
+  button.prop("disabled", true).text("실행 중...");
+  const done = () => button.prop("disabled", false).text(originalText);
+  callback(done);
 }
 
 $(document).ready(function () {
   getSetupGuide();
+  resetAutomationResult();
 
   $("#open_setup_guide").on("click", function () {
     openGuide("jira", "jira-base-url");
@@ -427,15 +610,22 @@ $(document).ready(function () {
     }
   });
 
+  $(document).on("change", "input[name='selected_issue']", function () {
+    const issue = selectedIssue();
+    if (issue) {
+      fillWorkflow(issue);
+    }
+  });
+
   $("#load_config").on("click", function () {
     $.getJSON("/api/config")
       .done((data) => {
         fillConfig(data);
-        clearResultActions();
+        clearResultActions("#config_result_actions");
         setResult("#config_result", { ok: true, message: "저장된 설정을 불러왔습니다." });
       })
       .fail((xhr) => {
-        clearResultActions();
+        clearResultActions("#config_result_actions");
         setResult("#config_result", { ok: false, error: xhr.responseText });
       });
   });
@@ -449,10 +639,10 @@ $(document).ready(function () {
     })
       .done((data) => {
         setResult("#config_result", data);
-        renderValidationActions(data);
+        renderCallout("#config_result_actions", data.valid ? [] : data.requested_information);
       })
       .fail((xhr) => {
-        clearResultActions();
+        clearResultActions("#config_result_actions");
         setResult("#config_result", { ok: false, error: xhr.responseText });
       });
   });
@@ -465,11 +655,11 @@ $(document).ready(function () {
       data: JSON.stringify(collectConfig()),
     })
       .done((data) => {
-        clearResultActions();
+        clearResultActions("#config_result_actions");
         setResult("#config_result", data);
       })
       .fail((xhr) => {
-        clearResultActions();
+        clearResultActions("#config_result_actions");
         setResult("#config_result", xhr.responseJSON || { ok: false, error: xhr.responseText });
       });
   });
@@ -498,23 +688,97 @@ $(document).ready(function () {
       contentType: "application/json",
       data: JSON.stringify({}),
     })
-      .done((data) => setResult("#workflow_result", data))
-      .fail((xhr) => setResult("#workflow_result", xhr.responseJSON || { ok: false, error: xhr.responseText }));
+      .done((data) => {
+        setResult("#workflow_result", data);
+        renderCallout("#workflow_result_actions", data.git_identity_missing_fields ? data.git_identity_missing_fields.map((field) => ({
+          field,
+          label: fieldLabel(field),
+          guide_section: "automation",
+          guide_step_id: "automation-git-author",
+        })) : []);
+      })
+      .fail((xhr) => {
+        clearResultActions("#workflow_result_actions");
+        setResult("#workflow_result", xhr.responseJSON || { ok: false, error: xhr.responseText });
+      });
   });
 
   $("#prepare_workflow").on("click", function () {
     const issue = selectedIssue();
     if (!issue) {
-      setResult("#workflow_result", { ok: false, error: "이슈를 먼저 선택해 주세요." });
+      setResult("#workflow_result", { ok: false, error: "이슈를 먼저 선택하거나 issue key/summary를 입력해 주세요." });
       return;
     }
+
     $.ajax({
       url: "/api/workflow/prepare",
       method: "POST",
       contentType: "application/json",
       data: JSON.stringify(issue),
     })
-      .done((data) => setResult("#workflow_result", data))
+      .done((data) => {
+        fillWorkflow({
+          issue_key: data.issue_key,
+          issue_summary: data.issue_summary,
+          branch_name: data.branch_name,
+          commit_message: data.commit_message_template,
+        });
+        setResult("#workflow_result", data);
+        renderCallout("#workflow_result_actions", data.requested_information);
+      })
       .fail((xhr) => setResult("#workflow_result", xhr.responseJSON || { ok: false, error: xhr.responseText }));
+  });
+
+  $("#run_automation").on("click", function () {
+    const button = $(this);
+    const payload = collectWorkflow();
+    const missingFields = workflowRequiredFields(payload);
+
+    stopWorkflowPolling();
+    resetAutomationResult();
+    clearResultActions("#workflow_result_actions");
+    if (missingFields.length) {
+      const requestedInformation = requestedInfoForFields(missingFields);
+      const data = {
+        ok: false,
+        error: "workflow_fields_missing",
+        fields: missingFields,
+        requested_information: requestedInformation,
+        message: "필수 입력값이 비어 있어 Codex 실행을 시작하지 않았습니다.",
+      };
+      setResult("#workflow_result", data);
+      renderCallout("#workflow_result_actions", requestedInformation);
+      renderAutomationResult(data);
+      focusFields([missingFields[0]]);
+      return;
+    }
+
+    button.prop("disabled", true).text("실행 중...");
+    setResult("#workflow_result", { ok: false, status: "queued", message: "Codex 자동 작업을 접수했습니다." });
+    $("#automation_log").text("실행 요청을 전송했습니다.");
+
+    $.ajax({
+      url: "/api/workflow/run",
+      method: "POST",
+      contentType: "application/json",
+      data: JSON.stringify(payload),
+    })
+      .done((data) => {
+        setResult("#workflow_result", data);
+        renderCallout("#workflow_result_actions", data.requested_information || []);
+        renderAutomationResult(data);
+        if (data.run_id) {
+          scheduleWorkflowPoll(data.run_id, button);
+        } else {
+          button.prop("disabled", false).text("Codex 자동 작업 실행");
+        }
+      })
+      .fail((xhr) => {
+        const data = xhr.responseJSON || { ok: false, error: xhr.responseText };
+        setResult("#workflow_result", data);
+        renderCallout("#workflow_result_actions", data.requested_information || []);
+        renderAutomationResult(data);
+        button.prop("disabled", false).text("Codex 자동 작업 실행");
+      });
   });
 });

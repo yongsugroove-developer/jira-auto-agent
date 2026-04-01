@@ -126,7 +126,8 @@ h3 {
 
 input[type="text"],
 input[type="email"],
-input[type="password"] {
+input[type="password"],
+textarea {
   height: 42px;
   border: 1px solid var(--border);
   border-radius: 14px;
@@ -139,11 +140,19 @@ input[type="password"] {
 
 input[type="text"]:focus,
 input[type="email"]:focus,
-input[type="password"]:focus {
+input[type="password"]:focus,
+textarea:focus {
   outline: none;
   border-color: rgba(15, 118, 110, 0.42);
   box-shadow: 0 0 0 4px rgba(15, 118, 110, 0.12);
   transform: translateY(-1px);
+}
+
+textarea {
+  min-height: 112px;
+  height: auto;
+  padding: 12px 14px;
+  resize: vertical;
 }
 
 .actions {
@@ -152,6 +161,19 @@ input[type="password"]:focus {
   align-items: center;
   gap: 10px;
   margin-top: 14px;
+}
+
+.workflow-grid {
+  margin-top: 18px;
+}
+
+.checkbox-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 14px;
+  font-weight: 600;
 }
 
 button,
@@ -181,6 +203,15 @@ button:hover,
 .pill-button:hover,
 .guide-link:hover {
   transform: translateY(-1px);
+}
+
+button:disabled,
+.primary-button:disabled,
+.secondary-button:disabled,
+.ghost-button:disabled {
+  cursor: progress;
+  opacity: 0.7;
+  transform: none;
 }
 
 button,
@@ -253,6 +284,77 @@ tbody tr:hover {
 
 .result-actions {
   margin-top: 12px;
+}
+
+.summary-grid,
+.detail-grid {
+  display: grid;
+  gap: 14px;
+  margin-top: 16px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.summary-grid {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.summary-card,
+.detail-card {
+  border: 1px solid rgba(24, 49, 41, 0.08);
+  border-radius: 18px;
+  padding: 16px;
+  background: rgba(255, 255, 255, 0.84);
+}
+
+.summary-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.summary-card__title {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.summary-card strong {
+  font-size: 1rem;
+}
+
+.summary-card span {
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.detail-card h3 {
+  margin-bottom: 10px;
+}
+
+.detail-copy {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.7;
+  white-space: pre-wrap;
+}
+
+.file-list {
+  margin: 0;
+  padding-left: 18px;
+  color: var(--muted);
+  line-height: 1.7;
+}
+
+.file-list__empty {
+  list-style: none;
+  margin-left: -18px;
+}
+
+.result-tall {
+  min-height: 280px;
 }
 
 .result-callout {
@@ -627,6 +729,11 @@ tbody tr:hover {
   }
 
   .guide-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .summary-grid,
+  .detail-grid {
     grid-template-columns: 1fr;
   }
 
