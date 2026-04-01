@@ -51,6 +51,7 @@ FIELD_GUIDES: dict[str, dict[str, str]] = {
     "github_repo": {"label": "GitHub Repo", "guide_section": "github", "guide_step_id": "github-owner-repo"},
     "github_base_branch": {"label": "Base Branch", "guide_section": "github", "guide_step_id": "github-base-branch"},
     "github_token": {"label": "GitHub Token", "guide_section": "github", "guide_step_id": "github-token"},
+    "repo_mappings": {"label": "Space Repo Mappings", "guide_section": "github", "guide_step_id": "github-space-repo-mappings"},
     "local_repo_path": {"label": "Local Repo Path", "guide_section": "local_repo", "guide_step_id": "local-repo-path"},
     "branch_name": {"label": "Branch Name", "guide_section": "automation", "guide_step_id": "automation-branch-commit"},
     "commit_message": {"label": "Commit Message", "guide_section": "automation", "guide_step_id": "automation-branch-commit"},
@@ -156,7 +157,7 @@ def _setup_guide_sections() -> list[dict[str, Any]]:
             "id": "github",
             "title": "GitHub 설정 찾기",
             "summary": "원격 저장소 식별 정보와 기본 브랜치, 접근 토큰을 Web UI 입력칸과 매칭합니다.",
-            "fields": ["github_owner", "github_repo", "github_base_branch", "github_token"],
+            "fields": ["github_owner", "github_repo", "github_base_branch", "github_token", "repo_mappings"],
             "steps": [
                 _guide_step(
                     "github-owner-repo",
@@ -199,6 +200,19 @@ def _setup_guide_sections() -> list[dict[str, Any]]:
                     "github_pat_11AX...",
                     ["github_token"],
                     "https://docs.github.com/en/github/authenticating-to-github/keeping-your-account-and-data-secure/creating-a-personal-access-token",
+                ),
+                _guide_step(
+                    "github-space-repo-mappings",
+                    "Space to repo mapping",
+                    "Map each Jira issue space to its own GitHub repository and local path.",
+                    [
+                        "Enter one mapping per line in the format SPACE|owner|repo|base_branch|local_repo_path.",
+                        "Use the issue key prefix before the first dash as SPACE. Example: GCPPLDCAD-621 uses SPACE GCPPLDCAD.",
+                        "The local path must point to the Git root for that repository on this machine.",
+                    ],
+                    "If mappings are provided, workflow runs use the matching space entry instead of the single default repository fields.",
+                    "GCPPLDCAD|team-org|jira-auto-agent|main|C:\\make-project\\jira-auto-agent",
+                    ["repo_mappings"],
                 ),
             ],
         },
@@ -479,6 +493,13 @@ class GithubConfig:
     token: str
 
 
+@dataclass
+class RepoContext:
+    space_key: str
+    github: GithubConfig
+    local_repo_path: Path
+
+
 class CredentialStore:
     """Encrypts and stores credentials in SQLite."""
 
@@ -550,13 +571,15 @@ def _required_config_fields(payload: dict[str, Any]) -> list[str]:
         "jira_email": payload.get("jira_email"),
         "jira_api_token": payload.get("jira_api_token"),
         "jira_jql": payload.get("jira_jql"),
-        "github_owner": payload.get("github_owner"),
-        "github_repo": payload.get("github_repo"),
-        "github_base_branch": payload.get("github_base_branch"),
         "github_token": payload.get("github_token"),
-        "local_repo_path": payload.get("local_repo_path"),
     }
-    return [name for name, value in required.items() if not str(value or "").strip()]
+    missing = [name for name, value in required.items() if not str(value or "").strip()]
+    repo_mappings = str(payload.get("repo_mappings", "")).strip()
+    if repo_mappings:
+        return missing
+    if _has_legacy_repo_fields(payload):
+        return missing
+    return [*missing, "repo_mappings"]
 
 
 def _required_workflow_fields(payload: dict[str, Any]) -> list[str]:
@@ -660,6 +683,93 @@ def _to_github_config(payload: dict[str, Any]) -> GithubConfig:
         repo_name=str(payload["github_repo"]).strip(),
         base_branch=str(payload["github_base_branch"]).strip(),
         token=str(payload["github_token"]).strip(),
+    )
+
+
+def _normalize_space_key(value: Any) -> str:
+    return str(value or "").strip().upper()
+
+
+def _issue_space_key(issue_key: Any) -> str:
+    normalized_issue_key = str(issue_key or "").strip().upper()
+    if not normalized_issue_key:
+        return ""
+    return normalized_issue_key.split("-", 1)[0].strip()
+
+
+def _parse_repo_mappings(raw_value: Any) -> tuple[list[dict[str, str]], list[str]]:
+    mappings: list[dict[str, str]] = []
+    errors: list[str] = []
+    raw_text = str(raw_value or "").strip()
+    if not raw_text:
+        return mappings, errors
+
+    for line_number, raw_line in enumerate(raw_text.splitlines(), start=1):
+        line = raw_line.strip()
+        if not line:
+            continue
+        parts = [part.strip() for part in line.split("|")]
+        if len(parts) != 5 or any(not part for part in parts):
+            errors.append(f"line {line_number}")
+            continue
+        mappings.append(
+            {
+                "space_key": _normalize_space_key(parts[0]),
+                "repo_owner": parts[1],
+                "repo_name": parts[2],
+                "base_branch": parts[3],
+                "local_repo_path": parts[4],
+            }
+        )
+    return mappings, errors
+
+
+def _has_legacy_repo_fields(payload: dict[str, Any]) -> bool:
+    return all(
+        [
+            str(payload.get("github_owner", payload.get("repo_owner", ""))).strip(),
+            str(payload.get("github_repo", payload.get("repo_name", ""))).strip(),
+            str(payload.get("github_base_branch", payload.get("base_branch", ""))).strip(),
+            str(payload.get("local_repo_path", "")).strip(),
+        ]
+    )
+
+
+def _resolve_repo_context(github_payload: dict[str, Any], issue_key: Any) -> RepoContext:
+    mappings, errors = _parse_repo_mappings(github_payload.get("repo_mappings", ""))
+    if errors:
+        raise ValueError(f"invalid_repo_mappings:{','.join(errors)}")
+
+    space_key = _issue_space_key(issue_key)
+    if mappings:
+        if not space_key:
+            raise KeyError("issue_key_required_for_repo_mapping")
+        for mapping in mappings:
+            if mapping["space_key"] == space_key:
+                return RepoContext(
+                    space_key=space_key,
+                    github=GithubConfig(
+                        repo_owner=mapping["repo_owner"],
+                        repo_name=mapping["repo_name"],
+                        base_branch=mapping["base_branch"],
+                        token=str(github_payload.get("token", github_payload.get("github_token", ""))).strip(),
+                    ),
+                    local_repo_path=Path(mapping["local_repo_path"]).expanduser(),
+                )
+        raise KeyError(f"repo_mapping_not_found:{space_key}")
+
+    if not _has_legacy_repo_fields(github_payload):
+        raise KeyError("repo_mapping_not_configured")
+
+    return RepoContext(
+        space_key=space_key,
+        github=GithubConfig(
+            repo_owner=str(github_payload.get("repo_owner", github_payload.get("github_owner", ""))).strip(),
+            repo_name=str(github_payload.get("repo_name", github_payload.get("github_repo", ""))).strip(),
+            base_branch=str(github_payload.get("base_branch", github_payload.get("github_base_branch", ""))).strip(),
+            token=str(github_payload.get("token", github_payload.get("github_token", ""))).strip(),
+        ),
+        local_repo_path=Path(str(github_payload.get("local_repo_path", "")).strip()).expanduser(),
     )
 
 
@@ -788,6 +898,7 @@ def _build_jira_issue_detail(issue_key: str, fields: dict[str, Any], *, browse_u
     return {
         "ok": True,
         "issue_key": issue_key,
+        "space_key": _issue_space_key(issue_key),
         "summary": issue_summary,
         "status": issue_status,
         "issue_type": issue_type,
@@ -850,6 +961,7 @@ def _mock_jira_issue_detail(issue_key: str) -> dict[str, Any] | None:
     return {
         "ok": True,
         "issue_key": issue_key.upper(),
+        "space_key": _issue_space_key(issue_key),
         **issue,
         "comments_text": _format_jira_comments(issue["comments"]),
     }
@@ -1675,15 +1787,9 @@ def _commit_changes(repo_path: Path, commit_message: str, identity: dict[str, st
     }
 
 
-def _load_repo_context(github_payload: dict[str, Any]) -> tuple[GithubConfig, Path]:
-    config = GithubConfig(
-        repo_owner=str(github_payload["repo_owner"]).strip(),
-        repo_name=str(github_payload["repo_name"]).strip(),
-        base_branch=str(github_payload["base_branch"]).strip(),
-        token=str(github_payload["token"]).strip(),
-    )
-    repo_path = Path(str(github_payload.get("local_repo_path", "")).strip()).expanduser()
-    return config, repo_path
+def _load_repo_context(github_payload: dict[str, Any], issue_key: Any) -> tuple[GithubConfig, Path, str]:
+    context = _resolve_repo_context(github_payload, issue_key)
+    return context.github, context.local_repo_path, context.space_key
 
 
 def _execute_coding_workflow(repo_path: Path, github_config: GithubConfig, payload: dict[str, Any], reporter: Any = None) -> dict[str, Any]:
@@ -1926,6 +2032,7 @@ def create_app() -> Flask:
             "github_repo": github.get("repo_name", ""),
             "github_base_branch": github.get("base_branch", "main"),
             "github_token": "",
+            "repo_mappings": github.get("repo_mappings", ""),
             "local_repo_path": github.get("local_repo_path", ""),
         }
         return jsonify(saved_config)
@@ -1949,6 +2056,20 @@ def create_app() -> Flask:
         if missing:
             return jsonify({"ok": False, "error": "required_fields_missing", "fields": missing}), 400
 
+        repo_mappings, repo_mapping_errors = _parse_repo_mappings(payload.get("repo_mappings", ""))
+        if repo_mapping_errors:
+            return (
+                jsonify(
+                    {
+                        "ok": False,
+                        "error": "invalid_repo_mappings",
+                        "fields": ["repo_mappings"],
+                        "details": repo_mapping_errors,
+                    }
+                ),
+                400,
+            )
+
         jira = _to_jira_config(payload)
         github = _to_github_config(payload)
         local_repo_path = str(payload["local_repo_path"]).strip()
@@ -1969,6 +2090,8 @@ def create_app() -> Flask:
                 "repo_name": github.repo_name,
                 "base_branch": github.base_branch,
                 "token": github.token,
+                "repo_mappings": str(payload.get("repo_mappings", "")).strip(),
+                "repo_mapping_count": len(repo_mappings),
                 "local_repo_path": local_repo_path,
             },
         )
@@ -2042,11 +2165,29 @@ def create_app() -> Flask:
 
     @app.post("/api/github/check")
     def github_check() -> Any:
+        payload = request.get_json(silent=True) or {}
         github_payload = store.load("github")
         if not github_payload:
             return jsonify({"error": "github_config_not_found"}), 400
 
-        config, local_repo_path = _load_repo_context(github_payload)
+        issue_key = str(payload.get("issue_key", "")).strip().upper()
+        try:
+            config, local_repo_path, resolved_space_key = _load_repo_context(github_payload, issue_key)
+        except KeyError as exc:
+            error_code = str(exc.args[0])
+            requested_fields = ["repo_mappings"] if error_code.startswith("repo_mapping_not_found:") else ["issue_key"]
+            return (
+                jsonify(
+                    {
+                        "error": error_code,
+                        "issue_key": issue_key,
+                        "requested_information": _build_requested_information(requested_fields),
+                    }
+                ),
+                400,
+            )
+        except ValueError as exc:
+            return jsonify({"error": str(exc), "fields": ["repo_mappings"]}), 400
         repo_response = _request_with_logging(
             "GET",
             f"https://api.github.com/repos/{config.repo_owner}/{config.repo_name}",
@@ -2081,6 +2222,10 @@ def create_app() -> Flask:
                 "branch_check": branch_response.status_code,
                 "local_repo_exists": local_repo_exists,
                 "local_repo_path": str(local_repo_path),
+                "resolved_space_key": resolved_space_key,
+                "repo_owner": config.repo_owner,
+                "repo_name": config.repo_name,
+                "base_branch": config.base_branch,
                 "current_branch": _git_optional_output(local_repo_path, "branch", "--show-current") if local_repo_exists else "",
                 "working_tree_clean": local_repo_exists and not dirty_entries,
                 "dirty_entries": dirty_entries,
@@ -2156,7 +2301,24 @@ def create_app() -> Flask:
         if not github_payload:
             return jsonify({"ok": False, "error": "github_config_not_found"}), 400
 
-        github_config, repo_path = _load_repo_context(github_payload)
+        try:
+            github_config, repo_path, resolved_space_key = _load_repo_context(github_payload, payload.get("issue_key", ""))
+        except KeyError as exc:
+            error_code = str(exc.args[0])
+            requested_fields = ["repo_mappings"] if error_code.startswith("repo_mapping_not_found:") else ["issue_key"]
+            return (
+                jsonify(
+                    {
+                        "ok": False,
+                        "error": error_code,
+                        "fields": requested_fields,
+                        "requested_information": _build_requested_information(requested_fields),
+                    }
+                ),
+                400,
+            )
+        except ValueError as exc:
+            return jsonify({"ok": False, "error": str(exc), "fields": ["repo_mappings"]}), 400
         if not repo_path.exists() or not (repo_path / ".git").exists():
             return (
                 jsonify(
@@ -2200,6 +2362,10 @@ def create_app() -> Flask:
             repo_path,
             {
                 **payload,
+                "resolved_space_key": resolved_space_key,
+                "resolved_repo_owner": github_config.repo_owner,
+                "resolved_repo_name": github_config.repo_name,
+                "resolved_base_branch": github_config.base_branch,
                 "git_author_name": identity["name"],
                 "git_author_email": identity["email"],
             },

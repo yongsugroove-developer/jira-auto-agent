@@ -46,8 +46,8 @@ def test_validate_config_missing_fields_include_guide_metadata() -> None:
     assert requested["jira_api_token"]["label"] == "Jira API Token"
     assert requested["jira_api_token"]["guide_section"] == "jira"
     assert requested["jira_api_token"]["guide_step_id"] == "jira-api-token"
-    assert requested["local_repo_path"]["guide_section"] == "local_repo"
-    assert requested["local_repo_path"]["guide_step_id"] == "local-repo-path"
+    assert requested["repo_mappings"]["guide_section"] == "github"
+    assert requested["repo_mappings"]["guide_step_id"] == "github-space-repo-mappings"
 
 
 def test_index_page_renders_automation_fields() -> None:
@@ -174,6 +174,47 @@ def test_build_codex_prompt_includes_jira_issue_details() -> None:
     assert "상세 설명 본문" in prompt
     assert "Jira recent comments:" in prompt
     assert "코멘트 본문" in prompt
+
+
+def test_load_repo_context_uses_space_mapping() -> None:
+    github_payload = {
+        "token": "token",
+        "repo_mappings": "DEMO|team|demo-repo|develop|C:/repos/demo\nOPS|team|ops-repo|main|C:/repos/ops",
+    }
+
+    config, repo_path, space_key = main_module._load_repo_context(github_payload, "ops-321")
+
+    assert space_key == "OPS"
+    assert config.repo_owner == "team"
+    assert config.repo_name == "ops-repo"
+    assert config.base_branch == "main"
+    assert str(repo_path).replace("\\", "/").endswith("C:/repos/ops")
+
+
+def test_github_check_requires_issue_key_when_repo_mappings_exist(monkeypatch) -> None:
+    def fake_load(self, provider: str):  # noqa: ANN001
+        if provider == "github":
+            return {
+                "repo_owner": "",
+                "repo_name": "",
+                "base_branch": "",
+                "token": "token",
+                "repo_mappings": "DEMO|team|demo-repo|main|C:/repos/demo",
+                "local_repo_path": "",
+            }
+        return None
+
+    monkeypatch.setattr(main_module.CredentialStore, "load", fake_load)
+
+    app = create_app()
+    client = app.test_client()
+
+    response = client.post("/api/github/check", json={})
+
+    assert response.status_code == 400
+    data = response.get_json()
+    assert data is not None
+    assert data["error"] == "issue_key_required_for_repo_mapping"
 
 
 def test_run_workflow_returns_stubbed_automation_result(monkeypatch) -> None:
