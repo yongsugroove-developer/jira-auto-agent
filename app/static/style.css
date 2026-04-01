@@ -355,6 +355,17 @@ tbody tr:hover {
   margin-left: -18px;
 }
 
+.issue-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.result-medium {
+  min-height: 180px;
+}
+
 .result-tall {
   min-height: 280px;
 }

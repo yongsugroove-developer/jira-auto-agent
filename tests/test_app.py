@@ -61,6 +61,26 @@ def test_index_page_renders_automation_fields() -> None:
     assert 'id="codex_reasoning_effort"' in html
     assert 'id="work_instruction"' in html
     assert 'id="automation_diff"' in html
+    assert 'id="jira_issue_description"' in html
+    assert 'id="jira_issue_comments"' in html
+
+
+def test_mock_jira_issue_detail_returns_description_and_comments() -> None:
+    app = create_app()
+    client = app.test_client()
+
+    response = client.post(
+        "/api/jira/issue-detail",
+        json={"issue_key": "DEMO-101", "mock_mode": True},
+    )
+    assert response.status_code == 200
+
+    data = response.get_json()
+    assert data is not None
+    assert data["issue_key"] == "DEMO-101"
+    assert "로그인 폼" in data["summary"]
+    assert "빈 값 제출" in data["description"]
+    assert "모바일" in data["comments_text"]
 
 
 def test_prepare_workflow_branch_and_requested_information() -> None:
@@ -123,6 +143,32 @@ def test_run_workflow_rejects_invalid_reasoning_effort() -> None:
     assert data is not None
     assert data["error"] == "invalid_reasoning_effort"
     assert data["requested_information"][0]["field"] == "codex_reasoning_effort"
+
+
+def test_build_codex_prompt_includes_jira_issue_details() -> None:
+    prompt = main_module._build_codex_prompt(
+        {
+            "issue_key": "DEMO-11",
+            "issue_summary": "이슈 상세 반영",
+            "branch_name": "feature/DEMO-11-detail",
+            "commit_message": "DEMO-11: 이슈 상세 반영",
+            "work_instruction": "Jira 상세를 참고해 작업한다.",
+            "test_command": "pytest -q",
+            "issue_status": "To Do",
+            "issue_type": "Story",
+            "issue_priority": "High",
+            "issue_assignee": "Tester",
+            "issue_labels": "frontend, jira",
+            "issue_description": "상세 설명 본문",
+            "issue_comments_text": "2026-04-01 / Reviewer\n코멘트 본문",
+        },
+        main_module.BASE_DIR,
+    )
+
+    assert "Jira issue description:" in prompt
+    assert "상세 설명 본문" in prompt
+    assert "Jira recent comments:" in prompt
+    assert "코멘트 본문" in prompt
 
 
 def test_run_workflow_returns_stubbed_automation_result(monkeypatch) -> None:

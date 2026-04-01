@@ -27,6 +27,12 @@ const guideState = {
   activeStepId: null,
 };
 
+const jiraState = {
+  selectedIssueDetail: null,
+  issueDetailRequest: null,
+  pendingIssueKey: null,
+};
+
 const workflowState = {
   pollTimer: null,
   activeRunId: null,
@@ -47,6 +53,10 @@ function collectConfig() {
 }
 
 function collectWorkflow() {
+  const issue = selectedIssue();
+  const detail = issue && jiraState.selectedIssueDetail && jiraState.selectedIssueDetail.issue_key === issue.issue_key
+    ? jiraState.selectedIssueDetail
+    : null;
   return {
     issue_key: $("#issue_key").val().trim(),
     issue_summary: $("#issue_summary").val().trim(),
@@ -60,6 +70,13 @@ function collectWorkflow() {
     commit_checklist: $("#commit_checklist").val().trim(),
     git_author_name: $("#git_author_name").val().trim(),
     git_author_email: $("#git_author_email").val().trim(),
+    issue_status: detail ? (detail.status || "") : "",
+    issue_type: detail ? (detail.issue_type || "") : "",
+    issue_priority: detail ? (detail.priority || "") : "",
+    issue_assignee: detail ? (detail.assignee || "") : "",
+    issue_labels: detail ? ((detail.labels || []).join(", ")) : "",
+    issue_description: detail ? (detail.description || "") : "",
+    issue_comments_text: detail ? (detail.comments_text || "") : "",
     allow_auto_commit: $("#allow_auto_commit").is(":checked"),
   };
 }
@@ -464,7 +481,90 @@ function setupIssueTable(data) {
   const issue = selectedIssue();
   if (issue) {
     fillWorkflow(issue);
+    loadIssueDetail(issue.issue_key);
+  } else {
+    resetIssueDetail();
   }
+}
+
+function resetIssueDetail(message) {
+  jiraState.selectedIssueDetail = null;
+  jiraState.pendingIssueKey = null;
+  $("#jira_issue_meta").empty();
+  $("#jira_issue_description").text(message || "이슈를 선택하면 상세 설명이 표시됩니다.");
+  $("#jira_issue_comments").text(message || "이슈를 선택하면 최근 코멘트가 표시됩니다.");
+}
+
+function renderIssueDetail(detail) {
+  const metaItems = [
+    detail.issue_key || "",
+    detail.status ? `상태 ${detail.status}` : "",
+    detail.issue_type ? `유형 ${detail.issue_type}` : "",
+    detail.priority ? `우선순위 ${detail.priority}` : "",
+    detail.assignee ? `담당 ${detail.assignee}` : "",
+  ].filter(Boolean);
+
+  const labels = detail.labels || [];
+  $("#jira_issue_meta").html(
+    metaItems.concat(labels.map((label) => `라벨 ${label}`))
+      .map((item) => `<span class="field-pill">${escapeHtml(item)}</span>`)
+      .join("")
+  );
+  $("#jira_issue_description").text(detail.description || "Jira 설명이 비어 있습니다.");
+  $("#jira_issue_comments").text(detail.comments_text || "최근 코멘트가 없습니다.");
+}
+
+function loadIssueDetail(issueKey) {
+  const key = String(issueKey || "").trim();
+  if (!key) {
+    resetIssueDetail();
+    return;
+  }
+
+  if (jiraState.issueDetailRequest && typeof jiraState.issueDetailRequest.abort === "function") {
+    jiraState.issueDetailRequest.abort();
+  }
+
+  jiraState.pendingIssueKey = key;
+  $("#jira_issue_meta").empty();
+  $("#jira_issue_description").text(`${key} 상세를 불러오는 중입니다...`);
+  $("#jira_issue_comments").text(`${key} 코멘트를 불러오는 중입니다...`);
+
+  jiraState.issueDetailRequest = $.ajax({
+    url: "/api/jira/issue-detail",
+    method: "POST",
+    contentType: "application/json",
+    data: JSON.stringify({
+      issue_key: key,
+      mock_mode: $("#mock_mode").is(":checked"),
+    }),
+  })
+    .done((data) => {
+      if (jiraState.pendingIssueKey !== key) {
+        return;
+      }
+      jiraState.selectedIssueDetail = data;
+      fillWorkflow({
+        issue_key: data.issue_key,
+        issue_summary: data.summary,
+      });
+      renderIssueDetail(data);
+    })
+    .fail((xhr) => {
+      if (xhr.statusText === "abort") {
+        return;
+      }
+      jiraState.selectedIssueDetail = null;
+      $("#jira_issue_meta").empty();
+      $("#jira_issue_description").text("이슈 상세를 불러오지 못했습니다.");
+      $("#jira_issue_comments").text((xhr.responseJSON && xhr.responseJSON.error) || xhr.responseText || "오류");
+    })
+    .always(() => {
+      if (jiraState.pendingIssueKey === key) {
+        jiraState.pendingIssueKey = null;
+      }
+      jiraState.issueDetailRequest = null;
+    });
 }
 
 function setSummaryCard(title, value, detail) {
@@ -488,6 +588,29 @@ function eventLogText(events) {
   return items
     .map((event) => `[${event.timestamp}] ${event.phase}: ${event.message}`)
     .join("\n");
+}
+
+function latestWorkflowEvent(data) {
+  const events = (data && data.events) || [];
+  return events.length ? events[events.length - 1] : null;
+}
+
+function workflowElapsedLabel(data) {
+  if (!data || !data.started_at) {
+    return "-";
+  }
+  const started = Date.parse(data.started_at);
+  const finished = data.finished_at ? Date.parse(data.finished_at) : Date.now();
+  if (Number.isNaN(started) || Number.isNaN(finished) || finished < started) {
+    return "-";
+  }
+  const seconds = Math.max(Math.round((finished - started) / 1000), 0);
+  const minutes = Math.floor(seconds / 60);
+  const remain = seconds % 60;
+  if (minutes > 0) {
+    return `${minutes}분 ${remain}초`;
+  }
+  return `${remain}초`;
 }
 
 function stopWorkflowPolling() {
@@ -529,8 +652,11 @@ function renderAutomationResult(data) {
   const payload = data.result || data.error || data;
   const modelLabel = payload.resolved_model || payload.requested_model || payload.codex_default_model || "Codex CLI default";
   const reasoningLabel = payload.resolved_reasoning_effort || payload.requested_reasoning_effort || payload.codex_default_reasoning_effort || "Codex CLI default";
+  const latestEvent = latestWorkflowEvent(data);
   const cards = [
     setSummaryCard("상태", data.status || payload.status || "-", data.message || payload.message || ""),
+    setSummaryCard("현재 단계", latestEvent ? latestEvent.phase : "-", latestEvent ? latestEvent.message : ""),
+    setSummaryCard("경과 시간", workflowElapsedLabel(data), payload.codex_elapsed_seconds != null ? `Codex ${payload.codex_elapsed_seconds}초 / 테스트 ${payload.test_elapsed_seconds == null ? "-" : `${payload.test_elapsed_seconds}초`}` : ""),
     setSummaryCard("모델", modelLabel, `reasoning: ${reasoningLabel}`),
     setSummaryCard("브랜치", payload.branch_name || "-", payload.current_branch ? `현재 브랜치: ${payload.current_branch}` : ""),
     setSummaryCard("커밋", payload.commit_sha || "-", payload.commit_message || ""),
@@ -583,6 +709,7 @@ function withButtonBusy(button, callback) {
 $(document).ready(function () {
   getSetupGuide();
   resetAutomationResult();
+  resetIssueDetail();
 
   $("#open_setup_guide").on("click", function () {
     openGuide("jira", "jira-base-url");
@@ -631,6 +758,7 @@ $(document).ready(function () {
     const issue = selectedIssue();
     if (issue) {
       fillWorkflow(issue);
+      loadIssueDetail(issue.issue_key);
     }
   });
 
@@ -694,6 +822,7 @@ $(document).ready(function () {
       })
       .fail((xhr) => {
         $("#issue_table").empty();
+        resetIssueDetail("이슈 상세를 표시할 수 없습니다.");
         setResult("#backlog_result", xhr.responseJSON || { ok: false, error: xhr.responseText });
       });
   });

@@ -10,6 +10,7 @@ import sqlite3
 import subprocess
 import tempfile
 import threading
+import time
 import textwrap
 import uuid
 from dataclasses import dataclass
@@ -32,6 +33,7 @@ MAX_DIFF_CHARS = 60000
 MAX_OUTPUT_CHARS = 12000
 SETUP_GUIDE_VERSION = 3
 VALID_REASONING_EFFORTS = ("low", "medium", "high", "xhigh")
+WORKFLOW_HEARTBEAT_SECONDS = 10
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 LOGGER = logging.getLogger(__name__)
@@ -600,6 +602,211 @@ def _github_headers(config: GithubConfig) -> dict[str, str]:
     }
 
 
+def _join_non_empty(parts: list[str], separator: str = "\n") -> str:
+    return separator.join(part.strip() for part in parts if part and part.strip())
+
+
+def _prompt_text(value: Any, limit: int) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    truncated, _ = _truncate_text(text, limit)
+    return truncated
+
+
+def _jira_adf_to_text(node: Any) -> str:
+    if node is None:
+        return ""
+    if isinstance(node, str):
+        return node
+    if isinstance(node, list):
+        return _join_non_empty([_jira_adf_to_text(item) for item in node])
+    if not isinstance(node, dict):
+        return str(node)
+
+    node_type = str(node.get("type", "")).strip()
+    attrs = node.get("attrs", {}) if isinstance(node.get("attrs"), dict) else {}
+    content = node.get("content", []) if isinstance(node.get("content"), list) else []
+
+    if node_type == "text":
+        return str(node.get("text", ""))
+    if node_type == "hardBreak":
+        return "\n"
+    if node_type == "mention":
+        return str(attrs.get("text") or attrs.get("id") or "")
+    if node_type == "emoji":
+        return str(attrs.get("text") or attrs.get("shortName") or "")
+    if node_type == "status":
+        return str(attrs.get("text") or "")
+    if node_type == "inlineCard":
+        return str(attrs.get("url") or "")
+    if node_type == "doc":
+        return _join_non_empty([_jira_adf_to_text(item) for item in content])
+    if node_type in {"paragraph", "heading", "blockquote", "panel", "expand", "listItem", "tableCell", "tableHeader"}:
+        return "".join(_jira_adf_to_text(item) for item in content).strip()
+    if node_type in {"bulletList", "orderedList"}:
+        items: list[str] = []
+        for index, item in enumerate(content, start=1):
+            item_text = _jira_adf_to_text(item).strip()
+            if not item_text:
+                continue
+            prefix = "- " if node_type == "bulletList" else f"{index}. "
+            items.append(prefix + item_text.replace("\n", "\n  "))
+        return "\n".join(items)
+    if node_type == "codeBlock":
+        return "".join(_jira_adf_to_text(item) for item in content).strip()
+    if node_type == "table":
+        rows: list[str] = []
+        for row in content:
+            if not isinstance(row, dict):
+                continue
+            cells = []
+            for cell in row.get("content", []) if isinstance(row.get("content"), list) else []:
+                cell_text = _jira_adf_to_text(cell).strip().replace("\n", " ")
+                if cell_text:
+                    cells.append(cell_text)
+            if cells:
+                rows.append(" | ".join(cells))
+        return "\n".join(rows)
+
+    return _join_non_empty([_jira_adf_to_text(item) for item in content])
+
+
+def _format_jira_comments(comments: list[dict[str, str]]) -> str:
+    blocks: list[str] = []
+    for comment in comments:
+        header_parts = [comment.get("created", "").strip(), comment.get("author", "").strip()]
+        header = " / ".join(part for part in header_parts if part)
+        body = comment.get("body", "").strip()
+        if not body:
+            continue
+        blocks.append(_join_non_empty([header, body]))
+    return "\n\n".join(blocks)
+
+
+def _build_jira_issue_detail(issue_key: str, fields: dict[str, Any], *, browse_url: str) -> dict[str, Any]:
+    comments_payload = fields.get("comment", {}) if isinstance(fields.get("comment"), dict) else {}
+    comments: list[dict[str, str]] = []
+    for raw_comment in comments_payload.get("comments", []) if isinstance(comments_payload.get("comments"), list) else []:
+        if not isinstance(raw_comment, dict):
+            continue
+        body_text = _jira_adf_to_text(raw_comment.get("body")).strip()
+        if not body_text:
+            continue
+        author_payload = raw_comment.get("author", {}) if isinstance(raw_comment.get("author"), dict) else {}
+        comments.append(
+            {
+                "author": str(author_payload.get("displayName", "")).strip(),
+                "created": str(raw_comment.get("created", "")).strip(),
+                "body": body_text,
+            }
+        )
+
+    description = _jira_adf_to_text(fields.get("description")).strip()
+    issue_summary = str(fields.get("summary", "")).strip()
+    issue_status = str((fields.get("status", {}) if isinstance(fields.get("status"), dict) else {}).get("name", "")).strip()
+    issue_type = str((fields.get("issuetype", {}) if isinstance(fields.get("issuetype"), dict) else {}).get("name", "")).strip()
+    issue_priority = str((fields.get("priority", {}) if isinstance(fields.get("priority"), dict) else {}).get("name", "")).strip()
+    issue_assignee = str((fields.get("assignee", {}) if isinstance(fields.get("assignee"), dict) else {}).get("displayName", "")).strip()
+    issue_reporter = str((fields.get("reporter", {}) if isinstance(fields.get("reporter"), dict) else {}).get("displayName", "")).strip()
+    issue_labels = [str(label).strip() for label in fields.get("labels", []) if str(label).strip()] if isinstance(fields.get("labels"), list) else []
+
+    return {
+        "ok": True,
+        "issue_key": issue_key,
+        "summary": issue_summary,
+        "status": issue_status,
+        "issue_type": issue_type,
+        "priority": issue_priority,
+        "assignee": issue_assignee,
+        "reporter": issue_reporter,
+        "labels": issue_labels,
+        "updated": str(fields.get("updated", "")).strip(),
+        "browse_url": browse_url,
+        "description": description,
+        "comments": comments,
+        "comments_text": _format_jira_comments(comments),
+    }
+
+
+def _mock_jira_issue_detail(issue_key: str) -> dict[str, Any] | None:
+    mock_issues = {
+        "DEMO-101": {
+            "summary": "로그인 폼 검증 개선",
+            "status": "Backlog",
+            "issue_type": "Story",
+            "priority": "Medium",
+            "assignee": "Mock User",
+            "reporter": "Mock Lead",
+            "labels": ["frontend", "validation"],
+            "updated": "2026-03-31T09:00:00+09:00",
+            "browse_url": "https://example.atlassian.net/browse/DEMO-101",
+            "description": "로그인 폼에서 빈 값 제출을 막고, 서버 401 응답 시 사용자에게 명확한 에러 문구를 보여준다.\n기존 성공 로그인 흐름과 API 계약은 유지한다.",
+            "comments": [
+                {
+                    "author": "Mock QA",
+                    "created": "2026-03-31T10:30:00+09:00",
+                    "body": "모바일에서도 같은 검증이 동작해야 한다.",
+                }
+            ],
+        },
+        "DEMO-102": {
+            "summary": "브랜치 생성 API 추가",
+            "status": "To Do",
+            "issue_type": "Task",
+            "priority": "High",
+            "assignee": "Mock User",
+            "reporter": "Mock Lead",
+            "labels": ["backend", "api"],
+            "updated": "2026-03-31T11:15:00+09:00",
+            "browse_url": "https://example.atlassian.net/browse/DEMO-102",
+            "description": "저장소 브랜치를 생성하는 API를 추가한다.\n입력 검증과 GitHub 오류 처리를 포함하고, 기존 브랜치 조회 기능은 유지한다.",
+            "comments": [
+                {
+                    "author": "Mock Reviewer",
+                    "created": "2026-03-31T14:00:00+09:00",
+                    "body": "동일 브랜치명이 이미 있으면 409로 응답하도록 맞춰 달라.",
+                }
+            ],
+        },
+    }
+    issue = mock_issues.get(issue_key.upper())
+    if issue is None:
+        return None
+    return {
+        "ok": True,
+        "issue_key": issue_key.upper(),
+        **issue,
+        "comments_text": _format_jira_comments(issue["comments"]),
+    }
+
+
+def _fetch_jira_issue_detail(config: JiraConfig, issue_key: str) -> dict[str, Any]:
+    response = requests.get(
+        f"{config.base_url}/rest/api/3/issue/{issue_key}",
+        headers=_jira_headers(config),
+        params={
+            "fields": "summary,status,description,issuetype,priority,assignee,reporter,labels,updated,comment",
+        },
+        timeout=DEFAULT_TIMEOUT,
+    )
+    if response.status_code >= 400:
+        return {
+            "ok": False,
+            "error": "jira_issue_detail_failed",
+            "status": response.status_code,
+            "body": response.text,
+        }
+
+    issue_data = response.json()
+    fields = issue_data.get("fields", {}) if isinstance(issue_data.get("fields"), dict) else {}
+    return _build_jira_issue_detail(
+        str(issue_data.get("key", issue_key)).strip().upper(),
+        fields,
+        browse_url=f"{config.base_url}/browse/{str(issue_data.get('key', issue_key)).strip().upper()}",
+    )
+
+
 def _slugify(value: str) -> str:
     cleaned = "".join(ch if ch.isalnum() or ch.isspace() else " " for ch in value)
     tokens = [token.lower() for token in cleaned.split() if token]
@@ -653,6 +860,41 @@ def _run_process(
         timeout=timeout,
         check=False,
     )
+
+
+def _run_with_heartbeat(
+    action: Any,
+    *,
+    reporter: Any = None,
+    phase: str,
+    label: str,
+    heartbeat_seconds: int = WORKFLOW_HEARTBEAT_SECONDS,
+) -> tuple[Any, int]:
+    result_holder: dict[str, Any] = {}
+    error_holder: dict[str, BaseException] = {}
+
+    def worker() -> None:
+        try:
+            result_holder["result"] = action()
+        except BaseException as exc:  # pragma: no cover - heartbeat wrapper
+            error_holder["error"] = exc
+
+    thread = threading.Thread(target=worker, name=f"{phase}-worker", daemon=True)
+    thread.start()
+
+    started_at = time.monotonic()
+    next_heartbeat = heartbeat_seconds
+    while thread.is_alive():
+        thread.join(timeout=1)
+        elapsed_seconds = int(time.monotonic() - started_at)
+        if reporter and thread.is_alive() and elapsed_seconds >= next_heartbeat:
+            reporter(phase, f"{label} 진행 중... {elapsed_seconds}초 경과")
+            next_heartbeat += heartbeat_seconds
+
+    if "error" in error_holder:
+        raise error_holder["error"]
+
+    return result_holder["result"], int(time.monotonic() - started_at)
 
 
 def _run_shell_command(
@@ -774,13 +1016,31 @@ def _display_command(command: list[str]) -> str:
 def _build_codex_prompt(payload: dict[str, Any], repo_path: Path) -> str:
     acceptance = str(payload.get("acceptance_criteria", "")).strip() or "별도 수용 기준 없음"
     checklist = str(payload.get("commit_checklist", "")).strip() or "별도 체크리스트 없음"
+    issue_description = _prompt_text(payload.get("issue_description", ""), 6000) or "Jira 상세 설명 없음"
+    issue_comments = _prompt_text(payload.get("issue_comments_text", ""), 3000) or "Jira 코멘트 없음"
+    issue_status = str(payload.get("issue_status", "")).strip() or "상태 정보 없음"
+    issue_type = str(payload.get("issue_type", "")).strip() or "유형 정보 없음"
+    issue_priority = str(payload.get("issue_priority", "")).strip() or "우선순위 정보 없음"
+    issue_assignee = str(payload.get("issue_assignee", "")).strip() or "담당자 정보 없음"
+    issue_labels = str(payload.get("issue_labels", "")).strip() or "라벨 없음"
     return textwrap.dedent(
         f"""
         Repository path: {repo_path}
         Issue key: {str(payload.get("issue_key", "")).strip().upper()}
         Issue summary: {str(payload.get("issue_summary", "")).strip()}
+        Jira issue status: {issue_status}
+        Jira issue type: {issue_type}
+        Jira issue priority: {issue_priority}
+        Jira assignee: {issue_assignee}
+        Jira labels: {issue_labels}
         Target branch: {str(payload.get("branch_name", "")).strip()}
         Planned commit message: {str(payload.get("commit_message", "")).strip()}
+
+        Jira issue description:
+        {issue_description}
+
+        Jira recent comments:
+        {issue_comments}
 
         User instruction:
         {str(payload.get("work_instruction", "")).strip()}
@@ -861,7 +1121,12 @@ def _run_codex_edit(repo_path: Path, payload: dict[str, Any], reporter: Any = No
                 f"model={codex_settings['resolved_model'] or 'CLI default'}, "
                 f"reasoning={codex_settings['resolved_reasoning_effort'] or 'CLI default'}",
             )
-        result = _run_process(command, cwd=repo_path, timeout=CODEX_TIMEOUT_SECONDS, input_text=prompt)
+        result, elapsed_seconds = _run_with_heartbeat(
+            lambda: _run_process(command, cwd=repo_path, timeout=CODEX_TIMEOUT_SECONDS, input_text=prompt),
+            reporter=reporter,
+            phase="codex_running",
+            label="Codex CLI",
+        )
         final_message = output_path.read_text(encoding="utf-8") if output_path.exists() else ""
         parsed: dict[str, Any] = {}
         if final_message.strip():
@@ -873,10 +1138,11 @@ def _run_codex_edit(repo_path: Path, payload: dict[str, Any], reporter: Any = No
     combined = _combined_output(result.stdout, result.stderr)
     output_tail, output_truncated = _truncate_text(combined, MAX_OUTPUT_CHARS)
     if reporter:
-        reporter("codex_end", f"Codex CLI 종료(returncode={result.returncode})")
+        reporter("codex_end", f"Codex CLI 종료(returncode={result.returncode}, elapsed={elapsed_seconds}초)")
 
     return {
         "returncode": result.returncode,
+        "elapsed_seconds": elapsed_seconds,
         "command": _display_command(command),
         "final_message": parsed,
         "raw_final_message": final_message,
@@ -900,11 +1166,16 @@ def _collect_staged_changes(repo_path: Path) -> tuple[list[str], str, bool]:
     return files, diff_text, truncated
 
 
-def _test_changes(repo_path: Path, command: str) -> dict[str, Any]:
-    result = _run_shell_command(command, cwd=repo_path, timeout=TEST_TIMEOUT_SECONDS)
+def _test_changes(repo_path: Path, command: str, reporter: Any = None) -> dict[str, Any]:
+    result, elapsed_seconds = _run_with_heartbeat(
+        lambda: _run_shell_command(command, cwd=repo_path, timeout=TEST_TIMEOUT_SECONDS),
+        reporter=reporter,
+        phase="test_running",
+        label="테스트 명령",
+    )
     output = _combined_output(result.stdout, result.stderr)
     output, truncated = _truncate_text(output, MAX_OUTPUT_CHARS)
-    return {"returncode": result.returncode, "output": output, "output_truncated": truncated}
+    return {"returncode": result.returncode, "output": output, "output_truncated": truncated, "elapsed_seconds": elapsed_seconds}
 
 
 def _commit_changes(repo_path: Path, commit_message: str, identity: dict[str, str]) -> dict[str, Any]:
@@ -1009,10 +1280,12 @@ def _execute_coding_workflow(repo_path: Path, github_config: GithubConfig, paylo
         "diff_truncated": staged_diff_truncated,
         "codex_command": codex_result["command"],
         "codex_returncode": codex_result["returncode"],
+        "codex_elapsed_seconds": codex_result["elapsed_seconds"],
         "execution_log_tail": codex_result["output_tail"],
         "execution_log_truncated": codex_result["output_truncated"],
         "test_command": str(payload.get("test_command", "")).strip(),
         "test_returncode": None,
+        "test_elapsed_seconds": None,
         "test_output": "",
         "test_output_truncated": False,
         "commit_sha": None,
@@ -1034,8 +1307,9 @@ def _execute_coding_workflow(repo_path: Path, github_config: GithubConfig, paylo
 
     if reporter:
         reporter("test_start", f"테스트 명령 실행: {str(payload.get('test_command', '')).strip()}")
-    test_result = _test_changes(repo_path, str(payload.get("test_command", "")).strip())
+    test_result = _test_changes(repo_path, str(payload.get("test_command", "")).strip(), reporter=reporter)
     response["test_returncode"] = test_result["returncode"]
+    response["test_elapsed_seconds"] = test_result["elapsed_seconds"]
     response["test_output"] = test_result["output"]
     response["test_output_truncated"] = test_result["output_truncated"]
     if reporter:
@@ -1246,6 +1520,30 @@ def create_app() -> Flask:
             for issue in data.get("issues", [])
         ]
         return jsonify({"issues": issues, "source": "jira"})
+
+    @app.post("/api/jira/issue-detail")
+    def jira_issue_detail() -> Any:
+        payload = request.get_json(silent=True) or {}
+        issue_key = str(payload.get("issue_key", "")).strip().upper()
+        mock_mode = bool(payload.get("mock_mode", False))
+        if not issue_key:
+            return jsonify({"ok": False, "error": "issue_key_required"}), 400
+
+        if mock_mode:
+            mock_issue = _mock_jira_issue_detail(issue_key)
+            if mock_issue is None:
+                return jsonify({"ok": False, "error": "mock_issue_not_found", "issue_key": issue_key}), 404
+            return jsonify(mock_issue)
+
+        jira_payload = store.load("jira")
+        if not jira_payload:
+            return jsonify({"ok": False, "error": "jira_config_not_found"}), 400
+
+        jira_config = JiraConfig(**jira_payload)
+        detail = _fetch_jira_issue_detail(jira_config, issue_key)
+        if not detail.get("ok"):
+            return jsonify(detail), 502
+        return jsonify(detail)
 
     @app.post("/api/github/check")
     def github_check() -> Any:
