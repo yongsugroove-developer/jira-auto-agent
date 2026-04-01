@@ -34,6 +34,8 @@ MAX_OUTPUT_CHARS = 12000
 SETUP_GUIDE_VERSION = 3
 VALID_REASONING_EFFORTS = ("low", "medium", "high", "xhigh")
 WORKFLOW_HEARTBEAT_SECONDS = 10
+WORKFLOW_STALE_SECONDS = 30
+WORKFLOW_RUNS_DIR = DATA_DIR / "workflow-runs"
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 LOGGER = logging.getLogger(__name__)
@@ -352,6 +354,74 @@ def _workflow_run_snapshot(run: dict[str, Any]) -> dict[str, Any]:
         "result": run.get("result"),
         "error": run.get("error"),
     }
+
+
+def _workflow_run_path(run_id: str) -> Path:
+    return WORKFLOW_RUNS_DIR / f"{run_id}.json"
+
+
+def _save_workflow_run(run: dict[str, Any]) -> None:
+    WORKFLOW_RUNS_DIR.mkdir(parents=True, exist_ok=True)
+    target_path = _workflow_run_path(run["run_id"])
+    temp_path = target_path.with_suffix(".tmp")
+    temp_path.write_text(json.dumps(_workflow_run_snapshot(run), ensure_ascii=False, indent=2), encoding="utf-8")
+    temp_path.replace(target_path)
+
+
+def _load_workflow_run(run_id: str) -> dict[str, Any] | None:
+    target_path = _workflow_run_path(run_id)
+    if not target_path.exists():
+        return None
+    try:
+        payload = json.loads(target_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        LOGGER.warning("Failed to load workflow run file: %s", target_path)
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _workflow_last_timestamp(run: dict[str, Any]) -> datetime | None:
+    timestamps: list[str] = []
+    if isinstance(run.get("events"), list):
+        timestamps.extend(str(event.get("timestamp", "")).strip() for event in run["events"] if isinstance(event, dict))
+    for field_name in ("finished_at", "started_at", "created_at"):
+        value = str(run.get(field_name, "")).strip()
+        if value:
+            timestamps.append(value)
+    for value in reversed(timestamps):
+        try:
+            return datetime.fromisoformat(value)
+        except ValueError:
+            continue
+    return None
+
+
+def _mark_workflow_run_stale(run: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+    if str(run.get("status", "")).strip() not in {"queued", "running"}:
+        return run, False
+
+    last_timestamp = _workflow_last_timestamp(run)
+    if last_timestamp is None:
+        return run, False
+
+    age_seconds = (datetime.now(timezone.utc) - last_timestamp).total_seconds()
+    if age_seconds < WORKFLOW_STALE_SECONDS:
+        return run, False
+
+    stale_message = "서버 재시작 또는 리로더 동작으로 실행 상태가 끊겼습니다. 자동 작업을 다시 실행해 주세요."
+    stale_error = {
+        "ok": False,
+        "status": "workflow_interrupted",
+        "message": stale_message,
+        "last_known_status": run.get("status", ""),
+    }
+    run["status"] = "failed"
+    run["message"] = stale_message
+    run["finished_at"] = _utcnow_iso()
+    run["result"] = run.get("result") or stale_error
+    run["error"] = stale_error
+    run["events"] = list(run.get("events", [])) + [{"timestamp": run["finished_at"], "phase": "failed", "message": stale_message}]
+    return run, True
 
 
 def _new_workflow_run() -> dict[str, Any]:
@@ -1372,13 +1442,24 @@ def create_app() -> Flask:
     def get_run(run_id: str) -> dict[str, Any] | None:
         with workflow_runs_lock:
             run = workflow_runs.get(run_id)
-            return _workflow_run_snapshot(run) if run else None
+            if run is not None:
+                return _workflow_run_snapshot(run)
+
+        persisted_run = _load_workflow_run(run_id)
+        if persisted_run is None:
+            return None
+
+        persisted_run, changed = _mark_workflow_run_stale(persisted_run)
+        if changed:
+            _save_workflow_run(persisted_run)
+        return persisted_run
 
     def update_run(run_id: str, updater: Any) -> None:
         with workflow_runs_lock:
             run = workflow_runs.get(run_id)
             if run is not None:
                 updater(run)
+                _save_workflow_run(run)
 
     def start_workflow_thread(run_id: str, github_config: GithubConfig, repo_path: Path, payload: dict[str, Any]) -> None:
         def reporter(phase: str, message: str) -> None:
@@ -1695,6 +1776,7 @@ def create_app() -> Flask:
         with workflow_runs_lock:
             workflow_runs[run["run_id"]] = run
             _append_workflow_event(workflow_runs[run["run_id"]], "queued", "실행 요청을 접수했습니다.")
+            _save_workflow_run(workflow_runs[run["run_id"]])
 
         start_workflow_thread(
             run["run_id"],
@@ -1731,4 +1813,5 @@ def create_app() -> Flask:
 
 if __name__ == "__main__":
     application = create_app()
-    application.run(host="0.0.0.0", port=5000, debug=True)
+    debug_enabled = str(os.getenv("JIRA_AGENT_DEBUG", "")).strip().lower() in {"1", "true", "yes", "on"}
+    application.run(host="0.0.0.0", port=5000, debug=debug_enabled, use_reloader=debug_enabled)

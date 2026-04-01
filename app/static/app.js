@@ -643,7 +643,15 @@ function scheduleWorkflowPoll(runId, button) {
         stopWorkflowPolling();
         workflowState.activeRunId = null;
         button.prop("disabled", false).text("Codex 자동 작업 실행");
-        setResult("#workflow_result", xhr.responseJSON || { ok: false, error: xhr.responseText });
+        const data = xhr.status === 404
+          ? {
+            ok: false,
+            error: "workflow_run_not_found",
+            message: "서버가 재시작되었거나 실행 상태를 복구하지 못했습니다. 자동 작업을 다시 실행해 주세요.",
+          }
+          : (xhr.responseJSON || { ok: false, error: xhr.responseText });
+        setResult("#workflow_result", data);
+        renderAutomationResult(data);
       });
   }, 1500);
 }

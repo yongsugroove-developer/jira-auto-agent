@@ -1,0 +1,53 @@
+{
+  "run_id": "57324434a7da4de7b9c4ab6ecb50dd2b",
+  "status": "completed",
+  "message": "완료",
+  "created_at": "2026-04-01T08:46:16.910223+00:00",
+  "started_at": "2026-04-01T08:46:16.927130+00:00",
+  "finished_at": "2026-04-01T08:46:16.939904+00:00",
+  "events": [
+    {
+      "timestamp": "2026-04-01T08:46:16.910241+00:00",
+      "phase": "queued",
+      "message": "실행 요청을 접수했습니다."
+    },
+    {
+      "timestamp": "2026-04-01T08:46:16.927149+00:00",
+      "phase": "running",
+      "message": "Codex 자동 작업을 시작합니다."
+    },
+    {
+      "timestamp": "2026-04-01T08:46:16.932936+00:00",
+      "phase": "codex_start",
+      "message": "Codex stub start"
+    },
+    {
+      "timestamp": "2026-04-01T08:46:16.939904+00:00",
+      "phase": "completed",
+      "message": "완료"
+    }
+  ],
+  "result": {
+    "ok": true,
+    "status": "committed",
+    "message": "완료",
+    "requested_model": "gpt-5.4",
+    "requested_reasoning_effort": "xhigh",
+    "resolved_model": "gpt-5.4",
+    "resolved_reasoning_effort": "xhigh",
+    "codex_default_model": "gpt-5.4",
+    "codex_default_reasoning_effort": "xhigh",
+    "model_intent": "사용자가 버튼 클릭 흐름을 자동화하고 결과를 커밋까지 원함",
+    "implementation_summary": "버튼 핸들러와 API 호출 코드를 수정함",
+    "validation_summary": "pytest -q 통과",
+    "processed_files": [
+      "app/static/app.js",
+      "app/main.py"
+    ],
+    "diff": "diff --git a/app/main.py b/app/main.py",
+    "test_output": "2 passed",
+    "execution_log_tail": "Codex completed",
+    "risks": []
+  },
+  "error": null
+}

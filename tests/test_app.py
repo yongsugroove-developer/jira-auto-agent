@@ -1,3 +1,6 @@
+import json
+from datetime import datetime, timedelta, timezone
+
 import app.main as main_module
 from app.main import create_app
 
@@ -258,3 +261,114 @@ def test_run_workflow_returns_stubbed_automation_result(monkeypatch) -> None:
     assert status_data["result"]["resolved_model"] == "gpt-5.4"
     assert status_data["result"]["resolved_reasoning_effort"] == "xhigh"
     assert status_data["result"]["processed_files"] == ["app/static/app.js", "app/main.py"]
+
+
+def test_workflow_run_persists_across_app_recreation(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(main_module, "WORKFLOW_RUNS_DIR", tmp_path / "workflow-runs")
+
+    def fake_load(self, provider: str):  # noqa: ANN001
+        if provider == "github":
+            return {
+                "repo_owner": "owner",
+                "repo_name": "repo",
+                "base_branch": "main",
+                "token": "token",
+                "local_repo_path": ".",
+            }
+        return None
+
+    def fake_find_codex_launcher() -> list[str]:
+        return ["codex"]
+
+    def fake_execute(repo_path, github_config, payload, reporter=None):  # noqa: ANN001
+        if reporter:
+            reporter("codex_start", "Codex stub start")
+        return {
+            "ok": True,
+            "status": "ready_for_manual_commit",
+            "message": "완료",
+            "requested_model": "",
+            "requested_reasoning_effort": "",
+            "resolved_model": "gpt-5.4",
+            "resolved_reasoning_effort": "high",
+            "codex_default_model": "gpt-5.4",
+            "codex_default_reasoning_effort": "high",
+            "model_intent": "의도",
+            "implementation_summary": "구현",
+            "validation_summary": "검증",
+            "processed_files": ["app/main.py"],
+            "diff": "diff --git a/app/main.py b/app/main.py",
+            "test_output": "1 passed",
+            "execution_log_tail": "Codex completed",
+            "risks": [],
+        }
+
+    class ImmediateThread:
+        def __init__(self, target, name=None, daemon=None):  # noqa: ANN001
+            self._target = target
+
+        def start(self) -> None:
+            self._target()
+
+    monkeypatch.setattr(main_module.CredentialStore, "load", fake_load)
+    monkeypatch.setattr(main_module, "_find_codex_launcher", fake_find_codex_launcher)
+    monkeypatch.setattr(main_module, "_resolve_commit_identity", lambda repo_path, payload: ({"name": "Codex Bot", "email": "codex@example.com"}, []))
+    monkeypatch.setattr(main_module, "_execute_coding_workflow", fake_execute)
+    monkeypatch.setattr(main_module.threading, "Thread", ImmediateThread)
+
+    app = create_app()
+    client = app.test_client()
+    response = client.post(
+        "/api/workflow/run",
+        json={
+            "issue_key": "DEMO-21",
+            "issue_summary": "persist run",
+            "branch_name": "feature/DEMO-21-persist-run",
+            "commit_message": "DEMO-21: persist run",
+            "work_instruction": "run persistence",
+            "test_command": "pytest -q",
+            "allow_auto_commit": False,
+        },
+    )
+    assert response.status_code == 202
+    run_id = response.get_json()["run_id"]
+
+    recreated_app = create_app()
+    recreated_client = recreated_app.test_client()
+    status_response = recreated_client.get(f"/api/workflow/run/{run_id}")
+    assert status_response.status_code == 200
+
+    status_data = status_response.get_json()
+    assert status_data is not None
+    assert status_data["result"]["status"] == "ready_for_manual_commit"
+    assert status_data["result"]["processed_files"] == ["app/main.py"]
+
+
+def test_stale_workflow_run_is_marked_interrupted(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(main_module, "WORKFLOW_RUNS_DIR", tmp_path / "workflow-runs")
+    run_dir = tmp_path / "workflow-runs"
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    old_time = (datetime.now(timezone.utc) - timedelta(seconds=main_module.WORKFLOW_STALE_SECONDS + 5)).isoformat()
+    run_payload = {
+        "run_id": "stale-run",
+        "status": "running",
+        "message": "Codex 실행 중",
+        "created_at": old_time,
+        "started_at": old_time,
+        "finished_at": None,
+        "events": [{"timestamp": old_time, "phase": "running", "message": "Codex 실행 중"}],
+        "result": None,
+        "error": None,
+    }
+    (run_dir / "stale-run.json").write_text(json.dumps(run_payload), encoding="utf-8")
+
+    app = create_app()
+    client = app.test_client()
+    response = client.get("/api/workflow/run/stale-run")
+    assert response.status_code == 200
+
+    data = response.get_json()
+    assert data is not None
+    assert data["status"] == "failed"
+    assert data["error"]["status"] == "workflow_interrupted"
