@@ -14,6 +14,7 @@
 - `AGENTS.md`: 저장소 전체 운영 규칙
 - `docs/agent-workflow.md`: 작업 흐름 문서
 - `docs/roles/`: 역할별 책임과 체크리스트
+- `docs/jira-github-commit-automation-plan.md`: Jira-GitHub 자동화 PoC 계획
 
 ## 사용 방식
 
