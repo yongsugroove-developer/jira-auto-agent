@@ -7,7 +7,7 @@ const FIELD_LABELS = {
   github_repo: "GitHub Repo",
   github_base_branch: "Base Branch",
   github_token: "GitHub Token",
-  repo_mappings: "Space Repo Mappings",
+  repo_mappings: "공간별 저장소 연결",
   local_repo_path: "Local Repo Path",
   branch_name: "Branch Name",
   commit_message: "Commit Message",
@@ -39,31 +39,159 @@ const workflowState = {
   activeRunId: null,
 };
 
-const HIDDEN_WORKFLOW_PHASES = new Set(["codex_running", "test_running"]);
+const VISIBLE_WORKFLOW_PHASES = new Set([
+  "queued",
+  "running",
+  "branch_prepare",
+  "branch_ready",
+  "codex_start",
+  "codex_turn",
+  "codex_message",
+  "codex_command",
+  "stage_changes",
+  "stage_ready",
+  "commit_start",
+  "commit_end",
+  "codex_timeout",
+  "completed",
+  "failed",
+]);
 const WORKFLOW_PHASE_LABELS = {
-  queued: "Queued",
-  running: "Running",
-  completed: "Completed",
-  failed: "Failed",
-  branch_prepare: "Branch Prepare",
-  branch_ready: "Branch Ready",
-  codex_start: "Codex Start",
-  codex_turn: "Codex Turn",
-  codex_message: "Codex Message",
-  codex_command: "Command",
-  codex_file_change: "File Change",
-  codex_output: "Output",
-  codex_timeout: "Codex Timeout",
-  codex_end: "Codex End",
-  stage_changes: "Stage Collect",
-  stage_ready: "Stage Ready",
-  test_start: "Test Start",
-  test_end: "Test End",
-  commit_start: "Commit Start",
-  commit_end: "Commit End",
+  queued: "대기",
+  running: "실행",
+  completed: "완료",
+  failed: "실패",
+  branch_prepare: "브랜치 준비",
+  branch_ready: "브랜치 준비 완료",
+  codex_start: "Codex 시작",
+  codex_turn: "Codex 진행",
+  codex_message: "Codex 진행",
+  codex_command: "명령 실행",
+  codex_timeout: "Codex 시간 초과",
+  stage_changes: "변경 수집",
+  stage_ready: "변경 수집 완료",
+  commit_start: "자동 커밋",
+  commit_end: "자동 커밋 완료",
 };
 
+FIELD_LABELS.work_instruction = "작업 지시 상세";
+FIELD_LABELS.acceptance_criteria = "수용 기준";
+FIELD_LABELS.test_command = "참고용 로컬 테스트 명령";
+FIELD_LABELS.commit_checklist = "커밋 체크리스트";
+
+const MAX_VISIBLE_WORKFLOW_EVENTS = 8;
+VISIBLE_WORKFLOW_PHASES.add("syntax_start");
+VISIBLE_WORKFLOW_PHASES.add("syntax_end");
+WORKFLOW_PHASE_LABELS.queued = "대기";
+WORKFLOW_PHASE_LABELS.running = "실행";
+WORKFLOW_PHASE_LABELS.completed = "완료";
+WORKFLOW_PHASE_LABELS.failed = "실패";
+WORKFLOW_PHASE_LABELS.branch_prepare = "브랜치 준비";
+WORKFLOW_PHASE_LABELS.branch_ready = "브랜치 준비 완료";
+WORKFLOW_PHASE_LABELS.codex_start = "Codex 시작";
+WORKFLOW_PHASE_LABELS.codex_turn = "Codex 진행";
+WORKFLOW_PHASE_LABELS.codex_message = "Codex 진행";
+WORKFLOW_PHASE_LABELS.codex_command = "명령 실행";
+WORKFLOW_PHASE_LABELS.stage_changes = "변경 수집";
+WORKFLOW_PHASE_LABELS.stage_ready = "변경 수집 완료";
+WORKFLOW_PHASE_LABELS.commit_start = "자동 커밋";
+WORKFLOW_PHASE_LABELS.commit_end = "자동 커밋 완료";
+WORKFLOW_PHASE_LABELS.codex_timeout = "Codex 시간 초과";
+WORKFLOW_PHASE_LABELS.syntax_start = "문법 검사";
+WORKFLOW_PHASE_LABELS.syntax_end = "문법 검사 완료";
+
+function parseRepoMappingsText(text) {
+  return String(text || "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => line.split("|").map((part) => part.trim()))
+    .filter((parts) => parts.length === 5 && parts.every(Boolean))
+    .map((parts) => ({
+      space_key: parts[0],
+      repo_owner: parts[1],
+      repo_name: parts[2],
+      base_branch: parts[3],
+      local_repo_path: parts[4],
+    }));
+}
+
+function serializeRepoMappings(items) {
+  return (items || [])
+    .map((item) => [
+      String(item.space_key || "").trim(),
+      String(item.repo_owner || "").trim(),
+      String(item.repo_name || "").trim(),
+      String(item.base_branch || "").trim(),
+      String(item.local_repo_path || "").trim(),
+    ].join("|"))
+    .filter((line) => !line.includes("||"))
+    .join("\n");
+}
+
+function currentRepoMappings() {
+  return $("#repo_mapping_list .repo-mapping-item").map(function () {
+    const row = $(this);
+    return {
+      space_key: row.attr("data-space-key") || "",
+      repo_owner: row.attr("data-repo-owner") || "",
+      repo_name: row.attr("data-repo-name") || "",
+      base_branch: row.attr("data-base-branch") || "",
+      local_repo_path: row.attr("data-local-repo-path") || "",
+    };
+  }).get();
+}
+
+function syncRepoMappingsField() {
+  $("#repo_mappings").val(serializeRepoMappings(currentRepoMappings()));
+}
+
+function renderRepoMappings(items) {
+  const rows = (items || [])
+    .map((item, index) => `
+      <div
+        class="repo-mapping-item"
+        data-space-key="${escapeHtml(item.space_key)}"
+        data-repo-owner="${escapeHtml(item.repo_owner)}"
+        data-repo-name="${escapeHtml(item.repo_name)}"
+        data-base-branch="${escapeHtml(item.base_branch)}"
+        data-local-repo-path="${escapeHtml(item.local_repo_path)}"
+      >
+        <div class="repo-mapping-item__summary">
+          <strong>${escapeHtml(`공간명 ${item.space_key}`)}</strong>
+          <span>${escapeHtml(`레포 ${item.repo_owner}/${item.repo_name}`)}</span>
+          <span>${escapeHtml(`기준 브랜치 ${item.base_branch}`)}</span>
+          <span>${escapeHtml(`로컬 경로 ${item.local_repo_path}`)}</span>
+        </div>
+        <button type="button" class="ghost-button repo-mapping-item__remove" data-repo-mapping-remove="${index}">삭제</button>
+      </div>
+    `)
+    .join("");
+
+  $("#repo_mapping_list").html(rows || '<p class="repo-mapping-empty">아직 추가된 공간 연결이 없습니다.</p>');
+  syncRepoMappingsField();
+}
+
+function clearRepoMappingInputs() {
+  $("#mapping_space_key").val("");
+  $("#mapping_repo_owner").val("");
+  $("#mapping_repo_name").val("");
+  $("#mapping_base_branch").val("main");
+  $("#mapping_local_repo_path").val("");
+}
+
+function readRepoMappingInputs() {
+  return {
+    space_key: $("#mapping_space_key").val().trim().toUpperCase(),
+    repo_owner: $("#mapping_repo_owner").val().trim(),
+    repo_name: $("#mapping_repo_name").val().trim(),
+    base_branch: $("#mapping_base_branch").val().trim() || "main",
+    local_repo_path: $("#mapping_local_repo_path").val().trim(),
+  };
+}
+
 function collectConfig() {
+  syncRepoMappingsField();
   return {
     jira_base_url: $("#jira_base_url").val().trim(),
     jira_email: $("#jira_email").val().trim(),
@@ -108,7 +236,7 @@ function collectWorkflow() {
 }
 
 function workflowRequiredFields(payload) {
-  return ["issue_key", "issue_summary", "branch_name", "commit_message", "work_instruction", "test_command"]
+  return ["issue_key", "issue_summary", "branch_name", "commit_message", "work_instruction"]
     .filter((field) => !String(payload[field] || "").trim());
 }
 
@@ -120,7 +248,6 @@ function requestedInfoForFields(fields) {
     codex_reasoning_effort: { guide_section: "automation", guide_step_id: "automation-codex-model" },
     work_instruction: { guide_section: "automation", guide_step_id: "automation-work-instruction" },
     acceptance_criteria: { guide_section: "automation", guide_step_id: "automation-acceptance-criteria" },
-    test_command: { guide_section: "automation", guide_step_id: "automation-test-command" },
     commit_checklist: { guide_section: "automation", guide_step_id: "automation-commit-checklist" },
     git_author_name: { guide_section: "automation", guide_step_id: "automation-git-author" },
     git_author_email: { guide_section: "automation", guide_step_id: "automation-git-author" },
@@ -154,7 +281,12 @@ function clearResultActions(targetId) {
 }
 
 function fillConfig(data) {
+  const repoMappings = parseRepoMappingsText(data.repo_mappings || "");
+  renderRepoMappings(repoMappings);
   Object.keys(data).forEach((key) => {
+    if (key === "repo_mappings") {
+      return;
+    }
     const el = $("#" + key);
     if (el.length) {
       el.val(data[key]);
@@ -608,8 +740,8 @@ function setSummaryCard(title, value, detail) {
 
 function eventLogText(events) {
   const items = (events || [])
-    .filter((event) => !HIDDEN_WORKFLOW_PHASES.has(String(event.phase || "")))
-    .slice(-60);
+    .filter((event) => VISIBLE_WORKFLOW_PHASES.has(String(event.phase || "")))
+    .slice(-16);
   if (!items.length) {
     return "실행 로그 없음";
   }
@@ -623,7 +755,7 @@ function eventLogText(events) {
 }
 
 function latestWorkflowEvent(data) {
-  const events = ((data && data.events) || []).filter((event) => !HIDDEN_WORKFLOW_PHASES.has(String(event.phase || "")));
+  const events = ((data && data.events) || []).filter((event) => VISIBLE_WORKFLOW_PHASES.has(String(event.phase || "")));
   return events.length ? events[events.length - 1] : null;
 }
 
@@ -725,7 +857,7 @@ function renderAutomationResult(data) {
 
   $("#automation_diff").text(payload.diff || "diff 없음");
   $("#automation_test_output").text(payload.test_output || "테스트 출력 없음");
-  $("#automation_log").text(payload.execution_log_tail || eventLogText(data.events) || "실행 로그 없음");
+  $("#automation_log").text(eventLogText(data.events));
 }
 
 function resetAutomationResult() {
@@ -740,6 +872,138 @@ function resetAutomationResult() {
   $("#automation_log").text("");
 }
 
+function compactWorkflowEvents(events) {
+  const filtered = (events || [])
+    .filter((event) => VISIBLE_WORKFLOW_PHASES.has(String(event.phase || "")))
+    .map((event) => ({
+      ...event,
+      phase: String(event.phase || ""),
+      message: String(event.message || "").trim(),
+    }))
+    .filter((event) => event.message);
+
+  const deduped = [];
+  filtered.forEach((event) => {
+    const last = deduped[deduped.length - 1];
+    if (last && last.phase === event.phase && last.message === event.message) {
+      deduped[deduped.length - 1] = event;
+      return;
+    }
+    deduped.push(event);
+  });
+
+  return deduped.slice(-MAX_VISIBLE_WORKFLOW_EVENTS);
+}
+
+function eventLogText(events) {
+  const items = compactWorkflowEvents(events);
+  if (!items.length) {
+    return "표시할 진행 로그가 없습니다.";
+  }
+  return items
+    .map((event) => {
+      const label = WORKFLOW_PHASE_LABELS[event.phase] || event.phase || "로그";
+      return `[${event.timestamp}] ${label}: ${event.message}`;
+    })
+    .join("\n");
+}
+
+function latestWorkflowEvent(data) {
+  const events = compactWorkflowEvents((data && data.events) || []);
+  return events.length ? events[events.length - 1] : null;
+}
+
+function renderAutomationResult(data) {
+  const payload = data.result || data.error || data;
+  const modelLabel = payload.resolved_model || payload.requested_model || payload.codex_default_model || "Codex CLI default";
+  const reasoningLabel = payload.resolved_reasoning_effort || payload.requested_reasoning_effort || payload.codex_default_reasoning_effort || "Codex CLI default";
+  const latestEvent = latestWorkflowEvent(data);
+  const testSummaryValue = payload.test_skipped
+    ? "자동 실행 안 함"
+    : (payload.test_returncode == null ? "-" : String(payload.test_returncode));
+  const testSummaryDetail = payload.test_skipped
+    ? (payload.test_command || "참고용 명령 없음")
+    : (payload.test_command || "");
+  const cards = [
+    setSummaryCard("상태", data.status || payload.status || "-", data.message || payload.message || ""),
+    setSummaryCard("현재 단계", latestEvent ? (WORKFLOW_PHASE_LABELS[latestEvent.phase] || latestEvent.phase) : "-", latestEvent ? latestEvent.message : ""),
+    setSummaryCard("경과 시간", workflowElapsedLabel(data), payload.codex_elapsed_seconds != null ? `Codex ${payload.codex_elapsed_seconds}초` : ""),
+    setSummaryCard("모델", modelLabel, `reasoning: ${reasoningLabel}`),
+    setSummaryCard("브랜치", payload.branch_name || "-", payload.current_branch ? `현재 브랜치 ${payload.current_branch}` : ""),
+    setSummaryCard("커밋", payload.commit_sha || "-", payload.commit_message || ""),
+    setSummaryCard("로컬 테스트", testSummaryValue, testSummaryDetail),
+    setSummaryCard("최근 진행", payload.codex_last_progress_message || "-", payload.codex_progress_event_count ? `이벤트 ${payload.codex_progress_event_count}건` : ""),
+  ].join("");
+
+  $("#automation_overview").html(cards);
+  $("#automation_intent").text(payload.model_intent || "응답 없음");
+  $("#automation_implementation").text(payload.implementation_summary || "응답 없음");
+  $("#automation_validation").text(payload.validation_summary || "응답 없음");
+
+  const risks = payload.risks || [];
+  $("#automation_risks").html(
+    risks.length
+      ? risks.map((risk) => `<li>${escapeHtml(risk)}</li>`).join("")
+      : '<li class="file-list__empty">특이 리스크가 보고되지 않았습니다.</li>'
+  );
+
+  const files = payload.processed_files || [];
+  $("#automation_files").html(
+    files.length
+      ? files.map((file) => `<li>${escapeHtml(file)}</li>`).join("")
+      : '<li class="file-list__empty">변경 파일이 없습니다.</li>'
+  );
+
+  $("#automation_diff").text(payload.diff || "diff 없음");
+  $("#automation_test_output").text(payload.test_output || "테스트 출력 없음");
+  $("#automation_log").text(eventLogText(data.events));
+}
+
+function renderAutomationResult(data) {
+  const payload = data.result || data.error || data;
+  const modelLabel = payload.resolved_model || payload.requested_model || payload.codex_default_model || "Codex CLI default";
+  const reasoningLabel = payload.resolved_reasoning_effort || payload.requested_reasoning_effort || payload.codex_default_reasoning_effort || "Codex CLI default";
+  const latestEvent = latestWorkflowEvent(data);
+  const syntaxReturncode = payload.syntax_check_returncode != null ? payload.syntax_check_returncode : payload.test_returncode;
+  const syntaxOutput = payload.syntax_check_output || payload.test_output || "";
+  const syntaxElapsed = payload.syntax_check_elapsed_seconds != null ? payload.syntax_check_elapsed_seconds : payload.test_elapsed_seconds;
+  const syntaxFiles = payload.syntax_checked_files || [];
+  const syntaxDetail = syntaxFiles.length ? `파일 ${syntaxFiles.length}개` : (payload.test_command || "지원되는 문법 검사 대상 없음");
+  const cards = [
+    setSummaryCard("상태", data.status || payload.status || "-", data.message || payload.message || ""),
+    setSummaryCard("현재 단계", latestEvent ? (WORKFLOW_PHASE_LABELS[latestEvent.phase] || latestEvent.phase) : "-", latestEvent ? latestEvent.message : ""),
+    setSummaryCard("경과 시간", workflowElapsedLabel(data), payload.codex_elapsed_seconds != null ? `Codex ${payload.codex_elapsed_seconds}초 / 문법 ${syntaxElapsed == null ? "-" : `${syntaxElapsed}초`}` : ""),
+    setSummaryCard("모델", modelLabel, `reasoning: ${reasoningLabel}`),
+    setSummaryCard("브랜치", payload.branch_name || "-", payload.current_branch ? `현재 브랜치 ${payload.current_branch}` : ""),
+    setSummaryCard("커밋", payload.commit_sha || "-", payload.commit_message || ""),
+    setSummaryCard("문법 검사", syntaxReturncode == null ? "-" : String(syntaxReturncode), syntaxDetail),
+    setSummaryCard("최근 진행", payload.codex_last_progress_message || "-", payload.codex_progress_event_count ? `이벤트 ${payload.codex_progress_event_count}건` : ""),
+  ].join("");
+
+  $("#automation_overview").html(cards);
+  $("#automation_intent").text(payload.model_intent || "응답 없음");
+  $("#automation_implementation").text(payload.implementation_summary || "응답 없음");
+  $("#automation_validation").text(payload.validation_summary || "응답 없음");
+
+  const risks = payload.risks || [];
+  $("#automation_risks").html(
+    risks.length
+      ? risks.map((risk) => `<li>${escapeHtml(risk)}</li>`).join("")
+      : '<li class="file-list__empty">특이 리스크가 보고되지 않았습니다.</li>'
+  );
+
+  const files = payload.processed_files || [];
+  $("#automation_files").html(
+    files.length
+      ? files.map((file) => `<li>${escapeHtml(file)}</li>`).join("")
+      : '<li class="file-list__empty">변경 파일이 없습니다.</li>'
+  );
+
+  $("#automation_diff").text(payload.diff || "diff 없음");
+  $("#automation_test_output").text(syntaxOutput || "문법 검사 출력 없음");
+  $("#automation_log").text(eventLogText(data.events));
+}
+
 function withButtonBusy(button, callback) {
   const originalText = button.text();
   button.prop("disabled", true).text("실행 중...");
@@ -751,6 +1015,74 @@ $(document).ready(function () {
   getSetupGuide();
   resetAutomationResult();
   resetIssueDetail();
+  renderRepoMappings(parseRepoMappingsText($("#repo_mappings").val()));
+  $("#test_command").attr("placeholder", "자동 실행하지 않습니다. 필요하면 참고용 명령만 적어 두세요.");
+  $("#mapping_space_key").attr("placeholder", "예: GCPPLDCAD");
+  $("#mapping_local_repo_path").attr("placeholder", "로컬 저장소 경로");
+  $("#add_repo_mapping").text("연결 추가");
+  $(".repo-mapping-help").first().text("Jira 공간명과 연결할 GitHub 레포를 나눠서 입력합니다. 공간명을 먼저 적고, 아래 저장소 정보를 입력한 뒤 추가하세요.");
+  $("#repo_mappings").closest("label").contents().first()[0].textContent = "공간별 저장소 연결";
+  $("#test_command").closest("label").contents().first()[0].textContent = "참고용 로컬 테스트 명령";
+  $("#allow_auto_commit").closest("label").contents().last()[0].textContent = " 로컬 테스트 없이 자동 커밋 허용";
+  if (!$(".repo-mapping-section-title").length) {
+    $("<div>", { class: "repo-mapping-section-title", text: "1. Jira 공간명" }).insertBefore("#mapping_space_key");
+    $("<div>", { class: "repo-mapping-section-title", text: "2. 연결할 저장소" }).insertBefore("#mapping_repo_owner");
+  }
+
+  FIELD_LABELS.local_repo_path = "기본 로컬 레포 경로";
+  $("#test_command").attr("placeholder", "자동 실행하지 않습니다. 필요하면 참고용 명령만 적어 두세요.");
+  $("#mapping_space_key").attr("placeholder", "예: GCPPLDCAD");
+  $("#mapping_local_repo_path").attr("placeholder", "로컬 레포 경로");
+  $("#add_repo_mapping").text("연결 추가");
+  $(".repo-mapping-help").first().text("여러 Jira 공간을 각각 다른 저장소에 연결할 때만 펼쳐서 입력합니다. 각 공간 연결에는 로컬 레포 경로도 함께 포함됩니다.");
+  const mappingLabel = $("#repo_mappings").closest("label");
+  const localRepoLabel = $("#local_repo_path").closest("label");
+  if (localRepoLabel.length && mappingLabel.length) {
+    localRepoLabel.insertBefore(mappingLabel);
+    localRepoLabel.contents().first()[0].textContent = "기본 로컬 레포 경로";
+  }
+  $("#test_command").closest("label").contents().first()[0].textContent = "참고용 로컬 테스트 명령";
+  $("#allow_auto_commit").closest("label").contents().last()[0].textContent = " 로컬 테스트 없이 자동 커밋 허용";
+  $("#jira_issue_comments").closest(".detail-card").find("h3").text("최근 코멘트");
+  $("#jira_issue_description").closest(".detail-card").find("h3").text("선택 이슈 상세");
+  $("#automation_test_output").closest(".detail-card").find("h3").text("문법 검사 출력");
+  if (!$("#jira_issue_comments_meta").length) {
+    $("<div>", { id: "jira_issue_comments_meta", class: "issue-meta issue-meta-spacer", "aria-hidden": "true" }).insertBefore("#jira_issue_comments");
+  }
+  if (mappingLabel.length && !mappingLabel.hasClass("repo-mapping-panel-host")) {
+    const hiddenField = $("#repo_mappings");
+    const panelChildren = mappingLabel.children().detach();
+    const panelToggle = $("<button>", {
+      id: "repo_mapping_toggle",
+      type: "button",
+      class: "secondary-button repo-mapping-panel__toggle",
+      text: "공간별 저장소 연결 추가",
+    });
+    const panelBody = $("<div>", { id: "repo_mapping_panel_body", class: "repo-mapping-panel__body" }).append(panelChildren);
+    mappingLabel.addClass("repo-mapping-panel-host");
+    mappingLabel.empty().append(panelToggle).append(hiddenField).append(panelBody);
+    const shouldOpen = currentRepoMappings().length > 0;
+    if (!shouldOpen) {
+      panelBody.hide();
+    } else {
+      mappingLabel.addClass("is-open");
+      panelToggle.text("공간별 저장소 연결 닫기");
+    }
+    panelToggle.on("click", function () {
+      const isOpen = mappingLabel.hasClass("is-open");
+      mappingLabel.toggleClass("is-open", !isOpen);
+      panelToggle.text(isOpen ? "공간별 저장소 연결 추가" : "공간별 저장소 연결 닫기");
+      panelBody.stop(true, true).slideToggle(150);
+    });
+  }
+  const sectionTitles = $(".repo-mapping-section-title");
+  if (sectionTitles.length >= 2) {
+    $(sectionTitles[0]).text("1. Jira 공간명");
+    $(sectionTitles[1]).text("2. 연결할 저장소");
+  } else if (mappingLabel.length) {
+    $("<div>", { class: "repo-mapping-section-title", text: "1. Jira 공간명" }).insertBefore("#mapping_space_key");
+    $("<div>", { class: "repo-mapping-section-title", text: "2. 연결할 저장소" }).insertBefore("#mapping_repo_owner");
+  }
 
   $("#open_setup_guide").on("click", function () {
     openGuide("jira", "jira-base-url");
@@ -801,6 +1133,32 @@ $(document).ready(function () {
       fillWorkflow(issue);
       loadIssueDetail(issue.issue_key);
     }
+  });
+
+  $("#add_repo_mapping").on("click", function () {
+    const nextItem = readRepoMappingInputs();
+    const missing = Object.entries(nextItem).filter(([, value]) => !String(value || "").trim());
+    if (missing.length) {
+      setResult("#config_result", {
+        ok: false,
+        error: "repo_mapping_fields_missing",
+        fields: missing.map(([key]) => key),
+        message: "공간명, owner, repo, base branch, local path를 모두 입력해 주세요.",
+      });
+      return;
+    }
+
+    const items = currentRepoMappings().filter((item) => item.space_key !== nextItem.space_key);
+    items.push(nextItem);
+    renderRepoMappings(items);
+    clearRepoMappingInputs();
+    setResult("#config_result", { ok: true, message: `매핑을 추가했습니다: ${nextItem.space_key}` });
+  });
+
+  $(document).on("click", "[data-repo-mapping-remove]", function () {
+    const removeIndex = Number($(this).attr("data-repo-mapping-remove"));
+    const items = currentRepoMappings().filter((_, index) => index !== removeIndex);
+    renderRepoMappings(items);
   });
 
   $("#load_config").on("click", function () {

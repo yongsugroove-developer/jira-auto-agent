@@ -32,7 +32,26 @@
         <label>GitHub Repo<input id="github_repo" type="text" placeholder="repository-name"></label>
         <label>Base Branch<input id="github_base_branch" type="text" value="main"></label>
         <label>GitHub Token<input id="github_token" type="password" placeholder="ghp_..."></label>
-        <label class="wide">Space Repo Mappings<textarea id="repo_mappings" rows="4" placeholder="GCPPLDCAD|team-org|jira-auto-agent|main|C:\make-project\jira-auto-agent"></textarea></label>
+        <label class="wide">
+          공간별 저장소 연결
+          <textarea id="repo_mappings" rows="1" hidden></textarea>
+          <div class="repo-mapping-builder">
+            <p class="repo-mapping-help">공간명과 레포를 각각 나눠 입력한 뒤 추가하면 됩니다.</p>
+            <div class="repo-mapping-inputs">
+              <input id="mapping_space_key" type="text" placeholder="공간명 예: GCPPLDCAD">
+              <input id="mapping_repo_owner" type="text" placeholder="GitHub owner">
+              <input id="mapping_repo_name" type="text" placeholder="GitHub repo">
+              <input id="mapping_base_branch" type="text" value="main" placeholder="기준 브랜치">
+              <input id="mapping_local_repo_path" type="text" placeholder="로컬 레포 경로">
+            </div>
+            <div class="actions">
+              <button id="add_repo_mapping" type="button" class="secondary-button">매핑 추가</button>
+            </div>
+            <div id="repo_mapping_list" class="repo-mapping-list">
+              <p class="repo-mapping-empty">아직 추가된 공간 연결이 없습니다.</p>
+            </div>
+          </div>
+        </label>
         <label class="wide">Local Repo Path<input id="local_repo_path" type="text" placeholder="/workspace/your-repo"></label>
       </div>
       <div class="actions">

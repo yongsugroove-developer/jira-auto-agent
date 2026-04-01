@@ -102,12 +102,12 @@ def test_prepare_workflow_branch_and_requested_information() -> None:
     assert data is not None
     assert data["branch_name"].startswith("feature/DEMO-123-")
     assert data["token_budget"] == 40000
-    assert data["approval_mode"] == "auto-commit-after-tests"
+    assert data["approval_mode"] == "auto-commit-without-local-tests"
     assert "codex_model_default" in data
     assert "codex_reasoning_effort_default" in data
     assert data["allowed_reasoning_efforts"] == ["low", "medium", "high", "xhigh"]
     requested_fields = [item["field"] for item in data["requested_information"]]
-    assert requested_fields == ["work_instruction", "test_command", "commit_checklist"]
+    assert requested_fields == ["work_instruction", "commit_checklist"]
 
 
 def test_run_workflow_missing_fields_include_automation_guide() -> None:
@@ -123,7 +123,7 @@ def test_run_workflow_missing_fields_include_automation_guide() -> None:
     requested = {item["field"]: item for item in data["requested_information"]}
     assert requested["work_instruction"]["guide_section"] == "automation"
     assert requested["work_instruction"]["guide_step_id"] == "automation-work-instruction"
-    assert requested["test_command"]["guide_step_id"] == "automation-test-command"
+    assert "test_command" not in requested
 
 
 def test_run_workflow_rejects_invalid_reasoning_effort() -> None:
@@ -444,17 +444,16 @@ def test_describe_codex_event_filters_reasoning_and_formats_command() -> None:
 
     described = main_module._describe_codex_event(
         {
-            "type": "item.completed",
+            "type": "item.started",
             "item": {
                 "type": "command_execution",
-                "status": "completed",
+                "status": "in_progress",
                 "command": "python -m pytest -q",
-                "exit_code": 0,
             },
         }
     )
 
-    assert described == ("codex_command", "Command completed: exit=0 python -m pytest -q")
+    assert described == ("codex_command", "명령 실행: python -m pytest -q")
 
 
 def test_run_codex_edit_uses_streamed_progress(monkeypatch, tmp_path) -> None:
@@ -494,3 +493,18 @@ def test_run_codex_edit_uses_streamed_progress(monkeypatch, tmp_path) -> None:
     assert result["last_progress_message"] == "Command started: python -m pytest -q"
     assert "planning" in result["output_tail"]
     assert result["final_message"]["intent_summary"] == "intent"
+
+
+def test_test_changes_plain_runs_syntax_checks_for_staged_files(tmp_path) -> None:
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+    subprocess.run(["git", "init"], cwd=repo_path, check=True, capture_output=True)
+    (repo_path / "ok.py").write_text("print('ok')\n", encoding="utf-8")
+    subprocess.run(["git", "add", "ok.py"], cwd=repo_path, check=True, capture_output=True)
+
+    result = main_module._test_changes_plain(repo_path, "pytest -q")
+
+    assert result["returncode"] == 0
+    assert result["skipped"] is False
+    assert "ok.py" in result["checked_files"]
+    assert result["output"]

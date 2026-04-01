@@ -362,6 +362,95 @@ tbody tr:hover {
   margin-bottom: 12px;
 }
 
+.issue-meta-spacer {
+  min-height: 34px;
+}
+
+.repo-mapping-panel-host {
+  display: grid;
+  gap: 12px;
+}
+
+.repo-mapping-panel__toggle {
+  justify-self: start;
+}
+
+.repo-mapping-panel__body {
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid rgba(24, 49, 41, 0.08);
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.78);
+}
+
+.repo-mapping-builder {
+  display: grid;
+  gap: 12px;
+}
+
+.repo-mapping-help,
+.grid-note {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.repo-mapping-section-title {
+  grid-column: 1 / -1;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--accent-strong);
+}
+
+.repo-mapping-inputs {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+#mapping_space_key {
+  grid-column: 1 / -1;
+}
+
+.repo-mapping-list {
+  display: grid;
+  gap: 10px;
+}
+
+.repo-mapping-item {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: center;
+  padding: 12px 14px;
+  border: 1px solid rgba(24, 49, 41, 0.08);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.8);
+}
+
+.repo-mapping-item__summary {
+  display: grid;
+  gap: 4px;
+}
+
+.repo-mapping-item__summary span {
+  color: var(--muted);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.repo-mapping-item__remove {
+  flex-shrink: 0;
+}
+
+.repo-mapping-empty {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+
 .result-medium {
   min-height: 180px;
 }
@@ -371,7 +460,7 @@ tbody tr:hover {
 }
 
 .result-scroll {
-  max-height: 320px;
+  height: 320px;
   overflow: auto;
 }
 

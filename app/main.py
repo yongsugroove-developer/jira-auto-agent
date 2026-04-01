@@ -9,6 +9,7 @@ import re
 import shutil
 import sqlite3
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -38,6 +39,14 @@ VALID_REASONING_EFFORTS = ("low", "medium", "high", "xhigh")
 WORKFLOW_HEARTBEAT_SECONDS = 10
 WORKFLOW_STALE_SECONDS = 30
 WORKFLOW_RUNS_DIR = DATA_DIR / "workflow-runs"
+FIELD_LABEL_OVERRIDES = {
+    "repo_mappings": "공간별 저장소 연결",
+    "local_repo_path": "기본 로컬 레포 경로",
+    "work_instruction": "작업 지시 상세",
+    "acceptance_criteria": "수용 기준",
+    "test_command": "참고용 로컬 테스트 명령",
+    "commit_checklist": "커밋 체크리스트",
+}
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 LOGGER = logging.getLogger(__name__)
@@ -51,7 +60,7 @@ FIELD_GUIDES: dict[str, dict[str, str]] = {
     "github_repo": {"label": "GitHub Repo", "guide_section": "github", "guide_step_id": "github-owner-repo"},
     "github_base_branch": {"label": "Base Branch", "guide_section": "github", "guide_step_id": "github-base-branch"},
     "github_token": {"label": "GitHub Token", "guide_section": "github", "guide_step_id": "github-token"},
-    "repo_mappings": {"label": "Space Repo Mappings", "guide_section": "github", "guide_step_id": "github-space-repo-mappings"},
+    "repo_mappings": {"label": "공간별 저장소 연결", "guide_section": "github", "guide_step_id": "github-space-repo-mappings"},
     "local_repo_path": {"label": "Local Repo Path", "guide_section": "local_repo", "guide_step_id": "local-repo-path"},
     "branch_name": {"label": "Branch Name", "guide_section": "automation", "guide_step_id": "automation-branch-commit"},
     "commit_message": {"label": "Commit Message", "guide_section": "automation", "guide_step_id": "automation-branch-commit"},
@@ -203,14 +212,14 @@ def _setup_guide_sections() -> list[dict[str, Any]]:
                 ),
                 _guide_step(
                     "github-space-repo-mappings",
-                    "Space to repo mapping",
-                    "Map each Jira issue space to its own GitHub repository and local path.",
+                    "공간명과 저장소 연결",
+                    "Jira 이슈 키의 공간명과 GitHub 저장소, 기준 브랜치, 로컬 경로를 연결합니다.",
                     [
-                        "Enter one mapping per line in the format SPACE|owner|repo|base_branch|local_repo_path.",
-                        "Use the issue key prefix before the first dash as SPACE. Example: GCPPLDCAD-621 uses SPACE GCPPLDCAD.",
-                        "The local path must point to the Git root for that repository on this machine.",
+                        "공간명은 이슈 키에서 첫 번째 하이픈 앞 부분입니다. 예: GCPPLDCAD-621 이면 공간명은 GCPPLDCAD 입니다.",
+                        "각 공간명마다 GitHub owner, repo, 기준 브랜치, 로컬 저장소 경로를 함께 등록합니다.",
+                        "로컬 경로는 이 PC에 있는 해당 저장소의 Git 루트 경로여야 합니다.",
                     ],
-                    "If mappings are provided, workflow runs use the matching space entry instead of the single default repository fields.",
+                    "공간별 연결을 등록하면 단일 기본 저장소 값보다 이 연결 정보가 우선 적용됩니다.",
                     "GCPPLDCAD|team-org|jira-auto-agent|main|C:\\make-project\\jira-auto-agent",
                     ["repo_mappings"],
                 ),
@@ -318,6 +327,19 @@ def _setup_guide_sections() -> list[dict[str, Any]]:
                     "테스트 명령이 비어 있으면 자동 커밋 전 검증 기준이 없어집니다.",
                     "PYTHONPATH=. pytest -q",
                     ["test_command"],
+                ),
+                _guide_step(
+                    "automation-commit-mode",
+                    "자동 커밋 방식 확인",
+                    "현재 자동 작업은 로컬 테스트를 서버에서 실행하지 않고, Codex 변경 결과를 바로 커밋할 수 있습니다.",
+                    [
+                        "참고용 로컬 테스트 명령은 Codex가 작업 범위를 이해하도록 돕는 용도로만 사용됩니다.",
+                        "실제 테스트 실행이 필요하면 자동 작업 후 별도로 로컬에서 직접 확인합니다.",
+                        "자동 커밋을 끄면 변경 내용만 남기고 수동 검토 후 직접 커밋할 수 있습니다.",
+                    ],
+                    "자동 커밋을 켜면 로컬 테스트 없이 커밋이 진행되므로, 필요하면 체크리스트에 별도 검증 항목을 적어 두는 것이 좋습니다.",
+                    "체크박스: 로컬 테스트 없이 자동 커밋 허용",
+                    ["test_command", "commit_checklist"],
                 ),
                 _guide_step(
                     "automation-commit-checklist",
@@ -589,7 +611,6 @@ def _required_workflow_fields(payload: dict[str, Any]) -> list[str]:
         "branch_name": payload.get("branch_name"),
         "commit_message": payload.get("commit_message"),
         "work_instruction": payload.get("work_instruction"),
-        "test_command": payload.get("test_command"),
     }
     return [name for name, value in required.items() if not str(value or "").strip()]
 
@@ -597,7 +618,8 @@ def _required_workflow_fields(payload: dict[str, Any]) -> list[str]:
 def _guide_metadata(field: str) -> dict[str, str]:
     metadata = FIELD_GUIDES.get(field)
     if metadata:
-        return metadata
+        label = FIELD_LABEL_OVERRIDES.get(field, metadata.get("label", field))
+        return {**metadata, "label": label}
     return {"label": field, "guide_section": "automation", "guide_step_id": ""}
 
 
@@ -1287,12 +1309,9 @@ def _describe_codex_event(event: dict[str, Any]) -> tuple[str, str] | None:
     if event_type == "thread.started":
         return None
     if event_type == "turn.started":
-        return ("codex_turn", "Codex is planning the task.")
+        return ("codex_turn", "Codex가 작업 계획을 정리하고 있습니다.")
     if event_type == "turn.completed":
-        usage = event.get("usage") or {}
-        output_tokens = usage.get("output_tokens")
-        detail = f" output_tokens={output_tokens}" if output_tokens is not None else ""
-        return ("codex_turn", f"Codex finished a response turn.{detail}".strip())
+        return None
 
     item = event.get("item")
     if not isinstance(item, dict):
@@ -1304,31 +1323,14 @@ def _describe_codex_event(event: dict[str, Any]) -> tuple[str, str] | None:
         return None
     if item_type == "agent_message":
         text = _short_text(str(item.get("text", "")).strip())
-        return ("codex_message", f"Codex: {text}") if text else None
+        return ("codex_message", text) if text else None
     if item_type == "command_execution":
         command = _summarize_command(str(item.get("command", "")).strip())
         if event_type == "item.started" or status == "in_progress":
-            return ("codex_command", f"Command started: {command}")
-        if event_type == "item.completed" or status == "completed":
-            exit_code = item.get("exit_code")
-            suffix = f" exit={exit_code}" if exit_code is not None else ""
-            return ("codex_command", f"Command completed:{suffix} {command}".strip())
+            return ("codex_command", f"명령 실행: {command}")
         return None
     if item_type == "file_change":
-        changes = item.get("changes")
-        if isinstance(changes, list):
-            rendered = []
-            for change in changes[:6]:
-                if not isinstance(change, dict):
-                    continue
-                path_text = str(change.get("path", "")).strip()
-                if not path_text:
-                    continue
-                kind = str(change.get("kind", "")).strip() or "update"
-                rendered.append(f"{Path(path_text).name}({kind})")
-            if rendered:
-                return ("codex_file_change", "Files changed: " + ", ".join(rendered))
-        return ("codex_file_change", "Files changed.")
+        return None
     return None
 
 
@@ -1750,12 +1752,100 @@ def _test_changes(repo_path: Path, command: str, reporter: Any = None) -> dict[s
 
 
 def _test_changes_plain(repo_path: Path, command: str, reporter: Any = None) -> dict[str, Any]:
+    _ = (repo_path, command, reporter)
+    return {
+        "returncode": 0,
+        "output": "로컬 테스트 자동 실행 안 함",
+        "output_truncated": False,
+        "elapsed_seconds": 0,
+        "skipped": True,
+    }
+
+
+_test_changes = _test_changes_plain
+
+
+def _syntax_check_spec(file_path: Path) -> list[str] | None:
+    suffix = file_path.suffix.lower()
+    if suffix == ".py":
+        return [sys.executable, "-m", "py_compile", str(file_path)]
+    if suffix in {".js", ".mjs", ".cjs"}:
+        node_path = shutil.which("node")
+        if not node_path:
+            return None
+        return [node_path, "--check", str(file_path)]
+    if suffix == ".json":
+        return [
+            sys.executable,
+            "-c",
+            "import json, pathlib, sys; json.loads(pathlib.Path(sys.argv[1]).read_text(encoding='utf-8'))",
+            str(file_path),
+        ]
+    return None
+
+
+def _run_syntax_checks(repo_path: Path, changed_files: list[str], reporter: Any = None) -> dict[str, Any]:
+    checked_files: list[str] = []
+    outputs: list[str] = []
     started_at = time.monotonic()
-    result = _run_shell_command(command, cwd=repo_path, timeout=TEST_TIMEOUT_SECONDS)
-    elapsed_seconds = int(time.monotonic() - started_at)
-    output = _combined_output(result.stdout, result.stderr)
-    output, truncated = _truncate_text(output, MAX_OUTPUT_CHARS)
-    return {"returncode": result.returncode, "output": output, "output_truncated": truncated, "elapsed_seconds": elapsed_seconds}
+
+    for relative_path in changed_files:
+        absolute_path = (repo_path / relative_path).resolve()
+        if not absolute_path.exists() or not absolute_path.is_file():
+            continue
+        command = _syntax_check_spec(absolute_path)
+        if command is None:
+            continue
+
+        checked_files.append(relative_path)
+        if reporter:
+            reporter("syntax_start", f"문법 검사: {relative_path}")
+        result = _run_process(command, cwd=repo_path, timeout=DEFAULT_TIMEOUT)
+        output = _combined_output(result.stdout, result.stderr).strip()
+        if output:
+            outputs.append(f"[{relative_path}]\n{output}")
+        if result.returncode != 0:
+            combined = "\n\n".join(outputs) or f"{relative_path} 문법 검사 실패"
+            combined, truncated = _truncate_text(combined, MAX_OUTPUT_CHARS)
+            return {
+                "returncode": result.returncode,
+                "output": combined,
+                "output_truncated": truncated,
+                "elapsed_seconds": int(time.monotonic() - started_at),
+                "checked_files": checked_files,
+                "skipped": False,
+            }
+
+    if reporter:
+        reporter("syntax_end", f"문법 검사 완료: {len(checked_files)}개 파일")
+
+    summary = "검사할 문법 대상 파일이 없습니다." if not checked_files else "문법 검사 통과"
+    if outputs:
+        summary = "\n\n".join([summary, *outputs])
+    summary, truncated = _truncate_text(summary, MAX_OUTPUT_CHARS)
+    return {
+        "returncode": 0,
+        "output": summary,
+        "output_truncated": truncated,
+        "elapsed_seconds": int(time.monotonic() - started_at),
+        "checked_files": checked_files,
+        "skipped": not checked_files,
+    }
+
+
+def _test_changes_plain(repo_path: Path, command: str, reporter: Any = None) -> dict[str, Any]:
+    _ = command
+    staged_files_text = _git_output(repo_path, "diff", "--cached", "--name-only", "--diff-filter=ACMRTUXB")
+    staged_files = [line.strip() for line in staged_files_text.splitlines() if line.strip()]
+    syntax_result = _run_syntax_checks(repo_path, staged_files, reporter=reporter)
+    return {
+        "returncode": syntax_result["returncode"],
+        "output": syntax_result["output"],
+        "output_truncated": syntax_result["output_truncated"],
+        "elapsed_seconds": syntax_result["elapsed_seconds"],
+        "skipped": bool(syntax_result["skipped"]),
+        "checked_files": syntax_result["checked_files"],
+    }
 
 
 _test_changes = _test_changes_plain
@@ -1868,10 +1958,17 @@ def _execute_coding_workflow(repo_path: Path, github_config: GithubConfig, paylo
         "execution_log_tail": codex_result["output_tail"],
         "execution_log_truncated": codex_result["output_truncated"],
         "test_command": str(payload.get("test_command", "")).strip(),
+        "test_skipped": False,
         "test_returncode": None,
         "test_elapsed_seconds": None,
         "test_output": "",
         "test_output_truncated": False,
+        "syntax_check_returncode": None,
+        "syntax_check_elapsed_seconds": None,
+        "syntax_check_output": "",
+        "syntax_check_output_truncated": False,
+        "syntax_checked_files": [],
+        "syntax_check_skipped": False,
         "commit_sha": None,
         "commit_output": "",
         "commit_output_truncated": False,
@@ -1881,7 +1978,7 @@ def _execute_coding_workflow(repo_path: Path, github_config: GithubConfig, paylo
 
     if codex_result["timed_out"]:
         response["status"] = "codex_timeout"
-        response["message"] = "Codex execution timed out. Check the last progress message and execution log."
+        response["message"] = "Codex 실행이 제한 시간을 초과했습니다. 마지막 진행 단계와 실행 로그를 확인하세요."
         return response
 
     if codex_result["returncode"] != 0:
@@ -1901,20 +1998,32 @@ def _execute_coding_workflow(repo_path: Path, github_config: GithubConfig, paylo
     response["test_elapsed_seconds"] = test_result["elapsed_seconds"]
     response["test_output"] = test_result["output"]
     response["test_output_truncated"] = test_result["output_truncated"]
+    response["syntax_check_returncode"] = test_result["returncode"]
+    response["syntax_check_elapsed_seconds"] = test_result["elapsed_seconds"]
+    response["syntax_check_output"] = test_result["output"]
+    response["syntax_check_output_truncated"] = test_result["output_truncated"]
+    response["syntax_checked_files"] = test_result.get("checked_files", [])
+    response["syntax_check_skipped"] = test_result.get("skipped", False)
     if reporter:
         reporter("test_end", f"테스트 종료(returncode={test_result['returncode']})")
 
     if test_result["returncode"] != 0:
-        response["status"] = "tests_failed"
+        response["status"] = "syntax_failed"
+        response["syntax_check_output"] = response["test_output"]
+        response["syntax_check_returncode"] = test_result["returncode"]
+        response["message"] = "문법 검사에서 실패하여 자동 커밋을 중단했습니다."
         response["message"] = "테스트 명령이 실패하여 자동 커밋을 중단했습니다."
         return response
 
     response["status"] = "validated"
+    response["message"] = "Codex 변경과 문법 검사가 완료되었습니다."
     response["message"] = "Codex 변경과 테스트가 완료되었습니다."
 
+    response["message"] = "Codex 변경과 문법 검사가 완료되었습니다."
     if not bool(payload.get("allow_auto_commit", True)):
         response["ok"] = True
         response["status"] = "ready_for_manual_commit"
+        response["message"] = "Codex 변경과 문법 검사가 완료되었습니다. 자동 커밋은 비활성화되어 있습니다."
         response["message"] = "테스트까지 완료했으며, 자동 커밋은 비활성화되어 있습니다."
         return response
 
@@ -1989,6 +2098,17 @@ def create_app() -> Flask:
             try:
                 result = _execute_coding_workflow(repo_path, github_config, payload, reporter=reporter)
                 final_status = "completed" if result.get("ok") else "failed"
+                result_status = str(result.get("status", "")).strip()
+                normalized_messages = {
+                    "syntax_failed": "문법 검사에서 실패하여 자동 커밋을 중단했습니다.",
+                    "validated": "Codex 변경과 문법 검사가 완료되었습니다.",
+                    "ready_for_manual_commit": "Codex 변경과 문법 검사가 완료되었습니다. 자동 커밋은 비활성화되어 있습니다.",
+                    "committed": "Codex 자동 작업과 문법 검사, 커밋이 완료되었습니다.",
+                    "codex_timeout": "Codex 실행이 제한 시간을 초과했습니다. 마지막 진행 단계와 실행 로그를 확인하세요.",
+                }
+                result_message = normalized_messages.get(result_status, str(result.get("message", "")))
+                if result_message:
+                    result["message"] = result_message
                 update_run(
                     run_id,
                     lambda run: _finish_workflow_run(
@@ -2255,11 +2375,11 @@ def create_app() -> Flask:
                 "branch_name": _suggest_branch_name(issue_key, issue_summary),
                 "commit_message_template": f"{issue_key}: {issue_summary}",
                 "token_budget": DEFAULT_TOKEN_BUDGET,
-                "approval_mode": "auto-commit-after-tests",
+                "approval_mode": "auto-commit-without-local-tests",
                 "codex_model_default": codex_defaults["model"],
                 "codex_reasoning_effort_default": codex_defaults["model_reasoning_effort"],
                 "allowed_reasoning_efforts": list(VALID_REASONING_EFFORTS),
-                "requested_information": _build_requested_information(["work_instruction", "test_command", "commit_checklist"]),
+                "requested_information": _build_requested_information(["work_instruction", "commit_checklist"]),
             }
         )
 
