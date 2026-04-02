@@ -1,6 +1,9 @@
 __pycache__/
 *.pyc
 .venv/
+frontend/node_modules/
 data/app.db
 data/.enc_key
 data/workflow-runs/
+data/project-memory/
+docs/project-overview.md

@@ -74,3 +74,25 @@ PYTHONPATH=. pytest -q
 - Jira 이슈 선택 후 실제 Git 브랜치 생성/체크아웃
 - diff 생성 및 승인 후 파일 반영
 - 테스트 통과 시 커밋 자동화
+
+## React Agentation 경로
+
+기존 Flask + jQuery 화면은 유지하고, 페이지 안에 React 19 기반 Agentation 패널을 부분 삽입했다.
+
+### 프런트엔드 설치
+
+```powershell
+cd frontend
+"C:\Program Files\nodejs\npm.cmd" install
+"C:\Program Files\nodejs\npm.cmd" run build
+```
+
+빌드가 끝나면 정적 자산이 `app/static/react` 아래에 생성되고, Flask 화면에서 자동으로 로드된다.
+
+### 환경 변수
+
+- `AGENTATION_ENDPOINT`: 기본값은 `http://localhost:4747`
+- `AGENTATION_ENABLED`: 기본값은 `1`, `0`이면 React 패널은 렌더링되지만 Agentation 툴바는 비활성화된다.
+- `AGENTATION_AUTOSTART`: 기본값은 `1`, 로컬 엔드포인트를 쓸 때 Flask 시작 시 `agentation-mcp server`를 자동으로 띄운다.
+
+기본 설정에서는 `python app/main.py` 실행 시 로컬 Agentation 서버도 함께 기동된다. 이미 `4747` 포트에서 정상 서버가 떠 있으면 기존 서버를 재사용한다.

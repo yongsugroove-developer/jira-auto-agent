@@ -1037,8 +1037,7 @@ $(document).ready(function () {
   $(".repo-mapping-help").first().text("여러 Jira 공간을 각각 다른 저장소에 연결할 때만 펼쳐서 입력합니다. 각 공간 연결에는 로컬 레포 경로도 함께 포함됩니다.");
   const mappingLabel = $("#repo_mappings").closest("label");
   const localRepoLabel = $("#local_repo_path").closest("label");
-  if (localRepoLabel.length && mappingLabel.length) {
-    localRepoLabel.insertBefore(mappingLabel);
+  if (localRepoLabel.length) {
     localRepoLabel.contents().first()[0].textContent = "기본 로컬 레포 경로";
   }
   $("#test_command").closest("label").contents().first()[0].textContent = "참고용 로컬 테스트 명령";
@@ -1046,42 +1045,10 @@ $(document).ready(function () {
   $("#jira_issue_comments").closest(".detail-card").find("h3").text("최근 코멘트");
   $("#jira_issue_description").closest(".detail-card").find("h3").text("선택 이슈 상세");
   $("#automation_test_output").closest(".detail-card").find("h3").text("문법 검사 출력");
-  if (!$("#jira_issue_comments_meta").length) {
-    $("<div>", { id: "jira_issue_comments_meta", class: "issue-meta issue-meta-spacer", "aria-hidden": "true" }).insertBefore("#jira_issue_comments");
-  }
-  if (mappingLabel.length && !mappingLabel.hasClass("repo-mapping-panel-host")) {
-    const hiddenField = $("#repo_mappings");
-    const panelChildren = mappingLabel.children().detach();
-    const panelToggle = $("<button>", {
-      id: "repo_mapping_toggle",
-      type: "button",
-      class: "secondary-button repo-mapping-panel__toggle",
-      text: "공간별 저장소 연결 추가",
-    });
-    const panelBody = $("<div>", { id: "repo_mapping_panel_body", class: "repo-mapping-panel__body" }).append(panelChildren);
-    mappingLabel.addClass("repo-mapping-panel-host");
-    mappingLabel.empty().append(panelToggle).append(hiddenField).append(panelBody);
-    const shouldOpen = currentRepoMappings().length > 0;
-    if (!shouldOpen) {
-      panelBody.hide();
-    } else {
-      mappingLabel.addClass("is-open");
-      panelToggle.text("공간별 저장소 연결 닫기");
-    }
-    panelToggle.on("click", function () {
-      const isOpen = mappingLabel.hasClass("is-open");
-      mappingLabel.toggleClass("is-open", !isOpen);
-      panelToggle.text(isOpen ? "공간별 저장소 연결 추가" : "공간별 저장소 연결 닫기");
-      panelBody.stop(true, true).slideToggle(150);
-    });
-  }
   const sectionTitles = $(".repo-mapping-section-title");
   if (sectionTitles.length >= 2) {
     $(sectionTitles[0]).text("1. Jira 공간명");
     $(sectionTitles[1]).text("2. 연결할 저장소");
-  } else if (mappingLabel.length) {
-    $("<div>", { class: "repo-mapping-section-title", text: "1. Jira 공간명" }).insertBefore("#mapping_space_key");
-    $("<div>", { class: "repo-mapping-section-title", text: "2. 연결할 저장소" }).insertBefore("#mapping_repo_owner");
   }
 
   $("#open_setup_guide").on("click", function () {
@@ -1213,7 +1180,7 @@ $(document).ready(function () {
       url: "/api/jira/backlog",
       method: "POST",
       contentType: "application/json",
-      data: JSON.stringify({ mock_mode: $("#mock_mode").is(":checked") }),
+      data: JSON.stringify({}),
     })
       .done((data) => {
         setupIssueTable(data);

@@ -74,3 +74,11 @@
 - 역할별 세부 지침은 `docs/roles/` 아래 문서를 참고한다.
 - 장기 규칙은 이 파일과 `docs/`에 유지한다.
 - 일회성 메모는 커밋하지 않는다.
+
+## Shared Project Memory
+
+- Before starting work on a target repository, check the shared project memory first.
+- If the shared project memory is missing, create it from a repository scan before the main task starts.
+- Store the first-pass project overview as Markdown and keep task history as summarized records.
+- Future agent runs must reuse the latest project overview and recent task history as shared context.
+- Project memory files are internal runtime artifacts. Do not include them in task-specific commits unless the user explicitly asks for that change.

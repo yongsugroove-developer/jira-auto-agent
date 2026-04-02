@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import atexit
 import base64
 import json
 import logging
@@ -19,10 +20,30 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import requests
 from cryptography.fernet import Fernet, InvalidToken
 from flask import Flask, jsonify, render_template, request
+
+try:
+    from app.project_memory import (
+        build_project_memory_block,
+        ensure_project_memory,
+        project_memory_ignored_prefixes,
+        record_project_history,
+        should_ignore_project_memory_status_line,
+    )
+except ModuleNotFoundError as exc:
+    if exc.name != "app":
+        raise
+    from project_memory import (
+        build_project_memory_block,
+        ensure_project_memory,
+        project_memory_ignored_prefixes,
+        record_project_history,
+        should_ignore_project_memory_status_line,
+    )
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 DATA_DIR = BASE_DIR / "data"
@@ -39,6 +60,12 @@ VALID_REASONING_EFFORTS = ("low", "medium", "high", "xhigh")
 WORKFLOW_HEARTBEAT_SECONDS = 10
 WORKFLOW_STALE_SECONDS = 30
 WORKFLOW_RUNS_DIR = DATA_DIR / "workflow-runs"
+AGENTATION_STATIC_DIR = BASE_DIR / "app" / "static" / "react"
+AGENTATION_JS_BUNDLE = AGENTATION_STATIC_DIR / "agentation-panel.js"
+AGENTATION_CSS_BUNDLE = AGENTATION_STATIC_DIR / "agentation-panel.css"
+AGENTATION_LOCAL_ENDPOINT = "http://127.0.0.1:4747"
+AGENTATION_STARTUP_TIMEOUT_SECONDS = 10
+AGENTATION_HEALTHCHECK_INTERVAL_SECONDS = 5
 FIELD_LABEL_OVERRIDES = {
     "repo_mappings": "공간별 저장소 연결",
     "local_repo_path": "기본 로컬 레포 경로",
@@ -50,6 +77,15 @@ FIELD_LABEL_OVERRIDES = {
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 LOGGER = logging.getLogger(__name__)
+
+
+@dataclass
+class ManagedAgentationRuntime:
+    endpoint: str
+    stop_event: threading.Event
+    lock: threading.Lock
+    process: subprocess.Popen[str] | None = None
+    supervisor_thread: threading.Thread | None = None
 
 FIELD_GUIDES: dict[str, dict[str, str]] = {
     "jira_base_url": {"label": "Jira Base URL", "guide_section": "jira", "guide_step_id": "jira-base-url"},
@@ -380,6 +416,165 @@ def _utcnow_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _agentation_frontend_config() -> dict[str, Any]:
+    enabled_value = os.getenv("AGENTATION_ENABLED", "1").strip().lower()
+    enabled = enabled_value not in {"0", "false", "no", "off"}
+    endpoint = os.getenv("AGENTATION_ENDPOINT", AGENTATION_LOCAL_ENDPOINT).strip() or AGENTATION_LOCAL_ENDPOINT
+    endpoint = _normalize_agentation_local_endpoint(endpoint)
+    bundle_ready = AGENTATION_JS_BUNDLE.exists() and AGENTATION_CSS_BUNDLE.exists()
+    return {
+        "enabled": enabled,
+        "endpoint": endpoint,
+        "bundle_ready": bundle_ready,
+    }
+
+
+def _is_truthy_env(value: str) -> bool:
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _normalize_agentation_local_endpoint(endpoint: str) -> str:
+    parsed = urlparse(endpoint)
+    host = (parsed.hostname or "").strip().lower()
+    if host in {"localhost", "127.0.0.1", "::1"}:
+        return f"{parsed.scheme or 'http'}://127.0.0.1:{parsed.port or 4747}"
+    return endpoint
+
+
+def _is_local_agentation_endpoint(endpoint: str) -> bool:
+    parsed = urlparse(endpoint)
+    return (parsed.hostname or "").strip().lower() in {"localhost", "127.0.0.1", "::1"}
+
+
+def _agentation_server_is_healthy(endpoint: str) -> bool:
+    try:
+        response = requests.get(f"{endpoint.rstrip('/')}/health", timeout=2)
+        return response.ok
+    except requests.RequestException:
+        return False
+
+
+def _stop_managed_process(process: subprocess.Popen[str] | None, *, name: str) -> None:
+    if process is None or process.poll() is not None:
+        return
+
+    LOGGER.info("Stopping managed process: %s", name)
+    process.terminate()
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        LOGGER.warning("Managed process did not stop in time; killing: %s", name)
+        process.kill()
+        process.wait(timeout=5)
+
+
+def _agentation_endpoint_port(endpoint: str) -> int:
+    parsed = urlparse(endpoint)
+    return parsed.port or 4747
+
+
+def _agentation_server_command(endpoint: str) -> list[str] | None:
+    npx_launcher = shutil.which("npx.cmd") or shutil.which("npx")
+    if not npx_launcher:
+        return None
+    return [npx_launcher, "-y", "agentation-mcp", "server", "--port", str(_agentation_endpoint_port(endpoint))]
+
+
+def _maybe_start_agentation_server() -> subprocess.Popen[str] | None:
+    frontend_config = _agentation_frontend_config()
+    if not frontend_config["enabled"]:
+        LOGGER.info("Agentation autostart skipped: frontend disabled")
+        return None
+
+    if not _is_truthy_env(os.getenv("AGENTATION_AUTOSTART", "1")):
+        LOGGER.info("Agentation autostart skipped: AGENTATION_AUTOSTART disabled")
+        return None
+
+    endpoint = _normalize_agentation_local_endpoint(str(frontend_config["endpoint"]))
+    if not _is_local_agentation_endpoint(endpoint):
+        LOGGER.info("Agentation autostart skipped: non-local endpoint=%s", endpoint)
+        return None
+
+    if _agentation_server_is_healthy(endpoint):
+        LOGGER.info("Agentation server already healthy: %s", endpoint)
+        return None
+
+    command = _agentation_server_command(endpoint)
+    if not command:
+        LOGGER.warning("Agentation autostart skipped: npx not found")
+        return None
+
+    LOGGER.info("Starting Agentation server: %s", _display_command(command))
+    process = subprocess.Popen(
+        command,
+        cwd=str(BASE_DIR),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+
+    deadline = time.monotonic() + AGENTATION_STARTUP_TIMEOUT_SECONDS
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            LOGGER.warning("Agentation server exited early with code=%s", process.returncode)
+            return None
+        if _agentation_server_is_healthy(endpoint):
+            LOGGER.info("Agentation server is ready: %s", endpoint)
+            return process
+        time.sleep(0.25)
+
+    LOGGER.warning("Agentation server did not become healthy within %s seconds", AGENTATION_STARTUP_TIMEOUT_SECONDS)
+    _stop_managed_process(process, name="agentation-mcp")
+    return None
+
+
+def _agentation_supervisor_loop(runtime: ManagedAgentationRuntime) -> None:
+    while not runtime.stop_event.wait(AGENTATION_HEALTHCHECK_INTERVAL_SECONDS):
+        if _agentation_server_is_healthy(runtime.endpoint):
+            continue
+
+        LOGGER.warning("Agentation health check failed. Attempting restart: %s", runtime.endpoint)
+        with runtime.lock:
+            if runtime.process is not None and runtime.process.poll() is not None:
+                runtime.process = None
+            runtime.process = _maybe_start_agentation_server()
+
+
+def _start_agentation_supervisor() -> ManagedAgentationRuntime | None:
+    frontend_config = _agentation_frontend_config()
+    endpoint = _normalize_agentation_local_endpoint(str(frontend_config["endpoint"]))
+    if not frontend_config["enabled"] or not _is_truthy_env(os.getenv("AGENTATION_AUTOSTART", "1")):
+        return None
+    if not _is_local_agentation_endpoint(endpoint):
+        return None
+
+    runtime = ManagedAgentationRuntime(
+        endpoint=endpoint,
+        stop_event=threading.Event(),
+        lock=threading.Lock(),
+    )
+    runtime.process = _maybe_start_agentation_server()
+    runtime.supervisor_thread = threading.Thread(
+        target=_agentation_supervisor_loop,
+        args=(runtime,),
+        name="agentation-supervisor",
+        daemon=True,
+    )
+    runtime.supervisor_thread.start()
+    return runtime
+
+
+def _stop_agentation_runtime(runtime: ManagedAgentationRuntime | None) -> None:
+    if runtime is None:
+        return
+    runtime.stop_event.set()
+    if runtime.supervisor_thread is not None and runtime.supervisor_thread.is_alive():
+        runtime.supervisor_thread.join(timeout=2)
+    with runtime.lock:
+        _stop_managed_process(runtime.process, name="agentation-mcp")
+        runtime.process = None
+
+
 def _workflow_run_snapshot(run: dict[str, Any]) -> dict[str, Any]:
     return {
         "run_id": run["run_id"],
@@ -497,6 +692,28 @@ def _finish_workflow_run(run: dict[str, Any], status: str, message: str, *, resu
     run["result"] = result
     run["error"] = error
     run["events"].append({"timestamp": run["finished_at"], "phase": status, "message": message})
+
+
+def _safe_ensure_project_memory(repo_path: Path) -> None:
+    try:
+        ensure_project_memory(repo_path, app_data_dir=DATA_DIR)
+    except Exception:
+        LOGGER.exception("Failed to ensure project memory: repo=%s", repo_path)
+
+
+def _safe_build_project_memory_block(repo_path: Path, *, max_history: int = 5) -> str:
+    try:
+        return build_project_memory_block(repo_path, max_history=max_history, app_data_dir=DATA_DIR)
+    except Exception:
+        LOGGER.exception("Failed to build project memory block: repo=%s", repo_path)
+        return ""
+
+
+def _safe_record_project_history(repo_path: Path, workflow_run: dict[str, Any]) -> None:
+    try:
+        record_project_history(repo_path, workflow_run, app_data_dir=DATA_DIR)
+    except Exception:
+        LOGGER.exception("Failed to record project history: repo=%s run_id=%s", repo_path, workflow_run.get("run_id", ""))
 
 
 @dataclass
@@ -1196,15 +1413,16 @@ def _git_optional_output(repo_path: Path, *args: str) -> str:
 
 
 def _repo_internal_runtime_prefixes(repo_path: Path) -> list[str]:
+    prefixes = list(project_memory_ignored_prefixes())
     try:
         relative_workflow_dir = WORKFLOW_RUNS_DIR.resolve().relative_to(repo_path.resolve())
     except ValueError:
-        return []
+        return prefixes
 
     normalized = relative_workflow_dir.as_posix().strip("/")
-    if not normalized:
-        return []
-    return [f"{normalized}/", f"{normalized}\\"]
+    if normalized:
+        prefixes.extend([f"{normalized}/", f"{normalized}\\"])
+    return prefixes
 
 
 def _repo_dirty_entries(repo_path: Path) -> list[str]:
@@ -1213,6 +1431,8 @@ def _repo_dirty_entries(repo_path: Path) -> list[str]:
     dirty_entries: list[str] = []
     for line in status.splitlines():
         if not line.strip():
+            continue
+        if should_ignore_project_memory_status_line(repo_path, line.strip()):
             continue
         if ignored_prefixes and any(prefix in line for prefix in ignored_prefixes):
             continue
@@ -1494,6 +1714,7 @@ def _run_codex_command(
 
 
 def _build_codex_prompt(payload: dict[str, Any], repo_path: Path) -> str:
+    project_memory_block = _safe_build_project_memory_block(repo_path, max_history=5)
     acceptance = str(payload.get("acceptance_criteria", "")).strip() or "별도 수용 기준 없음"
     checklist = str(payload.get("commit_checklist", "")).strip() or "별도 체크리스트 없음"
     issue_description = _prompt_text(payload.get("issue_description", ""), 6000) or "Jira 상세 설명 없음"
@@ -1506,6 +1727,9 @@ def _build_codex_prompt(payload: dict[str, Any], repo_path: Path) -> str:
     return textwrap.dedent(
         f"""
         Repository path: {repo_path}
+        Project memory:
+        {project_memory_block or "Project memory unavailable"}
+
         Issue key: {str(payload.get("issue_key", "")).strip().upper()}
         Issue summary: {str(payload.get("issue_summary", "")).strip()}
         Jira issue status: {issue_status}
@@ -1883,6 +2107,7 @@ def _load_repo_context(github_payload: dict[str, Any], issue_key: Any) -> tuple[
 
 
 def _execute_coding_workflow(repo_path: Path, github_config: GithubConfig, payload: dict[str, Any], reporter: Any = None) -> dict[str, Any]:
+    _safe_ensure_project_memory(repo_path)
     dirty_entries = _repo_dirty_entries(repo_path)
     if dirty_entries:
         return {
@@ -2123,6 +2348,9 @@ def create_app() -> Flask:
                 LOGGER.exception("Workflow run failed unexpectedly: run_id=%s", run_id)
                 error = {"ok": False, "status": "internal_error", "message": str(exc)}
                 update_run(run_id, lambda run: _finish_workflow_run(run, "failed", str(exc), result=None, error=error))
+            final_run = get_run(run_id)
+            if final_run is not None:
+                _safe_record_project_history(repo_path, final_run)
 
         thread = threading.Thread(target=worker, name=f"workflow-run-{run_id}", daemon=True)
         thread.start()
@@ -2131,6 +2359,7 @@ def create_app() -> Flask:
     def index() -> str:
         return render_template(
             "index.html",
+            agentation_frontend=_agentation_frontend_config(),
             codex_defaults=_load_codex_cli_defaults(),
             valid_reasoning_efforts=VALID_REASONING_EFFORTS,
         )
@@ -2308,6 +2537,8 @@ def create_app() -> Flask:
             )
         except ValueError as exc:
             return jsonify({"error": str(exc), "fields": ["repo_mappings"]}), 400
+        if local_repo_path.exists():
+            _safe_ensure_project_memory(local_repo_path)
         repo_response = _request_with_logging(
             "GET",
             f"https://api.github.com/repos/{config.repo_owner}/{config.repo_name}",
@@ -2450,6 +2681,7 @@ def create_app() -> Flask:
                 ),
                 400,
             )
+        _safe_ensure_project_memory(repo_path)
 
         identity, missing_identity = _resolve_commit_identity(repo_path, payload)
         if bool(payload.get("allow_auto_commit", True)) and missing_identity:
@@ -2516,4 +2748,8 @@ def create_app() -> Flask:
 if __name__ == "__main__":
     application = create_app()
     debug_enabled = str(os.getenv("JIRA_AGENT_DEBUG", "")).strip().lower() in {"1", "true", "yes", "on"}
+    should_start_managed_agentation = (not debug_enabled) or os.getenv("WERKZEUG_RUN_MAIN") == "true"
+    managed_agentation_runtime = _start_agentation_supervisor() if should_start_managed_agentation else None
+    if managed_agentation_runtime is not None:
+        atexit.register(_stop_agentation_runtime, managed_agentation_runtime)
     application.run(host="0.0.0.0", port=5000, debug=debug_enabled, use_reloader=debug_enabled)

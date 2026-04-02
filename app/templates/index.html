@@ -5,14 +5,16 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Jira-GitHub PoC 콘솔</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+  {% if agentation_frontend.bundle_ready %}
+  <link rel="stylesheet" href="{{ url_for('static', filename='react/agentation-panel.css') }}">
+  {% endif %}
   <script src="https://code.jquery.com/jquery-3.7.1.min.js" integrity="sha256-/JqT3SQfawRcv/BIHPThkBvs0OEvtFFmqPF/lYI/Cxo=" crossorigin="anonymous"></script>
 </head>
 <body>
   <main class="container">
     <section class="hero">
       <p class="eyebrow">Jira x GitHub PoC</p>
-      <h1>설정 확인부터 Codex 자동 작업과 커밋 보고까지 한 화면에서 처리합니다.</h1>
-      <p class="desc">Jira, GitHub, 로컬 레포 정보를 저장하고 백로그 이슈를 고른 뒤, Codex 자동 작업 실행 결과와 추론 의도, 변경 파일, diff, 커밋 결과를 바로 확인할 수 있습니다.</p>
+      <p class="desc">Jira, GitHub, 로컬 레포 정보를 저장하고 백로그 이슈를 고른 뒤 Codex 자동 작업 결과, diff, 커밋 상태를 한 화면에서 확인한다.</p>
     </section>
 
     <section class="card">
@@ -23,37 +25,48 @@
         </div>
         <button id="open_setup_guide" type="button" class="secondary-button">설정 가이드 보기</button>
       </div>
-      <div class="grid">
-        <label>Jira Base URL<input id="jira_base_url" type="text" placeholder="https://your-domain.atlassian.net"></label>
-        <label>Jira Email<input id="jira_email" type="email" placeholder="user@example.com"></label>
-        <label>Jira API Token<input id="jira_api_token" type="password" placeholder="Jira API Token"></label>
-        <label>JQL<input id="jira_jql" type="text" placeholder="assignee = currentUser() AND status in (Backlog, 'To Do')"></label>
-        <label>GitHub Owner<input id="github_owner" type="text" placeholder="org-or-user"></label>
-        <label>GitHub Repo<input id="github_repo" type="text" placeholder="repository-name"></label>
-        <label>Base Branch<input id="github_base_branch" type="text" value="main"></label>
-        <label>GitHub Token<input id="github_token" type="password" placeholder="ghp_..."></label>
-        <label class="wide">
-          공간별 저장소 연결
-          <textarea id="repo_mappings" rows="1" hidden></textarea>
-          <div class="repo-mapping-builder">
-            <p class="repo-mapping-help">공간명과 레포를 각각 나눠 입력한 뒤 추가하면 됩니다.</p>
-            <div class="repo-mapping-inputs">
-              <input id="mapping_space_key" type="text" placeholder="공간명 예: GCPPLDCAD">
-              <input id="mapping_repo_owner" type="text" placeholder="GitHub owner">
-              <input id="mapping_repo_name" type="text" placeholder="GitHub repo">
-              <input id="mapping_base_branch" type="text" value="main" placeholder="기준 브랜치">
-              <input id="mapping_local_repo_path" type="text" placeholder="로컬 레포 경로">
+
+      <section class="config-sticky-group">
+        <p class="config-group-kicker">공통 정보</p>
+        <div class="grid">
+          <label>Jira Base URL<input id="jira_base_url" type="text" placeholder="https://your-domain.atlassian.net"></label>
+          <label>Jira Email<input id="jira_email" type="email" placeholder="user@example.com"></label>
+          <label>Jira API Token<input id="jira_api_token" type="password" placeholder="Jira API Token"></label>
+          <label>JQL<input id="jira_jql" type="text" placeholder="assignee = currentUser() AND status in (Backlog, 'To Do')"></label>
+          <label>GitHub Owner<input id="github_owner" type="text" placeholder="org-or-user"></label>
+          <label>GitHub Repo<input id="github_repo" type="text" placeholder="repository-name"></label>
+          <label>Base Branch<input id="github_base_branch" type="text" value="main"></label>
+          <label>GitHub Token<input id="github_token" type="password" placeholder="ghp_..."></label>
+          <label class="wide">Local Repo Path<input id="local_repo_path" type="text" placeholder="/workspace/your-repo"></label>
+        </div>
+      </section>
+
+      <details class="config-space-panel">
+        <summary>공간별 저장소 설정</summary>
+        <div class="config-space-panel__body">
+          <label class="wide repo-mapping-panel-host">
+            공간별 저장소 연결
+            <textarea id="repo_mappings" rows="1" hidden></textarea>
+            <div class="repo-mapping-builder">
+              <p class="repo-mapping-help">공간마다 다른 저장소를 써야 할 때만 아래에서 연결을 추가한다.</p>
+              <div class="repo-mapping-inputs">
+                <input id="mapping_space_key" type="text" placeholder="예: GCPPLDCAD">
+                <input id="mapping_repo_owner" type="text" placeholder="GitHub owner">
+                <input id="mapping_repo_name" type="text" placeholder="GitHub repo">
+                <input id="mapping_base_branch" type="text" value="main" placeholder="기본 브랜치">
+                <input id="mapping_local_repo_path" type="text" placeholder="로컬 레포 경로">
+              </div>
+              <div class="actions">
+                <button id="add_repo_mapping" type="button" class="secondary-button">연결 추가</button>
+              </div>
+              <div id="repo_mapping_list" class="repo-mapping-list">
+                <p class="repo-mapping-empty">아직 추가된 공간 연결이 없다.</p>
+              </div>
             </div>
-            <div class="actions">
-              <button id="add_repo_mapping" type="button" class="secondary-button">매핑 추가</button>
-            </div>
-            <div id="repo_mapping_list" class="repo-mapping-list">
-              <p class="repo-mapping-empty">아직 추가된 공간 연결이 없습니다.</p>
-            </div>
-          </div>
-        </label>
-        <label class="wide">Local Repo Path<input id="local_repo_path" type="text" placeholder="/workspace/your-repo"></label>
-      </div>
+          </label>
+        </div>
+      </details>
+
       <div class="actions">
         <button id="load_config" type="button">저장값 불러오기</button>
         <button id="validate_config" type="button">필수값 검사</button>
@@ -71,24 +84,31 @@
         </div>
       </div>
       <div class="actions">
-        <label><input id="mock_mode" type="checkbox" checked> Mock 모드 사용</label>
         <button id="load_backlog" type="button">백로그 조회</button>
       </div>
       <table>
-        <thead><tr><th>Issue Key</th><th>Summary</th><th>Status</th><th>선택</th></tr></thead>
+        <thead>
+          <tr>
+            <th>Issue Key</th>
+            <th>Summary</th>
+            <th>Status</th>
+            <th>선택</th>
+          </tr>
+        </thead>
         <tbody id="issue_table"></tbody>
       </table>
-      <pre id="backlog_result" class="result"></pre>
 
       <div class="detail-grid jira-detail-grid">
         <section class="detail-card">
           <h3>선택 이슈 상세</h3>
           <div id="jira_issue_meta" class="issue-meta"></div>
-          <pre id="jira_issue_description" class="result result-medium">이슈를 선택하면 상세 설명이 표시됩니다.</pre>
+          <div class="issue-meta issue-meta-spacer" aria-hidden="true"></div>
+          <pre id="jira_issue_description" class="result result-medium">이슈를 선택하면 상세 설명을 표시한다.</pre>
         </section>
         <section class="detail-card">
           <h3>최근 코멘트</h3>
-          <pre id="jira_issue_comments" class="result result-medium">이슈를 선택하면 최근 코멘트가 표시됩니다.</pre>
+          <div id="jira_issue_comments_meta" class="issue-meta issue-meta-spacer" aria-hidden="true"></div>
+          <pre id="jira_issue_comments" class="result result-medium">이슈를 선택하면 최근 코멘트를 표시한다.</pre>
         </section>
       </div>
     </section>
@@ -121,8 +141,8 @@
             {% endfor %}
           </select>
         </label>
-        <label class="wide">작업 지시 상세<textarea id="work_instruction" rows="4" placeholder="변경할 기능, 유지해야 할 제약, 수정 금지 범위를 구체적으로 적어 주세요."></textarea></label>
-        <label class="wide">수용 기준<textarea id="acceptance_criteria" rows="4" placeholder="완료 조건이 있으면 줄 단위로 적어 주세요."></textarea></label>
+        <label class="wide">작업 지시 상세<textarea id="work_instruction" rows="4" placeholder="변경할 기능, 유지해야 할 제약, 수정 금지 범위를 구체적으로 적는다."></textarea></label>
+        <label class="wide">수용 기준<textarea id="acceptance_criteria" rows="4" placeholder="완료 조건을 줄바꿈으로 정리한다."></textarea></label>
         <label class="wide">로컬 테스트 명령<input id="test_command" type="text" placeholder="PYTHONPATH=. pytest -q"></label>
         <label class="wide">커밋 체크리스트<textarea id="commit_checklist" rows="3" placeholder="- README 수정 금지&#10;- 에러 코드 메시지 유지"></textarea></label>
         <label>Git Author Name<input id="git_author_name" type="text" placeholder="Codex Bot"></label>
@@ -130,7 +150,7 @@
       </div>
 
       <div class="actions">
-        <label class="checkbox-row"><input id="allow_auto_commit" type="checkbox" checked> 테스트 통과 시 자동 커밋 허용</label>
+        <label class="checkbox-row"><input id="allow_auto_commit" type="checkbox" checked> 로컬 테스트 없이 자동 커밋 허용</label>
       </div>
 
       <pre id="workflow_result" class="result"></pre>
@@ -140,19 +160,19 @@
 
       <div class="detail-grid">
         <section class="detail-card">
-          <h3>모델이 파악한 사용자 의도</h3>
-          <p id="automation_intent" class="detail-copy">자동 작업 실행 후 표시됩니다.</p>
+          <h3>모델이 파악한 요청 의도</h3>
+          <p id="automation_intent" class="detail-copy">자동 작업 실행 후 표시한다.</p>
         </section>
         <section class="detail-card">
           <h3>구현 요약</h3>
-          <p id="automation_implementation" class="detail-copy">자동 작업 실행 후 표시됩니다.</p>
+          <p id="automation_implementation" class="detail-copy">자동 작업 실행 후 표시한다.</p>
         </section>
         <section class="detail-card">
           <h3>검증 요약</h3>
-          <p id="automation_validation" class="detail-copy">자동 작업 실행 후 표시됩니다.</p>
+          <p id="automation_validation" class="detail-copy">자동 작업 실행 후 표시한다.</p>
         </section>
         <section class="detail-card">
-          <h3>남은 리스크</h3>
+          <h3>잔여 리스크</h3>
           <ul id="automation_risks" class="file-list"></ul>
         </section>
       </div>
@@ -187,7 +207,7 @@
         <div>
           <p class="eyebrow">Guided Setup</p>
           <h2 id="guide_modal_title">설정 수집 가이드</h2>
-          <p id="guide_modal_summary" class="guide-modal__summary">Jira, GitHub, 로컬 레포, 자동화 입력 정보를 어디서 확인할지 단계별로 안내합니다.</p>
+          <p id="guide_modal_summary" class="guide-modal__summary">Jira, GitHub, 로컬 레포, 자동화 입력 정보를 어디서 확인할지 단계별로 안내한다.</p>
         </div>
         <button id="close_setup_guide" type="button" class="ghost-button">닫기</button>
       </div>
@@ -213,6 +233,23 @@
     </section>
   </div>
 
+  <div
+    id="agentation_react_root"
+    class="agentation-root"
+    data-enabled="{{ 'true' if agentation_frontend.enabled else 'false' }}"
+    data-endpoint="{{ agentation_frontend.endpoint }}"
+    aria-hidden="true"
+  ></div>
+  {% if not agentation_frontend.bundle_ready %}
+  <div class="agentation-build-warning">React bundle is missing. Run <code>npm install</code> and <code>npm run build</code> in <code>frontend/</code>.</div>
+  {% endif %}
+
+  <script>
+    window.__AGENTATION_CONFIG__ = {{ agentation_frontend|tojson }};
+  </script>
   <script src="{{ url_for('static', filename='app.js') }}"></script>
+  {% if agentation_frontend.bundle_ready %}
+  <script type="module" src="{{ url_for('static', filename='react/agentation-panel.js') }}"></script>
+  {% endif %}
 </body>
 </html>

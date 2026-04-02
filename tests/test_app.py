@@ -65,9 +65,92 @@ def test_index_page_renders_automation_fields() -> None:
     assert 'id="codex_model"' in html
     assert 'id="codex_reasoning_effort"' in html
     assert 'id="work_instruction"' in html
+    assert 'id="agentation_react_root"' in html
+    assert "window.__AGENTATION_CONFIG__" in html
+    assert 'id="mock_mode"' not in html
+    assert 'id="backlog_result"' not in html
+    assert "<h1>" not in html
+    assert 'class="config-space-panel"' in html
     assert 'id="automation_diff"' in html
     assert 'id="jira_issue_description"' in html
     assert 'id="jira_issue_comments"' in html
+
+
+def test_maybe_start_agentation_server_skips_when_existing_server_is_healthy(monkeypatch) -> None:
+    popen_called = {"value": False}
+
+    monkeypatch.setattr(
+        main_module,
+        "_agentation_frontend_config",
+        lambda: {"enabled": True, "endpoint": "http://localhost:4747", "bundle_ready": True},
+    )
+    monkeypatch.setattr(main_module, "_agentation_server_is_healthy", lambda endpoint: True)
+    monkeypatch.setattr(main_module.subprocess, "Popen", lambda *args, **kwargs: popen_called.__setitem__("value", True))
+
+    process = main_module._maybe_start_agentation_server()
+
+    assert process is None
+    assert popen_called["value"] is False
+
+
+def test_maybe_start_agentation_server_starts_local_process(monkeypatch) -> None:
+    health_checks = iter([False, False, True])
+
+    class FakeProcess:
+        returncode = None
+
+        def poll(self):  # noqa: ANN001
+            return None
+
+        def terminate(self) -> None:
+            self.returncode = 0
+
+        def kill(self) -> None:
+            self.returncode = 1
+
+        def wait(self, timeout=None) -> int:  # noqa: ANN001
+            return 0
+
+    fake_process = FakeProcess()
+    popen_calls: list[tuple[list[str], dict[str, object]]] = []
+
+    monkeypatch.setattr(
+        main_module,
+        "_agentation_frontend_config",
+        lambda: {"enabled": True, "endpoint": "http://localhost:4747", "bundle_ready": True},
+    )
+    monkeypatch.setattr(main_module, "_agentation_server_is_healthy", lambda endpoint: next(health_checks))
+    monkeypatch.setattr(main_module.shutil, "which", lambda name: "C:\\Program Files\\nodejs\\npx.cmd" if name == "npx.cmd" else None)
+    monkeypatch.setattr(main_module.time, "sleep", lambda seconds: None)
+
+    def fake_popen(command, **kwargs):  # noqa: ANN001
+        popen_calls.append((command, kwargs))
+        return fake_process
+
+    monkeypatch.setattr(main_module.subprocess, "Popen", fake_popen)
+
+    process = main_module._maybe_start_agentation_server()
+
+    assert process is fake_process
+    assert popen_calls
+    assert popen_calls[0][0] == [
+        "C:\\Program Files\\nodejs\\npx.cmd",
+        "-y",
+        "agentation-mcp",
+        "server",
+        "--port",
+        "4747",
+    ]
+
+
+def test_agentation_frontend_config_normalizes_localhost(monkeypatch) -> None:
+    monkeypatch.setenv("AGENTATION_ENABLED", "1")
+    monkeypatch.setenv("AGENTATION_ENDPOINT", "http://localhost:4747")
+
+    config = main_module._agentation_frontend_config()
+
+    assert config["enabled"] is True
+    assert config["endpoint"] == "http://127.0.0.1:4747"
 
 
 def test_mock_jira_issue_detail_returns_description_and_comments() -> None:
@@ -150,7 +233,8 @@ def test_run_workflow_rejects_invalid_reasoning_effort() -> None:
     assert data["requested_information"][0]["field"] == "codex_reasoning_effort"
 
 
-def test_build_codex_prompt_includes_jira_issue_details() -> None:
+def test_build_codex_prompt_includes_jira_issue_details(monkeypatch) -> None:
+    monkeypatch.setattr(main_module, "_safe_build_project_memory_block", lambda repo_path, max_history=5: "cached project memory")
     prompt = main_module._build_codex_prompt(
         {
             "issue_key": "DEMO-11",
@@ -173,6 +257,7 @@ def test_build_codex_prompt_includes_jira_issue_details() -> None:
     assert "Jira issue description:" in prompt
     assert "상세 설명 본문" in prompt
     assert "Jira recent comments:" in prompt
+    assert "cached project memory" in prompt
     assert "코멘트 본문" in prompt
 
 
@@ -215,6 +300,52 @@ def test_github_check_requires_issue_key_when_repo_mappings_exist(monkeypatch) -
     data = response.get_json()
     assert data is not None
     assert data["error"] == "issue_key_required_for_repo_mapping"
+
+
+def test_github_check_creates_project_memory_on_repo_access(monkeypatch, tmp_path) -> None:
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+    subprocess.run(["git", "init"], cwd=repo_path, check=True, capture_output=True)
+    (repo_path / "app").mkdir()
+    (repo_path / "app" / "main.py").write_text("print('ok')\n", encoding="utf-8")
+    subprocess.run(["git", "add", "app/main.py"], cwd=repo_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-c", "user.name=Tester", "-c", "user.email=tester@example.com", "commit", "-m", "init"],
+        cwd=repo_path,
+        check=True,
+        capture_output=True,
+    )
+
+    monkeypatch.setattr(main_module, "DATA_DIR", tmp_path / "app-data")
+
+    def fake_load(self, provider: str):  # noqa: ANN001
+        if provider == "github":
+            return {
+                "repo_owner": "owner",
+                "repo_name": "repo",
+                "base_branch": "main",
+                "token": "token",
+                "local_repo_path": str(repo_path),
+            }
+        return None
+
+    class FakeResponse:
+        def __init__(self, status_code: int):
+            self.status_code = status_code
+            self.text = ""
+
+    monkeypatch.setattr(main_module.CredentialStore, "load", fake_load)
+    monkeypatch.setattr(main_module, "_request_with_logging", lambda *args, **kwargs: FakeResponse(200))
+    monkeypatch.setattr(main_module, "_find_codex_launcher", lambda: ["codex"])
+    monkeypatch.setattr(main_module, "_load_codex_cli_defaults", lambda: {"model": "gpt-5.4", "model_reasoning_effort": "high"})
+
+    app = create_app()
+    client = app.test_client()
+    response = client.post("/api/github/check", json={"issue_key": "DEMO-77"})
+
+    assert response.status_code == 200
+    assert any(path.name == "snapshot.json" for path in (main_module.DATA_DIR / "project-memory").rglob("snapshot.json"))
+    assert (repo_path / "docs" / "project-overview.md").exists()
 
 
 def test_run_workflow_returns_stubbed_automation_result(monkeypatch) -> None:
@@ -262,11 +393,22 @@ def test_run_workflow_returns_stubbed_automation_result(monkeypatch) -> None:
     monkeypatch.setattr(main_module, "_execute_coding_workflow", fake_execute)
 
     class ImmediateThread:
-        def __init__(self, target, name=None, daemon=None):  # noqa: ANN001
+        def __init__(self, target=None, name=None, daemon=None, args=(), kwargs=None, **extra):  # noqa: ANN001
             self._target = target
+            self._args = args
+            self._kwargs = kwargs or {}
+            self._started = False
 
         def start(self) -> None:
-            self._target()
+            self._started = True
+            if self._target is not None:
+                self._target(*self._args, **self._kwargs)
+
+        def join(self, timeout=None) -> None:  # noqa: ANN001
+            return None
+
+        def is_alive(self) -> bool:
+            return False
 
     monkeypatch.setattr(main_module.threading, "Thread", ImmediateThread)
 
@@ -304,6 +446,104 @@ def test_run_workflow_returns_stubbed_automation_result(monkeypatch) -> None:
     assert status_data["result"]["resolved_model"] == "gpt-5.4"
     assert status_data["result"]["resolved_reasoning_effort"] == "xhigh"
     assert status_data["result"]["processed_files"] == ["app/static/app.js", "app/main.py"]
+
+
+def test_run_workflow_records_project_history(monkeypatch, tmp_path) -> None:
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+    subprocess.run(["git", "init"], cwd=repo_path, check=True, capture_output=True)
+    (repo_path / "app").mkdir()
+    (repo_path / "app" / "main.py").write_text("print('ok')\n", encoding="utf-8")
+    subprocess.run(["git", "add", "app/main.py"], cwd=repo_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-c", "user.name=Tester", "-c", "user.email=tester@example.com", "commit", "-m", "init"],
+        cwd=repo_path,
+        check=True,
+        capture_output=True,
+    )
+
+    monkeypatch.setattr(main_module, "DATA_DIR", tmp_path / "app-data")
+    monkeypatch.setattr(main_module, "WORKFLOW_RUNS_DIR", tmp_path / "workflow-runs")
+
+    def fake_load(self, provider: str):  # noqa: ANN001
+        if provider == "github":
+            return {
+                "repo_owner": "owner",
+                "repo_name": "repo",
+                "base_branch": "main",
+                "token": "token",
+                "local_repo_path": str(repo_path),
+            }
+        return None
+
+    def fake_execute(repo_path, github_config, payload, reporter=None):  # noqa: ANN001
+        return {
+            "ok": True,
+            "status": "ready_for_manual_commit",
+            "message": "done",
+            "requested_model": "gpt-5.4",
+            "requested_reasoning_effort": "high",
+            "resolved_model": "gpt-5.4",
+            "resolved_reasoning_effort": "high",
+            "codex_default_model": "gpt-5.4",
+            "codex_default_reasoning_effort": "high",
+            "issue_key": payload["issue_key"],
+            "model_intent": "Update the repo",
+            "implementation_summary": "Changed backend flow",
+            "validation_summary": "pytest -q passed",
+            "processed_files": ["app/main.py"],
+            "diff": "diff --git a/app/main.py b/app/main.py",
+            "test_output": "1 passed",
+            "execution_log_tail": "Codex completed",
+            "risks": [],
+        }
+
+    class ImmediateThread:
+        def __init__(self, target=None, name=None, daemon=None, args=(), kwargs=None, **extra):  # noqa: ANN001
+            self._target = target
+            self._args = args
+            self._kwargs = kwargs or {}
+            self._started = False
+
+        def start(self) -> None:
+            self._started = True
+            if self._target is not None:
+                self._target(*self._args, **self._kwargs)
+
+        def join(self, timeout=None) -> None:  # noqa: ANN001
+            return None
+
+        def is_alive(self) -> bool:
+            return False
+
+    monkeypatch.setattr(main_module.CredentialStore, "load", fake_load)
+    monkeypatch.setattr(main_module, "_find_codex_launcher", lambda: ["codex"])
+    monkeypatch.setattr(main_module, "_resolve_commit_identity", lambda repo_path, payload: ({"name": "Codex Bot", "email": "codex@example.com"}, []))
+    monkeypatch.setattr(main_module, "_execute_coding_workflow", fake_execute)
+    monkeypatch.setattr(main_module.threading, "Thread", ImmediateThread)
+
+    app = create_app()
+    client = app.test_client()
+    response = client.post(
+        "/api/workflow/run",
+        json={
+            "issue_key": "DEMO-50",
+            "issue_summary": "persist history",
+            "branch_name": "feature/DEMO-50-persist-history",
+            "commit_message": "DEMO-50: persist history",
+            "work_instruction": "record project history",
+            "test_command": "pytest -q",
+            "allow_auto_commit": False,
+        },
+    )
+
+    assert response.status_code == 202
+    run_id = response.get_json()["run_id"]
+    history_files = list((main_module.DATA_DIR / "project-memory").rglob("history.jsonl"))
+    assert len(history_files) == 1
+
+    history_lines = [json.loads(line) for line in history_files[0].read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert any(entry["run_id"] == run_id for entry in history_lines)
 
 
 def test_workflow_run_persists_across_app_recreation(monkeypatch, tmp_path) -> None:
@@ -347,11 +587,17 @@ def test_workflow_run_persists_across_app_recreation(monkeypatch, tmp_path) -> N
         }
 
     class ImmediateThread:
-        def __init__(self, target, name=None, daemon=None):  # noqa: ANN001
+        def __init__(self, target=None, name=None, daemon=None, args=(), kwargs=None, **extra):  # noqa: ANN001
             self._target = target
+            self._args = args
+            self._kwargs = kwargs or {}
 
         def start(self) -> None:
-            self._target()
+            if self._target is not None:
+                self._target(*self._args, **self._kwargs)
+
+        def join(self, timeout=None) -> None:  # noqa: ANN001
+            return None
 
     monkeypatch.setattr(main_module.CredentialStore, "load", fake_load)
     monkeypatch.setattr(main_module, "_find_codex_launcher", fake_find_codex_launcher)

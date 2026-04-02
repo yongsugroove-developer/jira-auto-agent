@@ -1,5 +1,14 @@
 # Team Leader Driven Workflow
 
+## Shared Project Memory
+
+- On first access to a target repository, generate shared project memory before the main workflow continues.
+- Preferred overview file: `docs/project-overview.md` inside the target repository.
+- Runtime storage: `data/project-memory/<repo_key>/snapshot.json` and `history.jsonl`.
+- Refresh the snapshot when the overview is missing, the Git HEAD changes, or the working tree state changes.
+- Add one summarized history record after each workflow run finishes.
+- When building the Codex prompt, inject the latest snapshot summary and recent history automatically.
+
 ## 목적
 
 이 문서는 사용자가 팀 리더에게만 요청하고, 저장소 내부에서는 멀티 역할 방식으로 작업을 수행하기 위한 운영 절차를 정의한다.
