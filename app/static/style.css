@@ -543,6 +543,8 @@ tbody tr:hover {
   position: sticky;
   top: 18px;
   z-index: 2;
+  max-height: calc(100vh - 36px);
+  overflow-y: auto;
   margin-bottom: 16px;
   padding: 18px;
   border: 1px solid rgba(24, 49, 41, 0.08);
