@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import atexit
 import base64
+import hashlib
 import json
 import logging
 import os
@@ -51,10 +52,12 @@ DB_PATH = DATA_DIR / "app.db"
 DEFAULT_TIMEOUT = 15
 DEFAULT_TOKEN_BUDGET = 40000
 CODEX_TIMEOUT_SECONDS = 20 * 60
+CLARIFICATION_TIMEOUT_SECONDS = 8 * 60
 TEST_TIMEOUT_SECONDS = 10 * 60
 MAX_DIFF_CHARS = 60000
 MAX_OUTPUT_CHARS = 12000
 MAX_WORKFLOW_EVENTS = 160
+MAX_CLARIFICATION_QUESTIONS = 3
 SETUP_GUIDE_VERSION = 3
 VALID_REASONING_EFFORTS = ("low", "medium", "high", "xhigh")
 WORKFLOW_HEARTBEAT_SECONDS = 10
@@ -586,6 +589,7 @@ def _workflow_run_snapshot(run: dict[str, Any]) -> dict[str, Any]:
         "events": list(run.get("events", [])),
         "result": run.get("result"),
         "error": run.get("error"),
+        "jira_comment_sync": run.get("jira_comment_sync"),
     }
 
 
@@ -668,6 +672,7 @@ def _new_workflow_run() -> dict[str, Any]:
         "events": [],
         "result": None,
         "error": None,
+        "jira_comment_sync": None,
     }
 
 
@@ -856,6 +861,85 @@ def _build_requested_information(fields: list[str]) -> list[dict[str, str]]:
     return requested_information
 
 
+def _sanitize_clarification_field(value: Any, index: int) -> str:
+    normalized = re.sub(r"[^a-z0-9_]+", "_", str(value or "").strip().lower())
+    normalized = re.sub(r"_+", "_", normalized).strip("_")
+    if not normalized:
+        normalized = f"clarification_{index}"
+    return normalized[:64]
+
+
+def _normalize_clarification_answers(value: Any) -> dict[str, str]:
+    if not isinstance(value, dict):
+        return {}
+
+    normalized: dict[str, str] = {}
+    for index, (raw_field, raw_answer) in enumerate(value.items(), start=1):
+        if not str(raw_field or "").strip():
+            continue
+        answer = str(raw_answer or "").strip()
+        if not answer:
+            continue
+        field = _sanitize_clarification_field(raw_field, index)
+        normalized[field] = answer[:4000]
+    return normalized
+
+
+def _normalize_clarification_requests(value: Any) -> list[dict[str, str]]:
+    if not isinstance(value, list):
+        return []
+
+    normalized: list[dict[str, str]] = []
+    seen_fields: set[str] = set()
+    for index, raw_item in enumerate(value, start=1):
+        if not isinstance(raw_item, dict):
+            continue
+        field = _sanitize_clarification_field(raw_item.get("field"), index)
+        if field in seen_fields:
+            continue
+        question = _short_text(str(raw_item.get("question", "")).strip(), limit=240)
+        if not question:
+            continue
+        label = _short_text(str(raw_item.get("label", "")).strip() or field.replace("_", " "), limit=80)
+        why = _short_text(str(raw_item.get("why", "")).strip(), limit=240)
+        placeholder = _short_text(str(raw_item.get("placeholder", "")).strip(), limit=140)
+        normalized.append(
+            {
+                "field": field,
+                "label": label,
+                "question": question,
+                "why": why,
+                "placeholder": placeholder,
+            }
+        )
+        seen_fields.add(field)
+        if len(normalized) >= MAX_CLARIFICATION_QUESTIONS:
+            break
+    return normalized
+
+
+def _normalize_clarification_response(value: Any) -> dict[str, Any]:
+    payload = value if isinstance(value, dict) else {}
+    requested_information = _normalize_clarification_requests(payload.get("requested_information"))
+    needs_input = bool(payload.get("needs_input")) or bool(requested_information)
+    if not needs_input:
+        requested_information = []
+
+    analysis_summary = str(payload.get("analysis_summary", "")).strip()
+    if not analysis_summary:
+        analysis_summary = (
+            "작업을 진행하기 전에 추가 확인이 필요합니다."
+            if needs_input
+            else "현재 입력 정보만으로 작업을 진행할 수 있습니다."
+        )
+
+    return {
+        "needs_input": needs_input,
+        "analysis_summary": analysis_summary,
+        "requested_information": requested_information,
+    }
+
+
 def _codex_config_path() -> Path:
     codex_home = str(os.getenv("CODEX_HOME", "")).strip()
     if codex_home:
@@ -1037,6 +1121,15 @@ def _prompt_text(value: Any, limit: int) -> str:
     return truncated
 
 
+def _format_clarification_answers(value: Any) -> str:
+    answers = _normalize_clarification_answers(value)
+    if not answers:
+        return "No additional clarification answers provided."
+
+    lines = [f"- {field}: {_prompt_text(answer, 800)}" for field, answer in answers.items()]
+    return "\n".join(lines)
+
+
 def _jira_adf_to_text(node: Any) -> str:
     if node is None:
         return ""
@@ -1119,6 +1212,8 @@ def _build_jira_issue_detail(issue_key: str, fields: dict[str, Any], *, browse_u
         author_payload = raw_comment.get("author", {}) if isinstance(raw_comment.get("author"), dict) else {}
         comments.append(
             {
+                "id": str(raw_comment.get("id", "")).strip(),
+                "self": str(raw_comment.get("self", "")).strip(),
                 "author": str(author_payload.get("displayName", "")).strip(),
                 "created": str(raw_comment.get("created", "")).strip(),
                 "body": body_text,
@@ -1231,6 +1326,226 @@ def _fetch_jira_issue_detail(config: JiraConfig, issue_key: str) -> dict[str, An
         fields,
         browse_url=f"{config.base_url}/browse/{str(issue_data.get('key', issue_key)).strip().upper()}",
     )
+
+
+def _jira_text_to_adf_document(body_text: str) -> dict[str, Any]:
+    paragraphs: list[dict[str, Any]] = []
+    for raw_block in str(body_text or "").split("\n\n"):
+        lines = [line.strip() for line in raw_block.splitlines() if line.strip()]
+        if not lines:
+            continue
+        content: list[dict[str, Any]] = []
+        for index, line in enumerate(lines):
+            if index:
+                content.append({"type": "hardBreak"})
+            content.append({"type": "text", "text": line[:2000]})
+        paragraphs.append({"type": "paragraph", "content": content})
+
+    if not paragraphs:
+        paragraphs.append({"type": "paragraph", "content": [{"type": "text", "text": "jira-auto-agent"}]})
+
+    return {"type": "doc", "version": 1, "content": paragraphs}
+
+
+def _post_jira_comment(config: JiraConfig, issue_key: str, body_text: str) -> dict[str, Any]:
+    response = _request_with_logging(
+        "POST",
+        f"{config.base_url}/rest/api/3/issue/{issue_key}/comment",
+        headers={**_jira_headers(config), "Content-Type": "application/json"},
+        json={"body": _jira_text_to_adf_document(body_text)},
+        timeout=DEFAULT_TIMEOUT,
+    )
+    if response.status_code >= 400:
+        return {
+            "ok": False,
+            "error": "jira_comment_create_failed",
+            "status": response.status_code,
+            "body": response.text,
+        }
+
+    payload = response.json() if response.text.strip() else {}
+    return {
+        "ok": True,
+        "comment_id": str(payload.get("id", "")).strip(),
+        "self": str(payload.get("self", "")).strip(),
+    }
+
+
+def _jira_comment_browser_url(config: JiraConfig, issue_key: str, comment_id: str = "") -> str:
+    issue_url = f"{config.base_url}/browse/{issue_key.upper()}"
+    comment_id = str(comment_id or "").strip()
+    if not comment_id:
+        return issue_url
+    return f"{issue_url}?focusedCommentId={comment_id}"
+
+
+def _clarification_sync_marker(kind: str, issue_key: str, payload: Any) -> str:
+    serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+    digest = hashlib.sha256(f"{issue_key.upper()}:{kind}:{serialized}".encode("utf-8")).hexdigest()[:16]
+    return f"jira-auto-agent:clarification:{kind}:{digest}"
+
+
+def _jira_comment_has_marker(config: JiraConfig, issue_key: str, marker: str) -> dict[str, str] | None:
+    detail = _fetch_jira_issue_detail(config, issue_key)
+    if not detail.get("ok"):
+        return None
+    for comment in detail.get("comments", []):
+        if marker in str(comment.get("body", "")):
+            comment_id = str(comment.get("id", "")).strip()
+            return {
+                "comment_id": comment_id,
+                "comment_url": _jira_comment_browser_url(config, issue_key, comment_id),
+                "issue_url": _jira_comment_browser_url(config, issue_key),
+            }
+    return None
+
+
+def _build_clarification_questions_comment(
+    analysis_summary: str,
+    requested_information: list[dict[str, str]],
+    marker: str,
+) -> str:
+    lines = ["[jira-auto-agent] Codex 사전 확인 질문"]
+    if analysis_summary.strip():
+        lines.extend(["", _prompt_text(analysis_summary, 1200)])
+    for index, item in enumerate(requested_information, start=1):
+        lines.extend(
+            [
+                "",
+                f"{index}. {item.get('label', item.get('field', '질문'))} ({item.get('field', '')})",
+                f"질문: {_short_text(item.get('question', ''), 240)}",
+            ]
+        )
+        why = str(item.get("why", "")).strip()
+        if why:
+            lines.append(f"이유: {_short_text(why, 240)}")
+        placeholder = str(item.get("placeholder", "")).strip()
+        if placeholder:
+            lines.append(f"입력 예시: {_short_text(placeholder, 180)}")
+    lines.extend(["", marker])
+    return "\n".join(lines)
+
+
+def _build_clarification_answers_comment(
+    answers: dict[str, str],
+    questions: list[dict[str, str]],
+    marker: str,
+) -> str:
+    question_map = {item.get("field", ""): item for item in questions}
+    lines = ["[jira-auto-agent] 사용자 답변"]
+    for index, (field, answer) in enumerate(answers.items(), start=1):
+        item = question_map.get(field, {})
+        label = str(item.get("label", "")).strip() or field
+        lines.extend(["", f"{index}. {label} ({field})"])
+        question = str(item.get("question", "")).strip()
+        if question:
+            lines.append(f"질문: {_short_text(question, 240)}")
+        lines.append(f"답변: {_prompt_text(answer, 1500)}")
+    lines.extend(["", marker])
+    return "\n".join(lines)
+
+
+def _safe_sync_jira_clarification_questions(
+    jira_payload: dict[str, Any] | None,
+    issue_key: str,
+    analysis_summary: str,
+    requested_information: list[dict[str, str]],
+) -> dict[str, Any]:
+    normalized_questions = _normalize_clarification_requests(requested_information)
+    if not normalized_questions:
+        return {"status": "skipped", "reason": "no_questions"}
+    if not jira_payload:
+        return {"status": "skipped", "reason": "jira_config_not_found"}
+
+    config = JiraConfig(**jira_payload)
+    issue_url = _jira_comment_browser_url(config, issue_key)
+    marker = _clarification_sync_marker(
+        "questions",
+        issue_key,
+        {"analysis_summary": analysis_summary.strip(), "requested_information": normalized_questions},
+    )
+    try:
+        existing_comment = _jira_comment_has_marker(config, issue_key, marker)
+        if existing_comment:
+            return {"status": "skipped", "reason": "already_synced", "marker": marker, **existing_comment}
+        result = _post_jira_comment(
+            config,
+            issue_key,
+            _build_clarification_questions_comment(analysis_summary, normalized_questions, marker),
+        )
+    except requests.RequestException as exc:
+        LOGGER.warning("Failed to sync Jira clarification questions for %s: %s", issue_key, exc)
+        return {"status": "failed", "reason": "request_failed", "details": _short_text(str(exc), 240), "marker": marker, "issue_url": issue_url}
+
+    if not result.get("ok"):
+        LOGGER.warning("Failed to create Jira clarification question comment for %s: %s", issue_key, result)
+        return {
+            "status": "failed",
+            "reason": str(result.get("error", "jira_comment_create_failed")),
+            "details": _short_text(str(result.get("body", "")), 240),
+            "marker": marker,
+            "issue_url": issue_url,
+        }
+    comment_id = str(result.get("comment_id", "")).strip()
+    return {
+        "status": "created",
+        "marker": marker,
+        "comment_id": comment_id,
+        "comment_url": _jira_comment_browser_url(config, issue_key, comment_id),
+        "issue_url": issue_url,
+    }
+
+
+def _safe_sync_jira_clarification_answers(
+    jira_payload: dict[str, Any] | None,
+    issue_key: str,
+    answers: dict[str, str],
+    questions: list[dict[str, str]],
+) -> dict[str, Any]:
+    normalized_answers = _normalize_clarification_answers(answers)
+    if not normalized_answers:
+        return {"status": "skipped", "reason": "no_answers"}
+    if not jira_payload:
+        return {"status": "skipped", "reason": "jira_config_not_found"}
+
+    normalized_questions = _normalize_clarification_requests(questions)
+    config = JiraConfig(**jira_payload)
+    issue_url = _jira_comment_browser_url(config, issue_key)
+    marker = _clarification_sync_marker(
+        "answers",
+        issue_key,
+        {"answers": normalized_answers, "questions": normalized_questions},
+    )
+    try:
+        existing_comment = _jira_comment_has_marker(config, issue_key, marker)
+        if existing_comment:
+            return {"status": "skipped", "reason": "already_synced", "marker": marker, **existing_comment}
+        result = _post_jira_comment(
+            config,
+            issue_key,
+            _build_clarification_answers_comment(normalized_answers, normalized_questions, marker),
+        )
+    except requests.RequestException as exc:
+        LOGGER.warning("Failed to sync Jira clarification answers for %s: %s", issue_key, exc)
+        return {"status": "failed", "reason": "request_failed", "details": _short_text(str(exc), 240), "marker": marker, "issue_url": issue_url}
+
+    if not result.get("ok"):
+        LOGGER.warning("Failed to create Jira clarification answer comment for %s: %s", issue_key, result)
+        return {
+            "status": "failed",
+            "reason": str(result.get("error", "jira_comment_create_failed")),
+            "details": _short_text(str(result.get("body", "")), 240),
+            "marker": marker,
+            "issue_url": issue_url,
+        }
+    comment_id = str(result.get("comment_id", "")).strip()
+    return {
+        "status": "created",
+        "marker": marker,
+        "comment_id": comment_id,
+        "comment_url": _jira_comment_browser_url(config, issue_key, comment_id),
+        "issue_url": issue_url,
+    }
 
 
 def _slugify(value: str) -> str:
@@ -1724,6 +2039,7 @@ def _build_codex_prompt(payload: dict[str, Any], repo_path: Path) -> str:
     issue_priority = str(payload.get("issue_priority", "")).strip() or "우선순위 정보 없음"
     issue_assignee = str(payload.get("issue_assignee", "")).strip() or "담당자 정보 없음"
     issue_labels = str(payload.get("issue_labels", "")).strip() or "라벨 없음"
+    clarification_answers = _format_clarification_answers(payload.get("clarification_answers"))
     return textwrap.dedent(
         f"""
         Repository path: {repo_path}
@@ -1746,6 +2062,9 @@ def _build_codex_prompt(payload: dict[str, Any], repo_path: Path) -> str:
         Jira recent comments:
         {issue_comments}
 
+        Clarification answers from the user:
+        {clarification_answers}
+
         User instruction:
         {str(payload.get("work_instruction", "")).strip()}
 
@@ -1767,6 +2086,83 @@ def _build_codex_prompt(payload: dict[str, Any], repo_path: Path) -> str:
         - If you cannot complete something, explain it clearly in the final JSON response.
         """
     ).strip()
+
+
+def _build_codex_clarification_prompt(payload: dict[str, Any], repo_path: Path) -> str:
+    project_memory_block = _safe_build_project_memory_block(repo_path, max_history=5)
+    acceptance = str(payload.get("acceptance_criteria", "")).strip() or "No explicit acceptance criteria provided."
+    checklist = str(payload.get("commit_checklist", "")).strip() or "No explicit commit checklist provided."
+    issue_description = _prompt_text(payload.get("issue_description", ""), 6000) or "No Jira issue description provided."
+    issue_comments = _prompt_text(payload.get("issue_comments_text", ""), 3000) or "No Jira comments provided."
+    clarification_answers = _format_clarification_answers(payload.get("clarification_answers"))
+    return textwrap.dedent(
+        f"""
+        Repository path: {repo_path}
+        Project memory:
+        {project_memory_block or "Project memory unavailable"}
+
+        Issue key: {str(payload.get("issue_key", "")).strip().upper()}
+        Issue summary: {str(payload.get("issue_summary", "")).strip()}
+        Target branch: {str(payload.get("branch_name", "")).strip()}
+        Planned commit message: {str(payload.get("commit_message", "")).strip()}
+
+        Jira issue description:
+        {issue_description}
+
+        Jira recent comments:
+        {issue_comments}
+
+        User instruction:
+        {str(payload.get("work_instruction", "")).strip()}
+
+        Acceptance criteria:
+        {acceptance}
+
+        Commit checklist:
+        {checklist}
+
+        Clarification answers already provided:
+        {clarification_answers}
+
+        Task:
+        - You are not implementing code yet.
+        - Decide whether the current information is sufficient to perform the task safely and precisely.
+        - Ask at most {MAX_CLARIFICATION_QUESTIONS} concise Korean questions.
+        - Only ask questions when the answer would materially change implementation scope, behavior, or risk.
+        - Do not ask for Jira/GitHub tokens, repository paths, or other configuration already handled by the application.
+        - Reuse existing clarification answers when they already resolve the ambiguity.
+        - If the task is clear enough, return needs_input=false and an empty requested_information list.
+        - Use snake_case field names.
+        """
+    ).strip()
+
+
+def _codex_clarification_schema() -> dict[str, Any]:
+    return {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "properties": {
+            "needs_input": {"type": "boolean"},
+            "analysis_summary": {"type": "string"},
+            "requested_information": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "field": {"type": "string"},
+                        "label": {"type": "string"},
+                        "question": {"type": "string"},
+                        "why": {"type": "string"},
+                        "placeholder": {"type": "string"},
+                    },
+                    "required": ["field", "label", "question", "why", "placeholder"],
+                    "additionalProperties": False,
+                },
+            },
+        },
+        "required": ["needs_input", "analysis_summary", "requested_information"],
+        "additionalProperties": False,
+    }
 
 
 def _codex_output_schema() -> dict[str, Any]:
@@ -1947,6 +2343,78 @@ def _run_codex_edit_stream(repo_path: Path, payload: dict[str, Any], reporter: A
 
 
 _run_codex_edit = _run_codex_edit_stream
+
+
+def _run_codex_clarification(repo_path: Path, payload: dict[str, Any]) -> dict[str, Any]:
+    launcher = _find_codex_launcher()
+    prompt = _build_codex_clarification_prompt(payload, repo_path)
+    codex_settings = _resolve_codex_execution_settings(payload)
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="codex-clarify-", dir=DATA_DIR) as temp_dir_name:
+        temp_dir = Path(temp_dir_name)
+        schema_path = temp_dir / "clarification-schema.json"
+        output_path = temp_dir / "clarification-last-message.json"
+        schema_path.write_text(json.dumps(_codex_clarification_schema(), indent=2), encoding="utf-8")
+
+        command = [
+            *launcher,
+            "exec",
+            "-c",
+            'approval_policy="never"',
+            "-s",
+            "workspace-write",
+        ]
+        if codex_settings["resolved_model"]:
+            command.extend(["-m", codex_settings["resolved_model"]])
+        if codex_settings["resolved_reasoning_effort"]:
+            command.extend(["-c", f'model_reasoning_effort="{codex_settings["resolved_reasoning_effort"]}"'])
+        command.extend(
+            [
+                "--json",
+                "--output-schema",
+                str(schema_path),
+                "--output-last-message",
+                str(output_path),
+                "--color",
+                "never",
+                "-",
+            ]
+        )
+
+        result = _run_codex_command(
+            command,
+            cwd=repo_path,
+            timeout=CLARIFICATION_TIMEOUT_SECONDS,
+            input_text=prompt,
+            reporter=None,
+        )
+        final_message = output_path.read_text(encoding="utf-8") if output_path.exists() else ""
+        if not final_message.strip():
+            final_message = str(result.get("last_agent_message", "")).strip()
+
+    parsed: dict[str, Any] = {}
+    if final_message.strip():
+        try:
+            parsed = json.loads(final_message)
+        except json.JSONDecodeError:
+            parsed = {}
+
+    normalized = _normalize_clarification_response(parsed)
+    normalized.update(
+        {
+            "codex_returncode": result["returncode"],
+            "codex_timed_out": bool(result["timed_out"]),
+            "codex_elapsed_seconds": result["elapsed_seconds"],
+            "codex_last_progress_message": str(result.get("last_progress_message", "")).strip(),
+            "codex_progress_event_count": int(result.get("progress_event_count", 0) or 0),
+        }
+    )
+
+    if result["timed_out"]:
+        raise RuntimeError("clarification_timeout")
+    if result["returncode"] not in {0, None}:
+        raise RuntimeError("clarification_failed")
+    return normalized
 
 
 def _stage_changes(repo_path: Path) -> None:
@@ -2614,11 +3082,18 @@ def create_app() -> Flask:
             }
         )
 
-    @app.post("/api/workflow/run")
-    def run_workflow() -> Any:
+    @app.post("/api/workflow/clarify")
+    def clarify_workflow() -> Any:
         payload = request.get_json(silent=True) or {}
         payload["codex_model"] = str(payload.get("codex_model", "")).strip()
         payload["codex_reasoning_effort"] = _normalize_reasoning_effort(payload.get("codex_reasoning_effort"))
+        payload["clarification_questions"] = _normalize_clarification_requests(payload.get("clarification_questions"))
+        payload["clarification_answers"] = _normalize_clarification_answers(payload.get("clarification_answers"))
+        jira_comment_sync = {
+            "questions": {"status": "skipped", "reason": "not_requested"},
+            "answers": {"status": "skipped", "reason": "not_requested"},
+        }
+
         missing = _required_workflow_fields(payload)
         if missing:
             return (
@@ -2648,6 +3123,139 @@ def create_app() -> Flask:
                 400,
             )
 
+        jira_payload = store.load("jira")
+        github_payload = store.load("github")
+        if not github_payload:
+            return jsonify({"ok": False, "error": "github_config_not_found"}), 400
+
+        try:
+            github_config, repo_path, resolved_space_key = _load_repo_context(github_payload, payload.get("issue_key", ""))
+        except KeyError as exc:
+            error_code = str(exc.args[0])
+            requested_fields = ["repo_mappings"] if error_code.startswith("repo_mapping_not_found:") else ["issue_key"]
+            return (
+                jsonify(
+                    {
+                        "ok": False,
+                        "error": error_code,
+                        "fields": requested_fields,
+                        "requested_information": _build_requested_information(requested_fields),
+                    }
+                ),
+                400,
+            )
+        except ValueError as exc:
+            return jsonify({"ok": False, "error": str(exc), "fields": ["repo_mappings"]}), 400
+
+        if not repo_path.exists() or not (repo_path / ".git").exists():
+            return (
+                jsonify(
+                    {
+                        "ok": False,
+                        "error": "local_repo_not_found",
+                        "requested_information": _build_requested_information(["local_repo_path"]),
+                    }
+                ),
+                400,
+            )
+
+        _safe_ensure_project_memory(repo_path)
+
+        try:
+            clarification = _run_codex_clarification(
+                repo_path,
+                {
+                    **payload,
+                    "resolved_space_key": resolved_space_key,
+                    "resolved_repo_owner": github_config.repo_owner,
+                    "resolved_repo_name": github_config.repo_name,
+                    "resolved_base_branch": github_config.base_branch,
+                },
+            )
+        except FileNotFoundError as exc:
+            return jsonify({"ok": False, "error": "codex_cli_not_found", "details": str(exc)}), 400
+        except RuntimeError as exc:
+            return (
+                jsonify(
+                    {
+                        "ok": False,
+                        "error": str(exc),
+                        "message": "사전 확인 단계에서 Codex 응답을 해석하지 못했습니다.",
+                    }
+                ),
+                502,
+            )
+
+        if payload["clarification_answers"]:
+            jira_comment_sync["answers"] = _safe_sync_jira_clarification_answers(
+                jira_payload,
+                str(payload.get("issue_key", "")).strip(),
+                payload["clarification_answers"],
+                payload["clarification_questions"],
+            )
+        if clarification["needs_input"]:
+            jira_comment_sync["questions"] = _safe_sync_jira_clarification_questions(
+                jira_payload,
+                str(payload.get("issue_key", "")).strip(),
+                clarification["analysis_summary"],
+                clarification["requested_information"],
+            )
+
+        return jsonify(
+            {
+                "ok": True,
+                "status": "needs_input" if clarification["needs_input"] else "ready",
+                "analysis_summary": clarification["analysis_summary"],
+                "requested_information": clarification["requested_information"],
+                "jira_comment_sync": jira_comment_sync,
+                "resolved_space_key": resolved_space_key,
+                "resolved_repo_owner": github_config.repo_owner,
+                "resolved_repo_name": github_config.repo_name,
+                "resolved_base_branch": github_config.base_branch,
+            }
+        )
+
+    @app.post("/api/workflow/run")
+    def run_workflow() -> Any:
+        payload = request.get_json(silent=True) or {}
+        payload["codex_model"] = str(payload.get("codex_model", "")).strip()
+        payload["codex_reasoning_effort"] = _normalize_reasoning_effort(payload.get("codex_reasoning_effort"))
+        payload["clarification_questions"] = _normalize_clarification_requests(payload.get("clarification_questions"))
+        payload["clarification_answers"] = _normalize_clarification_answers(payload.get("clarification_answers"))
+        jira_comment_sync = {
+            "questions": {"status": "skipped", "reason": "not_requested"},
+            "answers": {"status": "skipped", "reason": "not_requested"},
+        }
+        missing = _required_workflow_fields(payload)
+        if missing:
+            return (
+                jsonify(
+                    {
+                        "ok": False,
+                        "error": "workflow_fields_missing",
+                        "fields": missing,
+                        "requested_information": _build_requested_information(missing),
+                    }
+                ),
+                400,
+            )
+
+        if payload["codex_reasoning_effort"] and payload["codex_reasoning_effort"] not in VALID_REASONING_EFFORTS:
+            return (
+                jsonify(
+                    {
+                        "ok": False,
+                        "error": "invalid_reasoning_effort",
+                        "fields": ["codex_reasoning_effort"],
+                        "requested_information": _build_requested_information(["codex_reasoning_effort"]),
+                        "allowed_values": list(VALID_REASONING_EFFORTS),
+                        "message": "Reasoning Effort 는 low, medium, high, xhigh 중 하나여야 합니다.",
+                    }
+                ),
+                400,
+            )
+
+        jira_payload = store.load("jira")
         github_payload = store.load("github")
         if not github_payload:
             return jsonify({"ok": False, "error": "github_config_not_found"}), 400
@@ -2702,9 +3310,18 @@ def create_app() -> Flask:
         except FileNotFoundError as exc:
             return jsonify({"ok": False, "error": "codex_cli_not_found", "details": str(exc)}), 400
 
+        if payload["clarification_answers"]:
+            jira_comment_sync["answers"] = _safe_sync_jira_clarification_answers(
+                jira_payload,
+                str(payload.get("issue_key", "")).strip(),
+                payload["clarification_answers"],
+                payload["clarification_questions"],
+            )
+
         run = _new_workflow_run()
         with workflow_runs_lock:
             workflow_runs[run["run_id"]] = run
+            workflow_runs[run["run_id"]]["jira_comment_sync"] = jira_comment_sync
             _append_workflow_event(workflow_runs[run["run_id"]], "queued", "실행 요청을 접수했습니다.")
             _save_workflow_run(workflow_runs[run["run_id"]])
 
@@ -2729,6 +3346,7 @@ def create_app() -> Flask:
                 {
                     **(response or {}),
                     "ok": True,
+                    "jira_comment_sync": jira_comment_sync,
                     "poll_url": f"/api/workflow/run/{run['run_id']}",
                 }
             ),

@@ -74,6 +74,17 @@ def test_index_page_renders_automation_fields() -> None:
     assert 'id="automation_diff"' in html
     assert 'id="jira_issue_description"' in html
     assert 'id="jira_issue_comments"' in html
+    assert 'id="automation_result_section"' in html
+    assert 'id="toggle_automation_result"' in html
+    assert 'id="workflow_clarification_panel"' in html
+    assert 'id="workflow_clarification_sync"' in html
+    assert 'id="submit_clarification_answers"' in html
+    assert 'id="dismiss_workflow_clarification"' in html
+    assert 'id="automation_sync_status_card"' in html
+    assert html.index('id="load_config"') < html.index('class="config-sticky-group"')
+    assert html.index('id="load_backlog"') < html.index("<table>")
+    assert html.index('id="check_repo"') < html.index('class="grid workflow-grid"')
+    assert html.index('id="automation_result_section"') > html.index('id="workflow_result_actions"')
 
 
 def test_maybe_start_agentation_server_skips_when_existing_server_is_healthy(monkeypatch) -> None:
@@ -261,6 +272,214 @@ def test_build_codex_prompt_includes_jira_issue_details(monkeypatch) -> None:
     assert "코멘트 본문" in prompt
 
 
+def test_build_codex_prompt_includes_clarification_answers(monkeypatch) -> None:
+    monkeypatch.setattr(main_module, "_safe_build_project_memory_block", lambda repo_path, max_history=5: "cached project memory")
+    prompt = main_module._build_codex_prompt(
+        {
+            "issue_key": "DEMO-12",
+            "issue_summary": "clarification",
+            "branch_name": "feature/DEMO-12-clarification",
+            "commit_message": "DEMO-12: clarification",
+            "work_instruction": "필요한 정보를 반영해 작업한다.",
+            "test_command": "pytest -q",
+            "clarification_answers": {
+                "api_contract_rule": "기존 응답 필드를 유지한다.",
+                "deploy_scope": "백엔드만 수정한다.",
+            },
+        },
+        main_module.BASE_DIR,
+    )
+
+    assert "Clarification answers from the user:" in prompt
+    assert "- api_contract_rule: 기존 응답 필드를 유지한다." in prompt
+    assert "- deploy_scope: 백엔드만 수정한다." in prompt
+
+
+def test_jira_comment_browser_url_points_to_issue_comment() -> None:
+    config = main_module.JiraConfig(
+        base_url="https://example.atlassian.net",
+        email="tester@example.com",
+        api_token="token",
+        jql="project = DEMO",
+    )
+
+    assert main_module._jira_comment_browser_url(config, "demo-10") == "https://example.atlassian.net/browse/DEMO-10"
+    assert main_module._jira_comment_browser_url(config, "demo-10", "12345") == "https://example.atlassian.net/browse/DEMO-10?focusedCommentId=12345"
+
+
+def test_safe_sync_jira_clarification_questions_reuses_existing_comment(monkeypatch) -> None:
+    config = main_module.JiraConfig(
+        base_url="https://example.atlassian.net",
+        email="tester@example.com",
+        api_token="token",
+        jql="project = DEMO",
+    )
+    requested_information = [
+        {
+            "field": "api_contract_rule",
+            "label": "API 계약 유지",
+            "question": "기존 응답 필드를 유지해야 합니까?",
+            "why": "응답 구조가 바뀌면 구현 범위가 달라집니다.",
+            "placeholder": "예: 기존 필드를 유지한다.",
+        }
+    ]
+    marker = main_module._clarification_sync_marker(
+        "questions",
+        "DEMO-99",
+        {"analysis_summary": "추가 확인 필요", "requested_information": requested_information},
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_fetch_jira_issue_detail",
+        lambda jira_config, issue_key: {
+            "ok": True,
+            "comments": [
+                {
+                    "id": "12345",
+                    "body": f"existing\n{marker}",
+                }
+            ],
+        },
+    )
+
+    result = main_module._safe_sync_jira_clarification_questions(
+        {
+            "base_url": config.base_url,
+            "email": config.email,
+            "api_token": config.api_token,
+            "jql": config.jql,
+        },
+        "DEMO-99",
+        "추가 확인 필요",
+        requested_information,
+    )
+
+    assert result["status"] == "skipped"
+    assert result["reason"] == "already_synced"
+    assert result["comment_id"] == "12345"
+    assert result["comment_url"].endswith("DEMO-99?focusedCommentId=12345")
+
+
+def test_clarify_workflow_returns_requested_information(monkeypatch, tmp_path) -> None:
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+    (repo_path / ".git").mkdir()
+    captured_payload: dict[str, object] = {}
+    synced_comments: dict[str, object] = {}
+
+    def fake_load(self, provider: str):  # noqa: ANN001
+        if provider == "github":
+            return {
+                "repo_owner": "owner",
+                "repo_name": "repo",
+                "base_branch": "main",
+                "token": "token",
+                "local_repo_path": str(repo_path),
+            }
+        if provider == "jira":
+            return {
+                "base_url": "https://example.atlassian.net",
+                "email": "tester@example.com",
+                "api_token": "token",
+                "jql": "project = DEMO",
+            }
+        return None
+
+    monkeypatch.setattr(main_module.CredentialStore, "load", fake_load)
+    monkeypatch.setattr(main_module, "_safe_ensure_project_memory", lambda repo_path: None)
+    def fake_run_codex_clarification(repo_path, payload):  # noqa: ANN001
+        captured_payload.update(payload)
+        return {
+            "needs_input": True,
+            "analysis_summary": "구현 범위를 확정하려면 추가 확인이 필요합니다.",
+            "requested_information": [
+                {
+                    "field": "api_contract_rule",
+                    "label": "API 계약 유지",
+                    "question": "기존 응답 필드를 유지해야 합니까?",
+                    "why": "응답 구조 변경 여부가 구현 범위를 바꿉니다.",
+                    "placeholder": "예: 기존 필드를 유지한다.",
+                }
+            ],
+        }
+
+    monkeypatch.setattr(main_module, "_run_codex_clarification", fake_run_codex_clarification)
+    monkeypatch.setattr(
+        main_module,
+        "_safe_sync_jira_clarification_answers",
+        lambda jira_payload, issue_key, answers, questions: {
+            "status": "created",
+            "marker": synced_comments.setdefault(
+                "answers",
+                json.dumps(
+                    {
+                        "jira_payload": jira_payload,
+                        "issue_key": issue_key,
+                        "answers": answers,
+                        "questions": questions,
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ),
+            ),
+        },
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_safe_sync_jira_clarification_questions",
+        lambda jira_payload, issue_key, analysis_summary, requested_information: {
+            "status": "created",
+            "marker": synced_comments.setdefault(
+                "questions",
+                json.dumps(
+                    {
+                        "jira_payload": jira_payload,
+                        "issue_key": issue_key,
+                        "analysis_summary": analysis_summary,
+                        "requested_information": requested_information,
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ),
+            ),
+        },
+    )
+
+    app = create_app()
+    client = app.test_client()
+    response = client.post(
+        "/api/workflow/clarify",
+        json={
+            "issue_key": "DEMO-88",
+            "issue_summary": "clarify flow",
+            "branch_name": "feature/DEMO-88-clarify-flow",
+            "commit_message": "DEMO-88: clarify flow",
+            "work_instruction": "필요한 질문을 먼저 확인한다.",
+            "clarification_answers": {
+                "Scope Rule": "UI만 수정하지 않는다.",
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    data = response.get_json()
+    assert data is not None
+    assert data["ok"] is True
+    assert data["status"] == "needs_input"
+    assert data["analysis_summary"] == "구현 범위를 확정하려면 추가 확인이 필요합니다."
+    assert data["requested_information"][0]["field"] == "api_contract_rule"
+    assert captured_payload["clarification_answers"] == {
+        "scope_rule": "UI만 수정하지 않는다.",
+    }
+
+
+    assert captured_payload["clarification_questions"] == []
+    assert '"issue_key": "DEMO-88"' in synced_comments["answers"]
+    assert '"issue_key": "DEMO-88"' in synced_comments["questions"]
+    assert data["jira_comment_sync"]["answers"]["status"] == "created"
+    assert data["jira_comment_sync"]["questions"]["status"] == "created"
+
+
 def test_load_repo_context_uses_space_mapping() -> None:
     github_payload = {
         "token": "token",
@@ -446,6 +665,136 @@ def test_run_workflow_returns_stubbed_automation_result(monkeypatch) -> None:
     assert status_data["result"]["resolved_model"] == "gpt-5.4"
     assert status_data["result"]["resolved_reasoning_effort"] == "xhigh"
     assert status_data["result"]["processed_files"] == ["app/static/app.js", "app/main.py"]
+
+
+def test_run_workflow_passes_normalized_clarification_answers(monkeypatch) -> None:
+    captured_payload: dict[str, object] = {}
+    synced_answers: dict[str, object] = {}
+
+    def fake_load(self, provider: str):  # noqa: ANN001
+        if provider == "github":
+            return {
+                "repo_owner": "owner",
+                "repo_name": "repo",
+                "base_branch": "main",
+                "token": "token",
+                "local_repo_path": ".",
+            }
+        if provider == "jira":
+            return {
+                "base_url": "https://example.atlassian.net",
+                "email": "tester@example.com",
+                "api_token": "token",
+                "jql": "project = DEMO",
+            }
+        return None
+
+    def fake_execute(repo_path, github_config, payload, reporter=None):  # noqa: ANN001
+        captured_payload.update(payload)
+        return {
+            "ok": True,
+            "status": "ready_for_manual_commit",
+            "message": "done",
+            "requested_model": "gpt-5.4",
+            "requested_reasoning_effort": "high",
+            "resolved_model": "gpt-5.4",
+            "resolved_reasoning_effort": "high",
+            "codex_default_model": "gpt-5.4",
+            "codex_default_reasoning_effort": "high",
+            "model_intent": "질문 답변을 반영해 수정한다.",
+            "implementation_summary": "질문 답변이 payload에 반영됐다.",
+            "validation_summary": "pytest -q skipped",
+            "processed_files": ["app/main.py"],
+            "diff": "diff --git a/app/main.py b/app/main.py",
+            "test_output": "",
+            "execution_log_tail": "Codex completed",
+            "risks": [],
+        }
+
+    class ImmediateThread:
+        def __init__(self, target=None, name=None, daemon=None, args=(), kwargs=None, **extra):  # noqa: ANN001
+            self._target = target
+            self._args = args
+            self._kwargs = kwargs or {}
+
+        def start(self) -> None:
+            if self._target is not None:
+                self._target(*self._args, **self._kwargs)
+
+        def join(self, timeout=None) -> None:  # noqa: ANN001
+            return None
+
+        def is_alive(self) -> bool:
+            return False
+
+    monkeypatch.setattr(main_module.CredentialStore, "load", fake_load)
+    monkeypatch.setattr(main_module, "_safe_ensure_project_memory", lambda repo_path: None)
+    monkeypatch.setattr(main_module, "_find_codex_launcher", lambda: ["codex"])
+    monkeypatch.setattr(main_module, "_resolve_commit_identity", lambda repo_path, payload: ({"name": "Codex Bot", "email": "codex@example.com"}, []))
+    monkeypatch.setattr(main_module, "_execute_coding_workflow", fake_execute)
+    monkeypatch.setattr(
+        main_module,
+        "_safe_sync_jira_clarification_answers",
+        lambda jira_payload, issue_key, answers, questions: {
+            "status": "created",
+            "marker": synced_answers.setdefault(
+                "payload",
+                json.dumps(
+                    {
+                        "jira_payload": jira_payload,
+                        "issue_key": issue_key,
+                        "answers": answers,
+                        "questions": questions,
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ),
+            ),
+        },
+    )
+    monkeypatch.setattr(main_module.threading, "Thread", ImmediateThread)
+
+    app = create_app()
+    client = app.test_client()
+    response = client.post(
+        "/api/workflow/run",
+        json={
+            "issue_key": "DEMO-89",
+            "issue_summary": "clarification answers",
+            "branch_name": "feature/DEMO-89-clarification-answers",
+            "commit_message": "DEMO-89: clarification answers",
+            "work_instruction": "답변을 반영해 실행한다.",
+            "test_command": "pytest -q",
+            "allow_auto_commit": False,
+            "clarification_questions": [
+                {
+                    "field": "api_contract_rule",
+                    "label": "API 계약 유지",
+                    "question": "기존 응답 필드를 유지해야 합니까?",
+                    "why": "응답 구조가 바뀌면 구현 범위가 달라집니다.",
+                    "placeholder": "예: 기존 필드를 유지한다.",
+                }
+            ],
+            "clarification_answers": {
+                "API Contract Rule": "기존 응답 필드를 유지한다.",
+                "": "버린다.",
+                "deploy_scope": "백엔드만 수정한다.",
+            },
+        },
+    )
+
+    assert response.status_code == 202
+    assert captured_payload["clarification_answers"] == {
+        "api_contract_rule": "기존 응답 필드를 유지한다.",
+        "deploy_scope": "백엔드만 수정한다.",
+    }
+
+
+    assert '"issue_key": "DEMO-89"' in synced_answers["payload"]
+    assert '"field": "api_contract_rule"' in synced_answers["payload"]
+    response_data = response.get_json()
+    assert response_data is not None
+    assert response_data["jira_comment_sync"]["answers"]["status"] == "created"
 
 
 def test_run_workflow_records_project_history(monkeypatch, tmp_path) -> None:

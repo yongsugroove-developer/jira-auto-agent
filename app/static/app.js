@@ -37,7 +37,13 @@ const jiraState = {
 const workflowState = {
   pollTimer: null,
   activeRunId: null,
+  resultPanelOpen: true,
+  clarificationQuestions: [],
+  clarificationAnswers: {},
+  lastJiraCommentSync: null,
 };
+
+const DEFAULT_AUTOMATION_RESULT_HINT = "Codex 자동 작업을 실행하면 결과를 여기에 표시합니다.";
 
 const VISIBLE_WORKFLOW_PHASES = new Set([
   "queued",
@@ -231,6 +237,8 @@ function collectWorkflow() {
     issue_labels: detail ? ((detail.labels || []).join(", ")) : "",
     issue_description: detail ? (detail.description || "") : "",
     issue_comments_text: detail ? (detail.comments_text || "") : "",
+    clarification_questions: workflowState.clarificationQuestions.map((item) => ({ ...item })),
+    clarification_answers: { ...workflowState.clarificationAnswers },
     allow_auto_commit: $("#allow_auto_commit").is(":checked"),
   };
 }
@@ -295,6 +303,7 @@ function fillConfig(data) {
 }
 
 function fillWorkflow(data) {
+  clearWorkflowClarification();
   Object.keys(data).forEach((key) => {
     const el = $("#" + key);
     if (el.length) {
@@ -609,6 +618,61 @@ function renderCallout(targetId, requestedInformation) {
   `);
 }
 
+function clearWorkflowClarification() {
+  workflowState.clarificationQuestions = [];
+  workflowState.clarificationAnswers = {};
+  $("#workflow_clarification_panel").prop("hidden", true);
+  $("#workflow_clarification_summary").text("작업 전에 추가 확인이 필요하면 여기에 표시합니다.");
+  $("#workflow_clarification_questions").empty();
+  $("#workflow_clarification_sync").prop("hidden", true);
+  $("#workflow_clarification_sync_list").empty();
+}
+
+function syncWorkflowClarificationAnswers() {
+  const answers = {};
+  $("[data-clarification-answer]").each(function () {
+    const field = String($(this).attr("data-clarification-answer") || "").trim();
+    const value = String($(this).val() || "").trim();
+    if (field && value) {
+      answers[field] = value;
+    }
+  });
+  workflowState.clarificationAnswers = answers;
+  return answers;
+}
+
+function renderWorkflowClarification(data) {
+  const requestedInformation = (data && data.requested_information) || [];
+  if (!requestedInformation.length) {
+    clearWorkflowClarification();
+    return;
+  }
+
+  workflowState.clarificationQuestions = requestedInformation;
+  const questionItems = requestedInformation
+    .map((item) => {
+      const answer = workflowState.clarificationAnswers[item.field] || "";
+      return `
+        <label class="clarification-question">
+          <span class="clarification-question__label">${escapeHtml(item.label || item.field)}</span>
+          <strong class="clarification-question__prompt">${escapeHtml(item.question || "")}</strong>
+          <small class="clarification-question__reason">${escapeHtml(item.why || "")}</small>
+          <textarea
+            rows="3"
+            data-clarification-answer="${escapeHtml(item.field)}"
+            placeholder="${escapeHtml(item.placeholder || "답변을 입력하세요.")}"
+          >${escapeHtml(answer)}</textarea>
+        </label>
+      `;
+    })
+    .join("");
+
+  $("#workflow_clarification_summary").text(data.analysis_summary || "작업 전에 추가 확인이 필요합니다.");
+  $("#workflow_clarification_questions").html(questionItems);
+  $("#workflow_clarification_panel").prop("hidden", false);
+  renderWorkflowClarificationSync(data);
+}
+
 function setupIssueTable(data) {
   const rows = (data.issues || [])
     .map((issue, idx) => {
@@ -777,6 +841,56 @@ function workflowElapsedLabel(data) {
   return `${remain}초`;
 }
 
+function setAutomationResultHint(text) {
+  $("#automation_result_hint").text(String(text || DEFAULT_AUTOMATION_RESULT_HINT));
+}
+
+function setAutomationResultPanelOpen(open) {
+  const nextOpen = open !== false;
+  workflowState.resultPanelOpen = nextOpen;
+  $("#automation_result_body").prop("hidden", !nextOpen);
+  $("#toggle_automation_result")
+    .attr("aria-expanded", nextOpen ? "true" : "false")
+    .text(nextOpen ? "접기" : "펼치기");
+}
+
+function showAutomationResultPanel(open) {
+  $("#automation_result_section").prop("hidden", false);
+  if (typeof open === "boolean") {
+    setAutomationResultPanelOpen(open);
+    return;
+  }
+  setAutomationResultPanelOpen(workflowState.resultPanelOpen);
+}
+
+function hideAutomationResultPanel() {
+  $("#automation_result_section").prop("hidden", true);
+  setAutomationResultPanelOpen(false);
+  setAutomationResultHint(DEFAULT_AUTOMATION_RESULT_HINT);
+}
+
+function syncAutomationResultPanel(data) {
+  const payload = (data && (data.result || data.error || data)) || {};
+  const status = data && data.status ? String(data.status) : String(payload.status || "");
+  const message = String((data && data.message) || payload.message || "").trim();
+  let hint = DEFAULT_AUTOMATION_RESULT_HINT;
+
+  if (status === "queued") {
+    hint = "Codex 자동 작업 요청을 접수했습니다.";
+  } else if (status === "running") {
+    hint = message || "Codex 자동 작업이 진행 중입니다.";
+  } else if (status === "completed") {
+    hint = message || "Codex 자동 작업이 완료되었습니다.";
+  } else if (status === "failed") {
+    hint = message || "Codex 자동 작업이 실패했습니다.";
+  } else if (message) {
+    hint = message;
+  }
+
+  showAutomationResultPanel();
+  setAutomationResultHint(hint);
+}
+
 function stopWorkflowPolling() {
   if (workflowState.pollTimer) {
     window.clearTimeout(workflowState.pollTimer);
@@ -794,6 +908,7 @@ function scheduleWorkflowPoll(runId, button) {
         setResult("#workflow_result", data);
         renderCallout("#workflow_result_actions", payload.requested_information || []);
         renderAutomationResult(data);
+        syncAutomationResultPanel(data);
 
         if (data.status === "completed" || data.status === "failed") {
           stopWorkflowPolling();
@@ -816,6 +931,7 @@ function scheduleWorkflowPoll(runId, button) {
           : (xhr.responseJSON || { ok: false, error: xhr.responseText });
         setResult("#workflow_result", data);
         renderAutomationResult(data);
+        syncAutomationResultPanel(data);
       });
   }, 1500);
 }
@@ -858,6 +974,7 @@ function renderAutomationResult(data) {
   $("#automation_diff").text(payload.diff || "diff 없음");
   $("#automation_test_output").text(payload.test_output || "테스트 출력 없음");
   $("#automation_log").text(eventLogText(data.events));
+  syncAutomationResultPanel(data);
 }
 
 function resetAutomationResult() {
@@ -1004,6 +1121,178 @@ function renderAutomationResult(data) {
   $("#automation_log").text(eventLogText(data.events));
 }
 
+function eventLogText(events) {
+  const items = compactWorkflowEvents(events);
+  if (!items.length) {
+    return "표시할 진행 로그가 없습니다.";
+  }
+  return items
+    .map((event) => {
+      const label = WORKFLOW_PHASE_LABELS[event.phase] || event.phase || "로그";
+      return `[${event.timestamp}] ${label}: ${event.message}`;
+    })
+    .join("\n");
+}
+
+function latestWorkflowEvent(data) {
+  const events = compactWorkflowEvents((data && data.events) || []);
+  return events.length ? events[events.length - 1] : null;
+}
+
+function jiraCommentSyncEntries(syncData) {
+  return [
+    { key: "questions", title: "사전 질문 코멘트", payload: syncData && syncData.questions ? syncData.questions : null },
+    { key: "answers", title: "사용자 답변 코멘트", payload: syncData && syncData.answers ? syncData.answers : null },
+  ];
+}
+
+function jiraCommentSyncBadge(sync) {
+  const status = String((sync && sync.status) || "idle");
+  if (status === "created") {
+    return { text: "작성 완료", className: "is-created" };
+  }
+  if (status === "failed") {
+    return { text: "동기화 실패", className: "is-failed" };
+  }
+  if (status === "skipped") {
+    return { text: "재사용", className: "is-skipped" };
+  }
+  return { text: "대기 중", className: "is-idle" };
+}
+
+function jiraCommentSyncDetail(sync) {
+  const reason = String((sync && sync.reason) || "").trim();
+  if (!reason) {
+    return String((sync && sync.details) || "").trim();
+  }
+
+  const reasonMap = {
+    already_synced: "같은 내용의 Jira 코멘트가 이미 있어 기존 코멘트를 재사용했습니다.",
+    no_questions: "추가 질문이 없어 Jira 코멘트를 남기지 않았습니다.",
+    no_answers: "동기화할 사용자 답변이 없어 Jira 코멘트를 남기지 않았습니다.",
+    jira_config_not_found: "Jira 설정이 없어 코멘트를 남기지 못했습니다.",
+    request_failed: "Jira API 호출에 실패했습니다.",
+    jira_comment_create_failed: "Jira 코멘트 생성에 실패했습니다.",
+    not_requested: "아직 동기화를 시도하지 않았습니다.",
+  };
+  return reasonMap[reason] || String((sync && sync.details) || reason);
+}
+
+function renderJiraCommentSync(listSelector, panelSelector, syncData) {
+  const entries = jiraCommentSyncEntries(syncData).filter((entry) => {
+    if (!entry.payload) {
+      return false;
+    }
+    return !(entry.payload.status === "skipped" && entry.payload.reason === "not_requested");
+  });
+  if (!entries.length) {
+    $(panelSelector).prop("hidden", true);
+    $(listSelector).empty();
+    return;
+  }
+
+  const cards = entries.map((entry) => {
+    const sync = entry.payload || {};
+    const badge = jiraCommentSyncBadge(sync);
+    const detail = jiraCommentSyncDetail(sync);
+    const actions = [];
+    if (sync.comment_url) {
+      actions.push(`<a class="sync-status-link" href="${escapeHtml(sync.comment_url)}" target="_blank" rel="noreferrer">코멘트 보기</a>`);
+    }
+    if (sync.issue_url) {
+      actions.push(`<a class="sync-status-link" href="${escapeHtml(sync.issue_url)}" target="_blank" rel="noreferrer">이슈 열기</a>`);
+    }
+    return `
+      <article class="sync-status-item">
+        <div class="sync-status-item__meta">
+          <strong class="sync-status-item__title">${escapeHtml(entry.title)}</strong>
+          <span class="sync-status-badge ${badge.className}">${escapeHtml(badge.text)}</span>
+        </div>
+        <div class="sync-status-item__detail">${escapeHtml(detail || "상세 정보가 없습니다.")}</div>
+        ${actions.length ? `<div class="sync-status-item__actions">${actions.join("")}</div>` : ""}
+      </article>
+    `;
+  }).join("");
+
+  $(listSelector).html(cards);
+  $(panelSelector).prop("hidden", false);
+}
+
+function renderWorkflowClarificationSync(data) {
+  renderJiraCommentSync(
+    "#workflow_clarification_sync_list",
+    "#workflow_clarification_sync",
+    data && data.jira_comment_sync ? data.jira_comment_sync : null
+  );
+}
+
+function renderAutomationSync(data) {
+  const payload = data.result || data.error || data;
+  const syncData = data.jira_comment_sync || payload.jira_comment_sync || workflowState.lastJiraCommentSync || null;
+  workflowState.lastJiraCommentSync = syncData;
+  renderJiraCommentSync("#automation_sync_status_list", "#automation_sync_status_card", syncData);
+}
+
+function renderAutomationResult(data) {
+  const payload = data.result || data.error || data;
+  const modelLabel = payload.resolved_model || payload.requested_model || payload.codex_default_model || "Codex CLI default";
+  const reasoningLabel = payload.resolved_reasoning_effort || payload.requested_reasoning_effort || payload.codex_default_reasoning_effort || "Codex CLI default";
+  const latestEvent = latestWorkflowEvent(data);
+  const syntaxReturncode = payload.syntax_check_returncode != null ? payload.syntax_check_returncode : payload.test_returncode;
+  const syntaxOutput = payload.syntax_check_output || payload.test_output || "";
+  const syntaxElapsed = payload.syntax_check_elapsed_seconds != null ? payload.syntax_check_elapsed_seconds : payload.test_elapsed_seconds;
+  const syntaxFiles = payload.syntax_checked_files || [];
+  const syntaxDetail = syntaxFiles.length ? `대상 파일 ${syntaxFiles.length}개` : (payload.test_command || "지정된 문법 검사 명령이 없습니다.");
+  const cards = [
+    setSummaryCard("상태", data.status || payload.status || "-", data.message || payload.message || ""),
+    setSummaryCard("현재 단계", latestEvent ? (WORKFLOW_PHASE_LABELS[latestEvent.phase] || latestEvent.phase) : "-", latestEvent ? latestEvent.message : ""),
+    setSummaryCard("경과 시간", workflowElapsedLabel(data), payload.codex_elapsed_seconds != null ? `Codex ${payload.codex_elapsed_seconds}초 / 문법 ${syntaxElapsed == null ? "-" : `${syntaxElapsed}초`}` : ""),
+    setSummaryCard("모델", modelLabel, `reasoning: ${reasoningLabel}`),
+    setSummaryCard("브랜치", payload.branch_name || "-", payload.current_branch ? `현재 브랜치 ${payload.current_branch}` : ""),
+    setSummaryCard("커밋", payload.commit_sha || "-", payload.commit_message || ""),
+    setSummaryCard("문법 검사", syntaxReturncode == null ? "-" : String(syntaxReturncode), syntaxDetail),
+    setSummaryCard("최근 진행", payload.codex_last_progress_message || "-", payload.codex_progress_event_count ? `이벤트 ${payload.codex_progress_event_count}건` : ""),
+  ].join("");
+
+  $("#automation_overview").html(cards);
+  $("#automation_intent").text(payload.model_intent || "응답 없음");
+  $("#automation_implementation").text(payload.implementation_summary || "응답 없음");
+  $("#automation_validation").text(payload.validation_summary || "응답 없음");
+
+  const risks = payload.risks || [];
+  $("#automation_risks").html(
+    risks.length
+      ? risks.map((risk) => `<li>${escapeHtml(risk)}</li>`).join("")
+      : '<li class="file-list__empty">특이 리스크가 보고되지 않았습니다.</li>'
+  );
+
+  const files = payload.processed_files || [];
+  $("#automation_files").html(
+    files.length
+      ? files.map((file) => `<li>${escapeHtml(file)}</li>`).join("")
+      : '<li class="file-list__empty">변경 파일이 없습니다.</li>'
+  );
+
+  $("#automation_diff").text(payload.diff || "diff 없음");
+  $("#automation_test_output").text(syntaxOutput || "문법 검사 출력이 없습니다.");
+  $("#automation_log").text(eventLogText(data.events));
+  renderAutomationSync(data);
+}
+
+function resetAutomationResult() {
+  workflowState.lastJiraCommentSync = null;
+  $("#automation_overview").empty();
+  $("#automation_intent").text("자동 작업 실행 후 표시합니다.");
+  $("#automation_implementation").text("자동 작업 실행 후 표시합니다.");
+  $("#automation_validation").text("자동 작업 실행 후 표시합니다.");
+  $("#automation_risks").html('<li class="file-list__empty">자동 작업 실행 후 표시합니다.</li>');
+  $("#automation_files").html('<li class="file-list__empty">자동 작업 실행 후 표시합니다.</li>');
+  $("#automation_diff").text("");
+  $("#automation_test_output").text("");
+  $("#automation_log").text("");
+  renderJiraCommentSync("#automation_sync_status_list", "#automation_sync_status_card", null);
+}
+
 function withButtonBusy(button, callback) {
   const originalText = button.text();
   button.prop("disabled", true).text("실행 중...");
@@ -1014,6 +1303,8 @@ function withButtonBusy(button, callback) {
 $(document).ready(function () {
   getSetupGuide();
   resetAutomationResult();
+  hideAutomationResultPanel();
+  clearWorkflowClarification();
   resetIssueDetail();
   renderRepoMappings(parseRepoMappingsText($("#repo_mappings").val()));
   $("#test_command").attr("placeholder", "자동 실행하지 않습니다. 필요하면 참고용 명령만 적어 두세요.");
@@ -1057,6 +1348,10 @@ $(document).ready(function () {
 
   $("#close_setup_guide").on("click", function () {
     closeGuide();
+  });
+
+  $("#toggle_automation_result").on("click", function () {
+    setAutomationResultPanelOpen(!workflowState.resultPanelOpen);
   });
 
   $(document).on("click", "[data-close-guide='true']", function () {
@@ -1268,6 +1563,8 @@ $(document).ready(function () {
     }
 
     button.prop("disabled", true).text("실행 중...");
+    showAutomationResultPanel(true);
+    setAutomationResultHint("Codex 자동 작업 요청을 접수했습니다.");
     setResult("#workflow_result", { ok: false, status: "queued", message: "Codex 자동 작업을 접수했습니다." });
     $("#automation_log").text("실행 요청을 전송했습니다.");
 
@@ -1281,6 +1578,7 @@ $(document).ready(function () {
         setResult("#workflow_result", data);
         renderCallout("#workflow_result_actions", data.requested_information || []);
         renderAutomationResult(data);
+        syncAutomationResultPanel(data);
         if (data.run_id) {
           scheduleWorkflowPoll(data.run_id, button);
         } else {
@@ -1292,7 +1590,152 @@ $(document).ready(function () {
         setResult("#workflow_result", data);
         renderCallout("#workflow_result_actions", data.requested_information || []);
         renderAutomationResult(data);
+        syncAutomationResultPanel(data);
         button.prop("disabled", false).text("Codex 자동 작업 실행");
       });
+  });
+
+  function missingClarificationItems() {
+    return (workflowState.clarificationQuestions || []).filter((item) => !String(workflowState.clarificationAnswers[item.field] || "").trim());
+  }
+
+  function executeWorkflowRunWithClarification(button, payload) {
+    button.prop("disabled", true).text("실행 중...");
+    clearWorkflowClarification();
+    showAutomationResultPanel(true);
+    setAutomationResultHint("Codex 자동 작업 요청을 접수했습니다.");
+    setResult("#workflow_result", { ok: false, status: "queued", message: "Codex 자동 작업을 접수했습니다." });
+    $("#automation_log").text("실행 요청을 전송했습니다.");
+
+    $.ajax({
+      url: "/api/workflow/run",
+      method: "POST",
+      contentType: "application/json",
+      data: JSON.stringify(payload),
+    })
+      .done((data) => {
+        setResult("#workflow_result", data);
+        renderCallout("#workflow_result_actions", data.requested_information || []);
+        renderAutomationResult(data);
+        syncAutomationResultPanel(data);
+        if (data.run_id) {
+          scheduleWorkflowPoll(data.run_id, button);
+        } else {
+          button.prop("disabled", false).text("Codex 자동 작업 실행");
+        }
+      })
+      .fail((xhr) => {
+        const data = xhr.responseJSON || { ok: false, error: xhr.responseText };
+        setResult("#workflow_result", data);
+        renderCallout("#workflow_result_actions", data.requested_information || []);
+        renderAutomationResult(data);
+        syncAutomationResultPanel(data);
+        button.prop("disabled", false).text("Codex 자동 작업 실행");
+      });
+  }
+
+  function requestWorkflowClarification(button, payload) {
+    button.prop("disabled", true).text("사전 확인 중...");
+    clearResultActions("#workflow_result_actions");
+
+    $.ajax({
+      url: "/api/workflow/clarify",
+      method: "POST",
+      contentType: "application/json",
+      data: JSON.stringify(payload),
+    })
+      .done((data) => {
+        setResult("#workflow_result", data);
+        if (data.status === "needs_input") {
+          renderWorkflowClarification(data);
+          button.prop("disabled", false).text("Codex 자동 작업 실행");
+          return;
+        }
+
+        clearWorkflowClarification();
+        executeWorkflowRunWithClarification(button, payload);
+      })
+      .fail((xhr) => {
+        const data = xhr.responseJSON || { ok: false, error: xhr.responseText };
+        clearWorkflowClarification();
+        setResult("#workflow_result", data);
+        renderCallout("#workflow_result_actions", data.requested_information || []);
+        button.prop("disabled", false).text("Codex 자동 작업 실행");
+      });
+  }
+
+  $(document).on("input", "[data-clarification-answer]", function () {
+    syncWorkflowClarificationAnswers();
+  });
+
+  $("#dismiss_workflow_clarification").on("click", function () {
+    clearWorkflowClarification();
+  });
+
+  $("#submit_clarification_answers").on("click", function () {
+    syncWorkflowClarificationAnswers();
+    const missingClarifications = missingClarificationItems();
+    if (missingClarifications.length) {
+      setResult("#workflow_result", {
+        ok: false,
+        error: "clarification_answers_missing",
+        fields: missingClarifications.map((item) => item.field),
+        message: "추가 확인 질문에 대한 답변을 모두 입력해 주세요.",
+      });
+      const firstField = missingClarifications[0].field;
+      const firstInput = $(`[data-clarification-answer="${firstField}"]`);
+      if (firstInput.length) {
+        firstInput.trigger("focus");
+      }
+      return;
+    }
+    $("#run_automation").trigger("click");
+  });
+
+  $("#run_automation").off("click").on("click", function () {
+    const button = $(this);
+    syncWorkflowClarificationAnswers();
+    const payload = collectWorkflow();
+    const missingFields = workflowRequiredFields(payload);
+
+    stopWorkflowPolling();
+    resetAutomationResult();
+    hideAutomationResultPanel();
+    clearResultActions("#workflow_result_actions");
+    if (missingFields.length) {
+      const requestedInformation = requestedInfoForFields(missingFields);
+      const data = {
+        ok: false,
+        error: "workflow_fields_missing",
+        fields: missingFields,
+        requested_information: requestedInformation,
+        message: "필수 입력값이 비어 있어 Codex 실행을 시작하지 않습니다.",
+      };
+      setResult("#workflow_result", data);
+      renderCallout("#workflow_result_actions", requestedInformation);
+      renderAutomationResult(data);
+      focusFields([missingFields[0]]);
+      return;
+    }
+
+    if (workflowState.clarificationQuestions.length) {
+      const missingClarifications = missingClarificationItems();
+      if (missingClarifications.length) {
+        setResult("#workflow_result", {
+          ok: false,
+          error: "clarification_answers_missing",
+          fields: missingClarifications.map((item) => item.field),
+          message: "추가 확인 질문에 대한 답변을 모두 입력해 주세요.",
+        });
+        const firstField = missingClarifications[0].field;
+        const firstInput = $(`[data-clarification-answer="${firstField}"]`);
+        if (firstInput.length) {
+          firstInput.trigger("focus");
+        }
+        return;
+      }
+    }
+
+    requestWorkflowClarification(button, payload);
   });
 });
