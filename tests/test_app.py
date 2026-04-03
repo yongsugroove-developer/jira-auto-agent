@@ -1,5 +1,7 @@
 import json
 import subprocess
+import threading
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -71,20 +73,21 @@ def test_index_page_renders_automation_fields() -> None:
     assert 'id="backlog_result"' not in html
     assert "<h1>" not in html
     assert 'class="config-space-panel"' in html
-    assert 'id="automation_diff"' in html
+    assert 'id="workflow_batch_preview_card"' in html
+    assert 'id="workflow_batch_preview_list"' in html
     assert 'id="jira_issue_description"' in html
     assert 'id="jira_issue_comments"' in html
-    assert 'id="automation_result_section"' in html
-    assert 'id="toggle_automation_result"' in html
-    assert 'id="workflow_clarification_panel"' in html
-    assert 'id="workflow_clarification_sync"' in html
-    assert 'id="submit_clarification_answers"' in html
-    assert 'id="dismiss_workflow_clarification"' in html
-    assert 'id="automation_sync_status_card"' in html
+    assert 'id="work_status_section"' in html
+    assert 'id="batch_list"' in html
+    assert 'id="batch_run_tabs"' in html
+    assert 'id="batch_run_diff"' in html
+    assert 'id="batch_run_sync_status_card"' in html
+    assert 'id="submit_batch_run_answers"' in html
+    assert 'src="/static/batch-workspace.js"' in html
     assert html.index('id="load_config"') < html.index('class="config-sticky-group"')
     assert html.index('id="load_backlog"') < html.index("<table>")
     assert html.index('id="check_repo"') < html.index('class="grid workflow-grid"')
-    assert html.index('id="automation_result_section"') > html.index('id="workflow_result_actions"')
+    assert html.index('id="work_status_section"') > html.index('id="workflow_result_actions"')
 
 
 def test_maybe_start_agentation_server_skips_when_existing_server_is_healthy(monkeypatch) -> None:
@@ -1103,3 +1106,694 @@ def test_test_changes_plain_runs_syntax_checks_for_staged_files(tmp_path) -> Non
     assert result["skipped"] is False
     assert "ok.py" in result["checked_files"]
     assert result["output"]
+
+
+def _wait_for_batch_status(client, batch_id: str, *, timeout_seconds: float = 5.0) -> dict[str, object]:
+    deadline = time.time() + timeout_seconds
+    last_data: dict[str, object] | None = None
+    while time.time() < deadline:
+        response = client.get(f"/api/workflow/batch/{batch_id}")
+        assert response.status_code == 200
+        last_data = response.get_json()
+        if last_data and str(last_data.get("status", "")) not in {"queued", "running"}:
+            return last_data
+        time.sleep(0.05)
+    assert last_data is not None
+    return last_data
+
+
+def test_preview_workflow_batch_returns_queue_groups(monkeypatch, tmp_path) -> None:
+    repo_one = tmp_path / "repo-one"
+    repo_two = tmp_path / "repo-two"
+    repo_one.mkdir()
+    repo_two.mkdir()
+    (repo_one / ".git").mkdir()
+    (repo_two / ".git").mkdir()
+
+    def fake_load(self, provider: str):  # noqa: ANN001
+        if provider == "github":
+            return {
+                "repo_owner": "default-owner",
+                "repo_name": "default-repo",
+                "base_branch": "main",
+                "token": "token",
+                "repo_mappings": f"DEMO|team|demo-repo|main|{repo_one}\nOPS|ops|ops-repo|develop|{repo_two}",
+                "local_repo_path": str(repo_one),
+            }
+        return None
+
+    monkeypatch.setattr(main_module.CredentialStore, "load", fake_load)
+
+    app = create_app()
+    client = app.test_client()
+    response = client.post(
+        "/api/workflow/batch/preview",
+        json={
+            "issues": [
+                {"issue_key": "DEMO-1", "issue_summary": "로그인 버튼 개선"},
+                {"issue_key": "OPS-2", "issue_summary": "배포 스크립트 점검"},
+            ]
+        },
+    )
+
+    assert response.status_code == 200
+    data = response.get_json()
+    assert data is not None
+    assert data["ok"] is True
+    assert data["selected_issue_count"] == 2
+    assert data["issues"][0]["branch_name"].startswith("feature/DEMO-1-")
+    assert data["issues"][0]["queue_mode"] == "parallel"
+    assert data["issues"][1]["base_branch"] == "develop"
+
+
+def test_preview_workflow_batch_fails_when_space_mapping_is_missing(monkeypatch, tmp_path) -> None:
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+    (repo_path / ".git").mkdir()
+
+    def fake_load(self, provider: str):  # noqa: ANN001
+        if provider == "github":
+            return {
+                "repo_owner": "default-owner",
+                "repo_name": "default-repo",
+                "base_branch": "main",
+                "token": "token",
+                "repo_mappings": f"DEMO|team|demo-repo|main|{repo_path}",
+                "local_repo_path": str(repo_path),
+            }
+        return None
+
+    monkeypatch.setattr(main_module.CredentialStore, "load", fake_load)
+
+    app = create_app()
+    client = app.test_client()
+    response = client.post(
+        "/api/workflow/batch/preview",
+        json={"issues": [{"issue_key": "OPS-10", "issue_summary": "운영 작업"}]},
+    )
+
+    assert response.status_code == 400
+    data = response.get_json()
+    assert data is not None
+    assert data["error"] == "repo_mapping_not_found:OPS"
+
+
+def test_preview_workflow_batch_fails_when_local_repo_is_missing(monkeypatch, tmp_path) -> None:
+    missing_repo = tmp_path / "missing-repo"
+
+    def fake_load(self, provider: str):  # noqa: ANN001
+        if provider == "github":
+            return {
+                "repo_owner": "default-owner",
+                "repo_name": "default-repo",
+                "base_branch": "main",
+                "token": "token",
+                "repo_mappings": f"DEMO|team|demo-repo|main|{missing_repo}",
+                "local_repo_path": str(missing_repo),
+            }
+        return None
+
+    monkeypatch.setattr(main_module.CredentialStore, "load", fake_load)
+
+    app = create_app()
+    client = app.test_client()
+    response = client.post(
+        "/api/workflow/batch/preview",
+        json={"issues": [{"issue_key": "DEMO-11", "issue_summary": "저장소 누락 확인"}]},
+    )
+
+    assert response.status_code == 400
+    data = response.get_json()
+    assert data is not None
+    assert data["error"] == "local_repo_not_found"
+    assert data["issue_key"] == "DEMO-11"
+    assert data["fields"] == ["local_repo_path"]
+
+
+def test_run_workflow_batch_returns_batch_with_runs(monkeypatch, tmp_path) -> None:
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+    (repo_path / ".git").mkdir()
+    monkeypatch.setattr(main_module, "WORKFLOW_RUNS_DIR", tmp_path / "workflow-runs")
+    monkeypatch.setattr(main_module, "WORKFLOW_BATCHES_DIR", tmp_path / "workflow-batches")
+    monkeypatch.setattr(main_module, "_safe_ensure_project_memory", lambda repo_path: None)
+    monkeypatch.setattr(main_module, "_safe_record_project_history", lambda repo_path, workflow_run: None)
+
+    def fake_load(self, provider: str):  # noqa: ANN001
+        if provider == "github":
+            return {
+                "repo_owner": "owner",
+                "repo_name": "repo",
+                "base_branch": "main",
+                "token": "token",
+                "local_repo_path": str(repo_path),
+            }
+        if provider == "jira":
+            return {
+                "base_url": "https://example.atlassian.net",
+                "email": "tester@example.com",
+                "api_token": "token",
+                "jql": "project = DEMO",
+            }
+        return None
+
+    def fake_run_codex_clarification(repo_path, payload):  # noqa: ANN001
+        if payload["issue_key"] == "DEMO-2":
+            return {
+                "needs_input": True,
+                "analysis_summary": "API 응답 규칙 확인이 필요합니다.",
+                "requested_information": [
+                    {
+                        "field": "api_contract_rule",
+                        "label": "API 계약 유지",
+                        "question": "기존 필드를 유지해야 합니까?",
+                        "why": "응답 계약 변경 여부가 구현 범위를 바꿉니다.",
+                        "placeholder": "예: 기존 필드를 유지한다.",
+                    }
+                ],
+            }
+        return {"needs_input": False, "analysis_summary": "바로 진행할 수 있습니다.", "requested_information": []}
+
+    def fake_execute(repo_path, github_config, payload, reporter=None):  # noqa: ANN001
+        return {
+            "ok": True,
+            "status": "ready_for_manual_commit",
+            "message": "완료",
+            "requested_model": "gpt-5.4",
+            "requested_reasoning_effort": "high",
+            "resolved_model": "gpt-5.4",
+            "resolved_reasoning_effort": "high",
+            "codex_default_model": "gpt-5.4",
+            "codex_default_reasoning_effort": "high",
+            "model_intent": "선택한 이슈를 자동화한다.",
+            "implementation_summary": "핵심 파일을 수정했다.",
+            "validation_summary": "문법 검사 통과",
+            "processed_files": ["app/main.py"],
+            "diff": "diff --git a/app/main.py b/app/main.py",
+            "test_output": "",
+            "execution_log_tail": "completed",
+            "risks": [],
+            "syntax_check_output": "ok",
+            "syntax_checked_files": ["app/main.py"],
+        }
+
+    class ImmediateThread:
+        def __init__(self, target=None, name=None, daemon=None, args=(), kwargs=None, **extra):  # noqa: ANN001
+            self._target = target
+            self._args = args
+            self._kwargs = kwargs or {}
+
+        def start(self) -> None:
+            if self._target is not None:
+                self._target(*self._args, **self._kwargs)
+
+        def join(self, timeout=None) -> None:  # noqa: ANN001
+            return None
+
+        def is_alive(self) -> bool:
+            return False
+
+    monkeypatch.setattr(main_module.CredentialStore, "load", fake_load)
+    monkeypatch.setattr(main_module, "_find_codex_launcher", lambda: ["codex"])
+    monkeypatch.setattr(main_module, "_resolve_commit_identity", lambda repo_path, payload: ({"name": "Codex Bot", "email": "codex@example.com"}, []))
+    monkeypatch.setattr(main_module, "_run_codex_clarification", fake_run_codex_clarification)
+    monkeypatch.setattr(main_module, "_execute_coding_workflow", fake_execute)
+    monkeypatch.setattr(main_module, "_safe_sync_jira_clarification_questions", lambda jira_payload, issue_key, analysis_summary, requested_information: {"status": "created"})
+    monkeypatch.setattr(main_module.threading, "Thread", ImmediateThread)
+
+    app = create_app()
+    client = app.test_client()
+    response = client.post(
+        "/api/workflow/batch/run",
+        json={
+            "issues": [
+                {"issue_key": "DEMO-1", "issue_summary": "첫 번째 자동화"},
+                {"issue_key": "DEMO-2", "issue_summary": "두 번째 자동화"},
+            ],
+            "work_instruction": "선택 이슈를 각각 처리한다.",
+            "test_command": "pytest -q",
+            "allow_auto_commit": False,
+        },
+    )
+
+    assert response.status_code == 202
+    data = response.get_json()
+    assert data is not None
+    assert data["ok"] is True
+    assert data["batch_id"]
+    batch_data = client.get(f"/api/workflow/batch/{data['batch_id']}").get_json()
+    assert batch_data is not None
+    assert len(batch_data["runs"]) == 2
+    statuses = {run["issue_key"]: run["status"] for run in batch_data["runs"]}
+    assert statuses["DEMO-1"] == "completed"
+    assert statuses["DEMO-2"] == "needs_input"
+
+
+def test_run_workflow_batch_fails_when_space_mapping_is_missing(monkeypatch, tmp_path) -> None:
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+    (repo_path / ".git").mkdir()
+
+    def fake_load(self, provider: str):  # noqa: ANN001
+        if provider == "github":
+            return {
+                "repo_owner": "owner",
+                "repo_name": "repo",
+                "base_branch": "main",
+                "token": "token",
+                "repo_mappings": f"DEMO|team|demo-repo|main|{repo_path}",
+                "local_repo_path": str(repo_path),
+            }
+        return None
+
+    monkeypatch.setattr(main_module.CredentialStore, "load", fake_load)
+    monkeypatch.setattr(main_module, "_find_codex_launcher", lambda: ["codex"])
+
+    app = create_app()
+    client = app.test_client()
+    response = client.post(
+        "/api/workflow/batch/run",
+        json={
+            "issues": [{"issue_key": "OPS-99", "issue_summary": "매핑 없는 공간"}],
+            "work_instruction": "공간 매핑 검증",
+            "allow_auto_commit": False,
+        },
+    )
+
+    assert response.status_code == 400
+    data = response.get_json()
+    assert data is not None
+    assert data["error"] == "repo_mapping_not_found:OPS"
+    assert data["issue_key"] == "OPS-99"
+    assert data["fields"] == ["repo_mappings"]
+
+
+def test_run_workflow_batch_fails_when_local_repo_is_missing(monkeypatch, tmp_path) -> None:
+    missing_repo = tmp_path / "missing-repo"
+
+    def fake_load(self, provider: str):  # noqa: ANN001
+        if provider == "github":
+            return {
+                "repo_owner": "owner",
+                "repo_name": "repo",
+                "base_branch": "main",
+                "token": "token",
+                "repo_mappings": f"DEMO|team|demo-repo|main|{missing_repo}",
+                "local_repo_path": str(missing_repo),
+            }
+        return None
+
+    monkeypatch.setattr(main_module.CredentialStore, "load", fake_load)
+    monkeypatch.setattr(main_module, "_find_codex_launcher", lambda: ["codex"])
+
+    app = create_app()
+    client = app.test_client()
+    response = client.post(
+        "/api/workflow/batch/run",
+        json={
+            "issues": [{"issue_key": "DEMO-77", "issue_summary": "로컬 저장소 누락"}],
+            "work_instruction": "로컬 저장소 확인",
+            "allow_auto_commit": False,
+        },
+    )
+
+    assert response.status_code == 400
+    data = response.get_json()
+    assert data is not None
+    assert data["error"] == "local_repo_not_found"
+    assert data["issue_key"] == "DEMO-77"
+    assert data["requested_information"][0]["field"] == "local_repo_path"
+
+
+def test_answer_workflow_batch_run_requeues_and_completes(monkeypatch, tmp_path) -> None:
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+    (repo_path / ".git").mkdir()
+    monkeypatch.setattr(main_module, "WORKFLOW_RUNS_DIR", tmp_path / "workflow-runs")
+    monkeypatch.setattr(main_module, "WORKFLOW_BATCHES_DIR", tmp_path / "workflow-batches")
+    monkeypatch.setattr(main_module, "_safe_ensure_project_memory", lambda repo_path: None)
+    monkeypatch.setattr(main_module, "_safe_record_project_history", lambda repo_path, workflow_run: None)
+
+    clarification_calls: list[dict[str, object]] = []
+
+    def fake_load(self, provider: str):  # noqa: ANN001
+        if provider == "github":
+            return {
+                "repo_owner": "owner",
+                "repo_name": "repo",
+                "base_branch": "main",
+                "token": "token",
+                "local_repo_path": str(repo_path),
+            }
+        if provider == "jira":
+            return {
+                "base_url": "https://example.atlassian.net",
+                "email": "tester@example.com",
+                "api_token": "token",
+                "jql": "project = DEMO",
+            }
+        return None
+
+    def fake_run_codex_clarification(repo_path, payload):  # noqa: ANN001
+        clarification_calls.append({"issue_key": payload["issue_key"], "answers": dict(payload.get("clarification_answers", {}))})
+        if payload.get("clarification_answers"):
+            return {"needs_input": False, "analysis_summary": "바로 진행할 수 있습니다.", "requested_information": []}
+        return {
+            "needs_input": True,
+            "analysis_summary": "배포 범위를 먼저 정해야 합니다.",
+            "requested_information": [
+                {
+                    "field": "deploy_scope",
+                    "label": "배포 범위",
+                    "question": "이번 작업은 백엔드만 배포합니까?",
+                    "why": "배포 범위에 따라 수정 범위가 달라집니다.",
+                    "placeholder": "예: 백엔드만 배포한다.",
+                }
+            ],
+        }
+
+    def fake_execute(repo_path, github_config, payload, reporter=None):  # noqa: ANN001
+        return {
+            "ok": True,
+            "status": "ready_for_manual_commit",
+            "message": "완료",
+            "requested_model": "",
+            "requested_reasoning_effort": "",
+            "resolved_model": "gpt-5.4",
+            "resolved_reasoning_effort": "medium",
+            "codex_default_model": "gpt-5.4",
+            "codex_default_reasoning_effort": "medium",
+            "model_intent": "질문 답변을 반영한다.",
+            "implementation_summary": "답변을 반영해 수정했다.",
+            "validation_summary": "문법 검사 통과",
+            "processed_files": ["app/main.py"],
+            "diff": "diff --git a/app/main.py b/app/main.py",
+            "test_output": "",
+            "execution_log_tail": "completed",
+            "risks": [],
+            "syntax_check_output": "ok",
+            "syntax_checked_files": ["app/main.py"],
+        }
+
+    class ImmediateThread:
+        def __init__(self, target=None, name=None, daemon=None, args=(), kwargs=None, **extra):  # noqa: ANN001
+            self._target = target
+            self._args = args
+            self._kwargs = kwargs or {}
+
+        def start(self) -> None:
+            if self._target is not None:
+                self._target(*self._args, **self._kwargs)
+
+        def join(self, timeout=None) -> None:  # noqa: ANN001
+            return None
+
+        def is_alive(self) -> bool:
+            return False
+
+    monkeypatch.setattr(main_module.CredentialStore, "load", fake_load)
+    monkeypatch.setattr(main_module, "_find_codex_launcher", lambda: ["codex"])
+    monkeypatch.setattr(main_module, "_resolve_commit_identity", lambda repo_path, payload: ({"name": "Codex Bot", "email": "codex@example.com"}, []))
+    monkeypatch.setattr(main_module, "_run_codex_clarification", fake_run_codex_clarification)
+    monkeypatch.setattr(main_module, "_execute_coding_workflow", fake_execute)
+    monkeypatch.setattr(main_module, "_safe_sync_jira_clarification_questions", lambda jira_payload, issue_key, analysis_summary, requested_information: {"status": "created"})
+    monkeypatch.setattr(main_module, "_safe_sync_jira_clarification_answers", lambda jira_payload, issue_key, answers, questions: {"status": "created"})
+    monkeypatch.setattr(main_module.threading, "Thread", ImmediateThread)
+
+    app = create_app()
+    client = app.test_client()
+    response = client.post(
+        "/api/workflow/batch/run",
+        json={
+            "issues": [{"issue_key": "DEMO-7", "issue_summary": "clarification answer"}],
+            "work_instruction": "질문 답변 이후 실행한다.",
+            "allow_auto_commit": False,
+        },
+    )
+    assert response.status_code == 202
+    batch_id = response.get_json()["batch_id"]
+    batch_data = client.get(f"/api/workflow/batch/{batch_id}").get_json()
+    run_id = batch_data["runs"][0]["run_id"]
+    assert batch_data["runs"][0]["status"] == "needs_input"
+
+    answer_response = client.post(
+        f"/api/workflow/batch/{batch_id}/runs/{run_id}/answers",
+        json={"clarification_answers": {"deploy_scope": "백엔드만 배포한다."}},
+    )
+
+    assert answer_response.status_code == 200
+    final_batch = client.get(f"/api/workflow/batch/{batch_id}").get_json()
+    assert final_batch["runs"][0]["status"] == "completed"
+    assert clarification_calls[-1]["answers"] == {"deploy_scope": "백엔드만 배포한다."}
+
+
+def test_workflow_batch_persists_across_app_recreation(monkeypatch, tmp_path) -> None:
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+    (repo_path / ".git").mkdir()
+    monkeypatch.setattr(main_module, "WORKFLOW_RUNS_DIR", tmp_path / "workflow-runs")
+    monkeypatch.setattr(main_module, "WORKFLOW_BATCHES_DIR", tmp_path / "workflow-batches")
+    monkeypatch.setattr(main_module, "_safe_ensure_project_memory", lambda repo_path: None)
+    monkeypatch.setattr(main_module, "_safe_record_project_history", lambda repo_path, workflow_run: None)
+
+    def fake_load(self, provider: str):  # noqa: ANN001
+        if provider == "github":
+            return {
+                "repo_owner": "owner",
+                "repo_name": "repo",
+                "base_branch": "main",
+                "token": "token",
+                "local_repo_path": str(repo_path),
+            }
+        return None
+
+    def fake_run_codex_clarification(repo_path, payload):  # noqa: ANN001
+        return {"needs_input": False, "analysis_summary": "ready", "requested_information": []}
+
+    def fake_execute(repo_path, github_config, payload, reporter=None):  # noqa: ANN001
+        return {
+            "ok": True,
+            "status": "ready_for_manual_commit",
+            "message": "완료",
+            "requested_model": "",
+            "requested_reasoning_effort": "",
+            "resolved_model": "gpt-5.4",
+            "resolved_reasoning_effort": "medium",
+            "codex_default_model": "gpt-5.4",
+            "codex_default_reasoning_effort": "medium",
+            "model_intent": "persist batch",
+            "implementation_summary": "persist batch",
+            "validation_summary": "ok",
+            "processed_files": ["app/main.py"],
+            "diff": "diff --git a/app/main.py b/app/main.py",
+            "test_output": "",
+            "execution_log_tail": "completed",
+            "risks": [],
+            "syntax_check_output": "ok",
+            "syntax_checked_files": ["app/main.py"],
+        }
+
+    class ImmediateThread:
+        def __init__(self, target=None, name=None, daemon=None, args=(), kwargs=None, **extra):  # noqa: ANN001
+            self._target = target
+            self._args = args
+            self._kwargs = kwargs or {}
+
+        def start(self) -> None:
+            if self._target is not None:
+                self._target(*self._args, **self._kwargs)
+
+        def join(self, timeout=None) -> None:  # noqa: ANN001
+            return None
+
+        def is_alive(self) -> bool:
+            return False
+
+    monkeypatch.setattr(main_module.CredentialStore, "load", fake_load)
+    monkeypatch.setattr(main_module, "_find_codex_launcher", lambda: ["codex"])
+    monkeypatch.setattr(main_module, "_resolve_commit_identity", lambda repo_path, payload: ({"name": "Codex Bot", "email": "codex@example.com"}, []))
+    monkeypatch.setattr(main_module, "_run_codex_clarification", fake_run_codex_clarification)
+    monkeypatch.setattr(main_module, "_execute_coding_workflow", fake_execute)
+    monkeypatch.setattr(main_module.threading, "Thread", ImmediateThread)
+
+    app = create_app()
+    client = app.test_client()
+    response = client.post(
+        "/api/workflow/batch/run",
+        json={
+            "issues": [{"issue_key": "DEMO-21", "issue_summary": "persist batch"}],
+            "work_instruction": "persist batch state",
+            "allow_auto_commit": False,
+        },
+    )
+    assert response.status_code == 202
+    batch_id = response.get_json()["batch_id"]
+
+    recreated_app = create_app()
+    recreated_client = recreated_app.test_client()
+    batch_response = recreated_client.get(f"/api/workflow/batch/{batch_id}")
+    assert batch_response.status_code == 200
+    batch_data = batch_response.get_json()
+    assert batch_data is not None
+    assert batch_data["batch_id"] == batch_id
+    assert batch_data["runs"][0]["status"] == "completed"
+
+
+def test_batch_queue_serializes_same_repo_path(monkeypatch, tmp_path) -> None:
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+    (repo_path / ".git").mkdir()
+    monkeypatch.setattr(main_module, "WORKFLOW_RUNS_DIR", tmp_path / "workflow-runs")
+    monkeypatch.setattr(main_module, "WORKFLOW_BATCHES_DIR", tmp_path / "workflow-batches")
+    monkeypatch.setattr(main_module, "_safe_ensure_project_memory", lambda repo_path: None)
+    monkeypatch.setattr(main_module, "_safe_record_project_history", lambda repo_path, workflow_run: None)
+
+    active = {"count": 0, "max": 0}
+    active_lock = threading.Lock()
+
+    def fake_load(self, provider: str):  # noqa: ANN001
+        if provider == "github":
+            return {
+                "repo_owner": "owner",
+                "repo_name": "repo",
+                "base_branch": "main",
+                "token": "token",
+                "local_repo_path": str(repo_path),
+            }
+        return None
+
+    def fake_execute(repo_path, github_config, payload, reporter=None):  # noqa: ANN001
+        with active_lock:
+            active["count"] += 1
+            active["max"] = max(active["max"], active["count"])
+        time.sleep(0.12)
+        with active_lock:
+            active["count"] -= 1
+        return {
+            "ok": True,
+            "status": "ready_for_manual_commit",
+            "message": "완료",
+            "requested_model": "",
+            "requested_reasoning_effort": "",
+            "resolved_model": "gpt-5.4",
+            "resolved_reasoning_effort": "medium",
+            "codex_default_model": "gpt-5.4",
+            "codex_default_reasoning_effort": "medium",
+            "model_intent": "serial test",
+            "implementation_summary": "serial test",
+            "validation_summary": "ok",
+            "processed_files": ["app/main.py"],
+            "diff": "diff --git a/app/main.py b/app/main.py",
+            "test_output": "",
+            "execution_log_tail": "completed",
+            "risks": [],
+            "syntax_check_output": "ok",
+            "syntax_checked_files": ["app/main.py"],
+        }
+
+    monkeypatch.setattr(main_module.CredentialStore, "load", fake_load)
+    monkeypatch.setattr(main_module, "_find_codex_launcher", lambda: ["codex"])
+    monkeypatch.setattr(main_module, "_resolve_commit_identity", lambda repo_path, payload: ({"name": "Codex Bot", "email": "codex@example.com"}, []))
+    monkeypatch.setattr(main_module, "_run_codex_clarification", lambda repo_path, payload: {"needs_input": False, "analysis_summary": "ready", "requested_information": []})
+    monkeypatch.setattr(main_module, "_execute_coding_workflow", fake_execute)
+
+    app = create_app()
+    client = app.test_client()
+    response = client.post(
+        "/api/workflow/batch/run",
+        json={
+            "issues": [
+                {"issue_key": "DEMO-31", "issue_summary": "serial one"},
+                {"issue_key": "DEMO-32", "issue_summary": "serial two"},
+            ],
+            "work_instruction": "같은 저장소 경로는 직렬 처리한다.",
+            "allow_auto_commit": False,
+        },
+    )
+    assert response.status_code == 202
+    batch_id = response.get_json()["batch_id"]
+    final_batch = _wait_for_batch_status(client, batch_id)
+    assert final_batch["counts"]["completed"] == 2
+    assert active["max"] == 1
+
+
+def test_batch_queue_runs_different_repo_paths_in_parallel(monkeypatch, tmp_path) -> None:
+    repo_one = tmp_path / "repo-one"
+    repo_two = tmp_path / "repo-two"
+    repo_one.mkdir()
+    repo_two.mkdir()
+    (repo_one / ".git").mkdir()
+    (repo_two / ".git").mkdir()
+    monkeypatch.setattr(main_module, "WORKFLOW_RUNS_DIR", tmp_path / "workflow-runs")
+    monkeypatch.setattr(main_module, "WORKFLOW_BATCHES_DIR", tmp_path / "workflow-batches")
+    monkeypatch.setattr(main_module, "_safe_ensure_project_memory", lambda repo_path: None)
+    monkeypatch.setattr(main_module, "_safe_record_project_history", lambda repo_path, workflow_run: None)
+
+    active = {"count": 0, "max": 0}
+    active_lock = threading.Lock()
+
+    def fake_load(self, provider: str):  # noqa: ANN001
+        if provider == "github":
+            return {
+                "repo_owner": "owner",
+                "repo_name": "repo",
+                "base_branch": "main",
+                "token": "token",
+                "repo_mappings": f"DEMO|team|demo-repo|main|{repo_one}\nOPS|ops|ops-repo|main|{repo_two}",
+                "local_repo_path": str(repo_one),
+            }
+        return None
+
+    def fake_execute(repo_path, github_config, payload, reporter=None):  # noqa: ANN001
+        with active_lock:
+            active["count"] += 1
+            active["max"] = max(active["max"], active["count"])
+        time.sleep(0.12)
+        with active_lock:
+            active["count"] -= 1
+        return {
+            "ok": True,
+            "status": "ready_for_manual_commit",
+            "message": "완료",
+            "requested_model": "",
+            "requested_reasoning_effort": "",
+            "resolved_model": "gpt-5.4",
+            "resolved_reasoning_effort": "medium",
+            "codex_default_model": "gpt-5.4",
+            "codex_default_reasoning_effort": "medium",
+            "model_intent": "parallel test",
+            "implementation_summary": "parallel test",
+            "validation_summary": "ok",
+            "processed_files": ["app/main.py"],
+            "diff": "diff --git a/app/main.py b/app/main.py",
+            "test_output": "",
+            "execution_log_tail": "completed",
+            "risks": [],
+            "syntax_check_output": "ok",
+            "syntax_checked_files": ["app/main.py"],
+        }
+
+    monkeypatch.setattr(main_module.CredentialStore, "load", fake_load)
+    monkeypatch.setattr(main_module, "_find_codex_launcher", lambda: ["codex"])
+    monkeypatch.setattr(main_module, "_resolve_commit_identity", lambda repo_path, payload: ({"name": "Codex Bot", "email": "codex@example.com"}, []))
+    monkeypatch.setattr(main_module, "_run_codex_clarification", lambda repo_path, payload: {"needs_input": False, "analysis_summary": "ready", "requested_information": []})
+    monkeypatch.setattr(main_module, "_execute_coding_workflow", fake_execute)
+
+    app = create_app()
+    client = app.test_client()
+    response = client.post(
+        "/api/workflow/batch/run",
+        json={
+            "issues": [
+                {"issue_key": "DEMO-41", "issue_summary": "parallel one"},
+                {"issue_key": "OPS-42", "issue_summary": "parallel two"},
+            ],
+            "work_instruction": "다른 저장소 경로는 병렬 처리한다.",
+            "allow_auto_commit": False,
+        },
+    )
+    assert response.status_code == 202
+    batch_id = response.get_json()["batch_id"]
+    final_batch = _wait_for_batch_status(client, batch_id)
+    assert final_batch["counts"]["completed"] == 2
+    assert active["max"] >= 2

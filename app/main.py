@@ -63,6 +63,8 @@ VALID_REASONING_EFFORTS = ("low", "medium", "high", "xhigh")
 WORKFLOW_HEARTBEAT_SECONDS = 10
 WORKFLOW_STALE_SECONDS = 30
 WORKFLOW_RUNS_DIR = DATA_DIR / "workflow-runs"
+WORKFLOW_BATCHES_DIR = DATA_DIR / "workflow-batches"
+MAX_RECENT_BATCHES = 12
 AGENTATION_STATIC_DIR = BASE_DIR / "app" / "static" / "react"
 AGENTATION_JS_BUNDLE = AGENTATION_STATIC_DIR / "agentation-panel.js"
 AGENTATION_CSS_BUNDLE = AGENTATION_STATIC_DIR / "agentation-panel.css"
@@ -89,6 +91,14 @@ class ManagedAgentationRuntime:
     lock: threading.Lock
     process: subprocess.Popen[str] | None = None
     supervisor_thread: threading.Thread | None = None
+
+
+@dataclass
+class PendingWorkflowJob:
+    run_id: str
+    repo_path: Path
+    github_config: GithubConfig
+    payload: dict[str, Any]
 
 FIELD_GUIDES: dict[str, dict[str, str]] = {
     "jira_base_url": {"label": "Jira Base URL", "guide_section": "jira", "guide_step_id": "jira-base-url"},
@@ -581,11 +591,27 @@ def _stop_agentation_runtime(runtime: ManagedAgentationRuntime | None) -> None:
 def _workflow_run_snapshot(run: dict[str, Any]) -> dict[str, Any]:
     return {
         "run_id": run["run_id"],
+        "batch_id": run.get("batch_id"),
+        "issue_key": run.get("issue_key", ""),
+        "issue_summary": run.get("issue_summary", ""),
+        "tab_label": run.get("tab_label", ""),
+        "resolved_space_key": run.get("resolved_space_key", ""),
+        "local_repo_path": run.get("local_repo_path", ""),
+        "queue_key": run.get("queue_key", ""),
+        "queue_state": run.get("queue_state", "idle"),
+        "queue_position": run.get("queue_position", 0),
+        "clarification_status": run.get("clarification_status", "not_requested"),
+        "clarification": run.get("clarification"),
+        "request_payload": run.get("request_payload"),
+        "resolved_repo_owner": run.get("resolved_repo_owner", ""),
+        "resolved_repo_name": run.get("resolved_repo_name", ""),
+        "resolved_base_branch": run.get("resolved_base_branch", ""),
         "status": run["status"],
         "message": run.get("message", ""),
         "created_at": run["created_at"],
         "started_at": run.get("started_at"),
         "finished_at": run.get("finished_at"),
+        "updated_at": run.get("updated_at"),
         "events": list(run.get("events", [])),
         "result": run.get("result"),
         "error": run.get("error"),
@@ -595,6 +621,159 @@ def _workflow_run_snapshot(run: dict[str, Any]) -> dict[str, Any]:
 
 def _workflow_run_path(run_id: str) -> Path:
     return WORKFLOW_RUNS_DIR / f"{run_id}.json"
+
+
+def _workflow_batch_path(batch_id: str) -> Path:
+    return WORKFLOW_BATCHES_DIR / f"{batch_id}.json"
+
+
+def _normalize_queue_key(path_value: Any) -> str:
+    normalized_path = os.path.abspath(str(path_value or "").strip() or ".")
+    return os.path.normcase(normalized_path)
+
+
+def _batch_tab_label(issue_key: str, issue_summary: str) -> str:
+    base = issue_key.strip().upper()
+    summary = " ".join(str(issue_summary or "").split())
+    if summary:
+        return _short_text(f"{base} {summary}", 72)
+    return base or "Issue"
+
+
+def _workflow_batch_run_ref(run: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "run_id": run.get("run_id", ""),
+        "issue_key": run.get("issue_key", ""),
+        "issue_summary": run.get("issue_summary", ""),
+        "tab_label": run.get("tab_label", ""),
+        "status": run.get("status", ""),
+        "message": run.get("message", ""),
+        "queue_key": run.get("queue_key", ""),
+        "queue_state": run.get("queue_state", "idle"),
+        "queue_position": run.get("queue_position", 0),
+        "local_repo_path": run.get("local_repo_path", ""),
+        "resolved_space_key": run.get("resolved_space_key", ""),
+        "clarification_status": run.get("clarification_status", "not_requested"),
+        "updated_at": run.get("updated_at") or run.get("finished_at") or run.get("started_at") or run.get("created_at"),
+    }
+
+
+def _workflow_batch_snapshot(batch: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "batch_id": batch["batch_id"],
+        "status": batch.get("status", "queued"),
+        "message": batch.get("message", ""),
+        "created_at": batch["created_at"],
+        "updated_at": batch.get("updated_at", batch["created_at"]),
+        "active_run_id": batch.get("active_run_id"),
+        "run_ids": list(batch.get("run_ids", [])),
+        "runs": list(batch.get("runs", [])),
+        "counts": dict(batch.get("counts", {})),
+        "selected_issue_keys": list(batch.get("selected_issue_keys", [])),
+        "selected_issue_count": int(batch.get("selected_issue_count", 0) or 0),
+    }
+
+
+def _save_workflow_batch(batch: dict[str, Any]) -> None:
+    WORKFLOW_BATCHES_DIR.mkdir(parents=True, exist_ok=True)
+    target_path = _workflow_batch_path(batch["batch_id"])
+    temp_path = target_path.with_suffix(".tmp")
+    temp_path.write_text(json.dumps(_workflow_batch_snapshot(batch), ensure_ascii=False, indent=2), encoding="utf-8")
+    temp_path.replace(target_path)
+
+
+def _load_workflow_batch(batch_id: str) -> dict[str, Any] | None:
+    target_path = _workflow_batch_path(batch_id)
+    if not target_path.exists():
+        return None
+    try:
+        payload = json.loads(target_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        LOGGER.warning("Failed to load workflow batch file: %s", target_path)
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _new_workflow_batch(issues: list[dict[str, str]]) -> dict[str, Any]:
+    selected_issue_keys = [str(issue.get("issue_key", "")).strip().upper() for issue in issues if str(issue.get("issue_key", "")).strip()]
+    timestamp = _utcnow_iso()
+    return {
+        "batch_id": uuid.uuid4().hex,
+        "status": "queued",
+        "message": "배치 실행 준비 중",
+        "created_at": timestamp,
+        "updated_at": timestamp,
+        "active_run_id": None,
+        "run_ids": [],
+        "runs": [],
+        "counts": {},
+        "selected_issue_keys": selected_issue_keys,
+        "selected_issue_count": len(selected_issue_keys),
+    }
+
+
+def _batch_status_counts(runs: list[dict[str, Any]]) -> dict[str, int]:
+    counts = {"queued": 0, "running": 0, "needs_input": 0, "completed": 0, "failed": 0, "total": len(runs)}
+    for run in runs:
+        status = str(run.get("status", "")).strip()
+        if status == "completed":
+            counts["completed"] += 1
+        elif status == "failed":
+            counts["failed"] += 1
+        elif status == "needs_input":
+            counts["needs_input"] += 1
+        elif status == "running":
+            counts["running"] += 1
+        else:
+            counts["queued"] += 1
+    return counts
+
+
+def _batch_status_message(status: str, counts: dict[str, int]) -> str:
+    if status == "running":
+        return "배치 실행 중"
+    if status == "needs_input":
+        return "일부 이슈는 추가 확인이 필요합니다."
+    if status == "completed":
+        return "선택한 이슈 실행이 모두 완료되었습니다."
+    if status == "failed":
+        return "배치 내 모든 실행이 실패했습니다."
+    if status == "partially_completed":
+        return "일부 이슈는 완료되었고 일부 이슈는 실패했습니다."
+    queued = int(counts.get("queued", 0) or 0)
+    if queued:
+        return f"대기 중인 실행 {queued}건"
+    return "배치 실행 준비 중"
+
+
+def _batch_suggested_active_run_id(runs: list[dict[str, Any]]) -> str | None:
+    priority = {"running": 0, "needs_input": 1, "failed": 2, "queued": 3, "completed": 4}
+    ordered = sorted(
+        runs,
+        key=lambda run: (
+            priority.get(str(run.get("status", "")).strip(), 5),
+            str(run.get("created_at", "")),
+        ),
+    )
+    return str(ordered[0].get("run_id", "")).strip() if ordered else None
+
+
+def _batch_aggregate_status(runs: list[dict[str, Any]]) -> tuple[str, dict[str, int]]:
+    counts = _batch_status_counts(runs)
+    total = counts["total"]
+    if total == 0:
+        return "queued", counts
+    if counts["running"] > 0:
+        return "running", counts
+    if counts["queued"] > 0:
+        return "queued", counts
+    if counts["needs_input"] > 0:
+        return "needs_input", counts
+    if counts["completed"] == total:
+        return "completed", counts
+    if counts["failed"] == total:
+        return "failed", counts
+    return "partially_completed", counts
 
 
 def _save_workflow_run(run: dict[str, Any]) -> None:
@@ -655,20 +834,50 @@ def _mark_workflow_run_stale(run: dict[str, Any]) -> tuple[dict[str, Any], bool]
     run["status"] = "failed"
     run["message"] = stale_message
     run["finished_at"] = _utcnow_iso()
+    run["updated_at"] = run["finished_at"]
     run["result"] = run.get("result") or stale_error
     run["error"] = stale_error
     run["events"] = list(run.get("events", [])) + [{"timestamp": run["finished_at"], "phase": "failed", "message": stale_message}]
     return run, True
 
 
-def _new_workflow_run() -> dict[str, Any]:
+def _new_workflow_run(
+    *,
+    batch_id: str | None = None,
+    issue_key: str = "",
+    issue_summary: str = "",
+    resolved_space_key: str = "",
+    local_repo_path: str = "",
+    queue_key: str = "",
+    request_payload: dict[str, Any] | None = None,
+    resolved_repo_owner: str = "",
+    resolved_repo_name: str = "",
+    resolved_base_branch: str = "",
+) -> dict[str, Any]:
+    timestamp = _utcnow_iso()
     return {
         "run_id": uuid.uuid4().hex,
+        "batch_id": batch_id,
+        "issue_key": issue_key.strip().upper(),
+        "issue_summary": issue_summary.strip(),
+        "tab_label": _batch_tab_label(issue_key, issue_summary),
+        "resolved_space_key": resolved_space_key,
+        "local_repo_path": local_repo_path,
+        "queue_key": queue_key,
+        "queue_state": "idle",
+        "queue_position": 0,
+        "clarification_status": "not_requested",
+        "clarification": None,
+        "request_payload": dict(request_payload or {}),
+        "resolved_repo_owner": resolved_repo_owner,
+        "resolved_repo_name": resolved_repo_name,
+        "resolved_base_branch": resolved_base_branch,
         "status": "queued",
         "message": "작업 대기 중",
-        "created_at": _utcnow_iso(),
+        "created_at": timestamp,
         "started_at": None,
         "finished_at": None,
+        "updated_at": timestamp,
         "events": [],
         "result": None,
         "error": None,
@@ -677,10 +886,12 @@ def _new_workflow_run() -> dict[str, Any]:
 
 
 def _append_workflow_event(run: dict[str, Any], phase: str, message: str) -> None:
-    run["events"].append({"timestamp": _utcnow_iso(), "phase": phase, "message": message})
+    timestamp = _utcnow_iso()
+    run["events"].append({"timestamp": timestamp, "phase": phase, "message": message})
     if len(run["events"]) > MAX_WORKFLOW_EVENTS:
         run["events"] = run["events"][-MAX_WORKFLOW_EVENTS:]
     run["message"] = message
+    run["updated_at"] = timestamp
 
 
 def _set_workflow_status(run: dict[str, Any], status: str, message: str) -> None:
@@ -694,6 +905,7 @@ def _finish_workflow_run(run: dict[str, Any], status: str, message: str, *, resu
     run["status"] = status
     run["message"] = message
     run["finished_at"] = _utcnow_iso()
+    run["updated_at"] = run["finished_at"]
     run["result"] = result
     run["error"] = error
     run["events"].append({"timestamp": run["finished_at"], "phase": status, "message": message})
@@ -938,6 +1150,23 @@ def _normalize_clarification_response(value: Any) -> dict[str, Any]:
         "analysis_summary": analysis_summary,
         "requested_information": requested_information,
     }
+
+
+def _normalize_batch_issues(value: Any) -> list[dict[str, str]]:
+    if not isinstance(value, list):
+        return []
+    issues: list[dict[str, str]] = []
+    seen_keys: set[str] = set()
+    for raw_issue in value:
+        if not isinstance(raw_issue, dict):
+            continue
+        issue_key = str(raw_issue.get("issue_key") or raw_issue.get("key") or "").strip().upper()
+        issue_summary = " ".join(str(raw_issue.get("issue_summary") or raw_issue.get("summary") or "").split())
+        if not issue_key or not issue_summary or issue_key in seen_keys:
+            continue
+        issues.append({"issue_key": issue_key, "issue_summary": issue_summary})
+        seen_keys.add(issue_key)
+    return issues
 
 
 def _codex_config_path() -> Path:
@@ -2574,6 +2803,70 @@ def _load_repo_context(github_payload: dict[str, Any], issue_key: Any) -> tuple[
     return context.github, context.local_repo_path, context.space_key
 
 
+def _safe_fetch_issue_detail(jira_payload: dict[str, Any] | None, issue_key: str, issue_summary: str) -> dict[str, Any]:
+    fallback = {
+        "ok": True,
+        "issue_key": issue_key.strip().upper(),
+        "summary": issue_summary.strip(),
+        "status": "",
+        "issue_type": "",
+        "priority": "",
+        "assignee": "",
+        "labels": [],
+        "description": "",
+        "comments_text": "",
+    }
+    if not jira_payload:
+        return fallback
+
+    try:
+        config = JiraConfig(**jira_payload)
+    except TypeError:
+        return fallback
+
+    try:
+        detail = _fetch_jira_issue_detail(config, issue_key)
+    except requests.RequestException:
+        LOGGER.warning("Failed to fetch Jira issue detail for batch issue: %s", issue_key)
+        return fallback
+
+    if not detail.get("ok"):
+        return fallback
+    detail.setdefault("summary", issue_summary.strip())
+    return detail
+
+
+def _batch_issue_workflow_payload(
+    common_payload: dict[str, Any],
+    issue: dict[str, str],
+    issue_detail: dict[str, Any],
+    resolved_space_key: str,
+    github_config: GithubConfig,
+) -> dict[str, Any]:
+    issue_key = str(issue["issue_key"]).strip().upper()
+    issue_summary = str(issue["issue_summary"]).strip()
+    return {
+        **common_payload,
+        "issue_key": issue_key,
+        "issue_summary": issue_summary,
+        "branch_name": _suggest_branch_name(issue_key, issue_summary),
+        "commit_message": f"{issue_key}: {issue_summary}",
+        "issue_status": str(issue_detail.get("status", "")).strip(),
+        "issue_type": str(issue_detail.get("issue_type", "")).strip(),
+        "issue_priority": str(issue_detail.get("priority", "")).strip(),
+        "issue_assignee": str(issue_detail.get("assignee", "")).strip(),
+        "issue_labels": ", ".join(issue_detail.get("labels", []) or []),
+        "issue_description": str(issue_detail.get("description", "")).strip(),
+        "issue_comments_text": str(issue_detail.get("comments_text", "")).strip(),
+        "clarification_questions": [],
+        "clarification_answers": {},
+        "resolved_space_key": resolved_space_key,
+        "resolved_repo_owner": github_config.repo_owner,
+        "resolved_repo_name": github_config.repo_name,
+        "resolved_base_branch": github_config.base_branch,
+    }
+
+
 def _execute_coding_workflow(repo_path: Path, github_config: GithubConfig, payload: dict[str, Any], reporter: Any = None) -> dict[str, Any]:
     _safe_ensure_project_memory(repo_path)
     dirty_entries = _repo_dirty_entries(repo_path)
@@ -2759,6 +3052,128 @@ def create_app() -> Flask:
     store = CredentialStore(DB_PATH, _load_encryption_key())
     workflow_runs: dict[str, dict[str, Any]] = {}
     workflow_runs_lock = threading.Lock()
+    workflow_batches: dict[str, dict[str, Any]] = {}
+    workflow_batches_lock = threading.Lock()
+    workflow_queue_lock = threading.Lock()
+    workflow_queue_pending: dict[str, list[PendingWorkflowJob]] = {}
+    workflow_queue_active: set[str] = set()
+
+    def _load_batch_file_ids(limit: int | None = None) -> list[str]:
+        if not WORKFLOW_BATCHES_DIR.exists():
+            return []
+        batch_files = sorted(
+            WORKFLOW_BATCHES_DIR.glob("*.json"),
+            key=lambda item: item.stat().st_mtime,
+            reverse=True,
+        )
+        if limit is not None:
+            batch_files = batch_files[:limit]
+        return [item.stem for item in batch_files]
+
+    def _ensure_batch_loaded(batch_id: str) -> dict[str, Any] | None:
+        with workflow_batches_lock:
+            batch = workflow_batches.get(batch_id)
+            if batch is not None:
+                return batch
+        persisted_batch = _load_workflow_batch(batch_id)
+        if persisted_batch is None:
+            return None
+        with workflow_batches_lock:
+            workflow_batches.setdefault(batch_id, persisted_batch)
+            return workflow_batches[batch_id]
+
+    def _refresh_batch_state(batch_id: str) -> dict[str, Any] | None:
+        batch = _ensure_batch_loaded(batch_id)
+        if batch is None:
+            return None
+
+        run_ids = [str(run_id).strip() for run_id in batch.get("run_ids", []) if str(run_id).strip()]
+        if not run_ids:
+            run_ids = [str(item.get("run_id", "")).strip() for item in batch.get("runs", []) if str(item.get("run_id", "")).strip()]
+
+        runs: list[dict[str, Any]] = []
+        for fallback_ref, run_id in zip(batch.get("runs", []), run_ids):
+            run_snapshot = get_run(run_id)
+            if run_snapshot is None:
+                fallback_copy = dict(fallback_ref)
+                fallback_copy.setdefault("run_id", run_id)
+                fallback_copy.setdefault("events", [])
+                fallback_copy.setdefault("result", None)
+                fallback_copy.setdefault("error", None)
+                runs.append(fallback_copy)
+                continue
+            runs.append(run_snapshot)
+
+        if len(runs) < len(run_ids):
+            known_run_ids = {str(run.get("run_id", "")).strip() for run in runs}
+            for run_id in run_ids:
+                if run_id in known_run_ids:
+                    continue
+                run_snapshot = get_run(run_id)
+                if run_snapshot is not None:
+                    runs.append(run_snapshot)
+
+        status, counts = _batch_aggregate_status(runs)
+        suggested_active_run_id = _batch_suggested_active_run_id(runs)
+        active_run_id = str(batch.get("active_run_id") or "").strip()
+        valid_run_ids = {str(run.get("run_id", "")).strip() for run in runs}
+        if active_run_id not in valid_run_ids:
+            active_run_id = suggested_active_run_id
+        updated_values = [
+            str(batch.get("updated_at", "")).strip(),
+            *[
+                str(
+                    run.get("updated_at")
+                    or run.get("finished_at")
+                    or run.get("started_at")
+                    or run.get("created_at")
+                    or ""
+                ).strip()
+                for run in runs
+            ],
+        ]
+        updated_at = max([value for value in updated_values if value], default=batch.get("updated_at", batch.get("created_at", _utcnow_iso())))
+        with workflow_batches_lock:
+            current_batch = workflow_batches.get(batch_id, batch)
+            current_batch["status"] = status
+            current_batch["counts"] = counts
+            current_batch["message"] = _batch_status_message(status, counts)
+            current_batch["updated_at"] = updated_at
+            current_batch["active_run_id"] = active_run_id
+            current_batch["run_ids"] = [str(run.get("run_id", "")).strip() for run in runs]
+            current_batch["runs"] = [_workflow_batch_run_ref(run) for run in runs]
+            workflow_batches[batch_id] = current_batch
+            _save_workflow_batch(current_batch)
+            snapshot = _workflow_batch_snapshot(current_batch)
+        return {**snapshot, "runs": runs, "suggested_active_run_id": suggested_active_run_id}
+
+    def _sync_batch_from_run_snapshot(run_snapshot: dict[str, Any]) -> None:
+        batch_id = str(run_snapshot.get("batch_id", "")).strip()
+        if not batch_id:
+            return
+        batch = _ensure_batch_loaded(batch_id)
+        if batch is None:
+            return
+        with workflow_batches_lock:
+            run_id = str(run_snapshot.get("run_id", "")).strip()
+            run_ids = [str(item).strip() for item in batch.get("run_ids", []) if str(item).strip()]
+            if run_id and run_id not in run_ids:
+                run_ids.append(run_id)
+            batch["run_ids"] = run_ids
+            refs = [dict(item) for item in batch.get("runs", [])]
+            refs_by_id = {str(item.get("run_id", "")).strip(): item for item in refs}
+            refs_by_id[run_id] = _workflow_batch_run_ref(run_snapshot)
+            batch["runs"] = [refs_by_id[item_id] for item_id in run_ids if item_id in refs_by_id]
+            batch["updated_at"] = str(run_snapshot.get("updated_at") or _utcnow_iso())
+        _refresh_batch_state(batch_id)
+
+    def _register_run(run: dict[str, Any]) -> None:
+        snapshot = {}
+        with workflow_runs_lock:
+            workflow_runs[run["run_id"]] = run
+            _save_workflow_run(run)
+            snapshot = _workflow_run_snapshot(run)
+        _sync_batch_from_run_snapshot(snapshot)
 
     def get_run(run_id: str) -> dict[str, Any] | None:
         with workflow_runs_lock:
@@ -2773,23 +3188,119 @@ def create_app() -> Flask:
         persisted_run, changed = _mark_workflow_run_stale(persisted_run)
         if changed:
             _save_workflow_run(persisted_run)
+            _sync_batch_from_run_snapshot(persisted_run)
         return persisted_run
 
-    def update_run(run_id: str, updater: Any) -> None:
+    def update_run(run_id: str, updater: Any) -> dict[str, Any] | None:
+        snapshot: dict[str, Any] | None = None
         with workflow_runs_lock:
             run = workflow_runs.get(run_id)
             if run is not None:
                 updater(run)
                 _save_workflow_run(run)
+                snapshot = _workflow_run_snapshot(run)
+        if snapshot is not None:
+            _sync_batch_from_run_snapshot(snapshot)
+        return snapshot
 
-    def start_workflow_thread(run_id: str, github_config: GithubConfig, repo_path: Path, payload: dict[str, Any]) -> None:
+    def create_batch(issues: list[dict[str, str]]) -> dict[str, Any]:
+        batch = _new_workflow_batch(issues)
+        with workflow_batches_lock:
+            workflow_batches[batch["batch_id"]] = batch
+            _save_workflow_batch(batch)
+        return batch
+
+    def get_batch(batch_id: str) -> dict[str, Any] | None:
+        return _refresh_batch_state(batch_id)
+
+    def list_batches(limit: int = MAX_RECENT_BATCHES) -> list[dict[str, Any]]:
+        results: list[dict[str, Any]] = []
+        seen_ids: set[str] = set()
+        with workflow_batches_lock:
+            loaded_batch_ids = list(workflow_batches.keys())
+        candidate_ids = [*loaded_batch_ids, *_load_batch_file_ids(limit=limit * 2)]
+        for batch_id in candidate_ids:
+            batch_id = str(batch_id).strip()
+            if not batch_id or batch_id in seen_ids:
+                continue
+            seen_ids.add(batch_id)
+            batch_snapshot = get_batch(batch_id)
+            if batch_snapshot is None:
+                continue
+            results.append(_workflow_batch_snapshot(batch_snapshot))
+        results.sort(key=lambda item: str(item.get("updated_at", "")), reverse=True)
+        return results[:limit]
+
+    def _update_pending_queue_positions(queue_key: str) -> None:
+        pending_jobs = workflow_queue_pending.get(queue_key, [])
+        for index, pending_job in enumerate(pending_jobs, start=1):
+            update_run(
+                pending_job.run_id,
+                lambda run, idx=index: (
+                    run.__setitem__("queue_state", "queued"),
+                    run.__setitem__("queue_position", idx),
+                ),
+            )
+
+    def _start_next_queued_job_locked(queue_key: str) -> PendingWorkflowJob | None:
+        pending_jobs = workflow_queue_pending.get(queue_key, [])
+        if queue_key in workflow_queue_active or not pending_jobs:
+            return None
+        job = pending_jobs.pop(0)
+        if not pending_jobs:
+            workflow_queue_pending.pop(queue_key, None)
+        workflow_queue_active.add(queue_key)
+        _update_pending_queue_positions(queue_key)
+        return job
+
+    def enqueue_workflow_run(job: PendingWorkflowJob) -> None:
+        queue_key = _normalize_queue_key(job.repo_path)
+        update_run(
+            job.run_id,
+            lambda run: (
+                run.__setitem__("queue_key", queue_key),
+                run.__setitem__("queue_state", "queued"),
+                run.__setitem__("queue_position", len(workflow_queue_pending.get(queue_key, [])) + (1 if queue_key in workflow_queue_active else 0) + 1),
+                run.__setitem__("status", "queued"),
+                run.__setitem__("message", "실행 큐에 등록했습니다."),
+                run.__setitem__("updated_at", _utcnow_iso()),
+            ),
+        )
+        job_to_start: PendingWorkflowJob | None = None
+        with workflow_queue_lock:
+            workflow_queue_pending.setdefault(queue_key, []).append(job)
+            _update_pending_queue_positions(queue_key)
+            job_to_start = _start_next_queued_job_locked(queue_key)
+        if job_to_start is not None:
+            _start_workflow_execution(job_to_start, queue_key)
+
+    def _finish_queue_job(queue_key: str) -> None:
+        job_to_start: PendingWorkflowJob | None = None
+        with workflow_queue_lock:
+            workflow_queue_active.discard(queue_key)
+            _update_pending_queue_positions(queue_key)
+            job_to_start = _start_next_queued_job_locked(queue_key)
+        if job_to_start is not None:
+            _start_workflow_execution(job_to_start, queue_key)
+
+    def _start_workflow_execution(job: PendingWorkflowJob, queue_key: str) -> None:
+        run_id = job.run_id
+        repo_path = job.repo_path
+
         def reporter(phase: str, message: str) -> None:
             update_run(run_id, lambda run: _append_workflow_event(run, phase, message))
 
         def worker() -> None:
-            update_run(run_id, lambda run: _set_workflow_status(run, "running", "Codex 자동 작업을 시작합니다."))
+            update_run(
+                run_id,
+                lambda run: (
+                    run.__setitem__("queue_state", "running"),
+                    run.__setitem__("queue_position", 0),
+                    _set_workflow_status(run, "running", "Codex 자동 작업을 시작합니다."),
+                ),
+            )
             try:
-                result = _execute_coding_workflow(repo_path, github_config, payload, reporter=reporter)
+                result = _execute_coding_workflow(repo_path, job.github_config, job.payload, reporter=reporter)
                 final_status = "completed" if result.get("ok") else "failed"
                 result_status = str(result.get("status", "")).strip()
                 normalized_messages = {
@@ -2804,24 +3315,150 @@ def create_app() -> Flask:
                     result["message"] = result_message
                 update_run(
                     run_id,
-                    lambda run: _finish_workflow_run(
-                        run,
-                        final_status,
-                        str(result.get("message", "작업이 종료되었습니다.")),
-                        result=result,
-                        error=None if result.get("ok") else result,
+                    lambda run: (
+                        run.__setitem__("queue_state", "finished"),
+                        run.__setitem__("queue_position", 0),
+                        _finish_workflow_run(
+                            run,
+                            final_status,
+                            str(result.get("message", "작업이 종료되었습니다.")),
+                            result=result,
+                            error=None if result.get("ok") else result,
+                        ),
                     ),
                 )
             except Exception as exc:  # pragma: no cover - defensive guard for background worker
                 LOGGER.exception("Workflow run failed unexpectedly: run_id=%s", run_id)
                 error = {"ok": False, "status": "internal_error", "message": str(exc)}
-                update_run(run_id, lambda run: _finish_workflow_run(run, "failed", str(exc), result=None, error=error))
+                update_run(
+                    run_id,
+                    lambda run: (
+                        run.__setitem__("queue_state", "finished"),
+                        run.__setitem__("queue_position", 0),
+                        _finish_workflow_run(run, "failed", str(exc), result=None, error=error),
+                    ),
+                )
             final_run = get_run(run_id)
             if final_run is not None:
                 _safe_record_project_history(repo_path, final_run)
+            _finish_queue_job(queue_key)
 
         thread = threading.Thread(target=worker, name=f"workflow-run-{run_id}", daemon=True)
         thread.start()
+
+    def _required_batch_workflow_fields(payload: dict[str, Any]) -> list[str]:
+        required = {"work_instruction": payload.get("work_instruction")}
+        return [name for name, value in required.items() if not str(value or "").strip()]
+
+    def _resolve_batch_candidates(
+        issues: list[dict[str, str]],
+        common_payload: dict[str, Any],
+        jira_payload: dict[str, Any] | None,
+        github_payload: dict[str, Any],
+    ) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
+        candidates: list[dict[str, Any]] = []
+        identity_missing = False
+        for issue in issues:
+            issue_key = str(issue["issue_key"]).strip().upper()
+            issue_summary = str(issue["issue_summary"]).strip()
+            try:
+                github_config, repo_path, resolved_space_key = _load_repo_context(github_payload, issue_key)
+            except KeyError as exc:
+                error_code = str(exc.args[0])
+                requested_fields = ["repo_mappings"] if error_code.startswith("repo_mapping_not_found:") else ["issue_key"]
+                return [], {
+                    "ok": False,
+                    "error": error_code,
+                    "issue_key": issue_key,
+                    "fields": requested_fields,
+                    "requested_information": _build_requested_information(requested_fields),
+                }
+            except ValueError as exc:
+                return [], {"ok": False, "error": str(exc), "fields": ["repo_mappings"]}
+
+            if not repo_path.exists() or not (repo_path / ".git").exists():
+                return [], {
+                    "ok": False,
+                    "error": "local_repo_not_found",
+                    "issue_key": issue_key,
+                    "requested_information": _build_requested_information(["local_repo_path"]),
+                }
+
+            _safe_ensure_project_memory(repo_path)
+            issue_detail = _safe_fetch_issue_detail(jira_payload, issue_key, issue_summary)
+            run_payload = _batch_issue_workflow_payload(common_payload, issue, issue_detail, resolved_space_key, github_config)
+            queue_key = _normalize_queue_key(repo_path)
+
+            if bool(common_payload.get("allow_auto_commit", True)):
+                _, missing_identity = _resolve_commit_identity(repo_path, run_payload)
+                if missing_identity:
+                    identity_missing = True
+
+            candidates.append(
+                {
+                    "issue": issue,
+                    "issue_detail": issue_detail,
+                    "repo_path": repo_path,
+                    "github_config": github_config,
+                    "resolved_space_key": resolved_space_key,
+                    "run_payload": run_payload,
+                    "queue_key": queue_key,
+                }
+            )
+
+        if identity_missing and bool(common_payload.get("allow_auto_commit", True)):
+            return [], {
+                "ok": False,
+                "error": "git_identity_missing",
+                "fields": ["git_author_name", "git_author_email"],
+                "requested_information": _build_requested_information(["git_author_name", "git_author_email"]),
+            }
+        return candidates, None
+
+    def _build_batch_preview_items(issues: list[dict[str, str]], github_payload: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
+        preview_items: list[dict[str, Any]] = []
+        for issue in issues:
+            issue_key = str(issue["issue_key"]).strip().upper()
+            issue_summary = str(issue["issue_summary"]).strip()
+            try:
+                github_config, repo_path, resolved_space_key = _load_repo_context(github_payload, issue_key)
+            except (KeyError, ValueError) as exc:
+                return [], {
+                    "ok": False,
+                    "error": str(exc.args[0] if getattr(exc, "args", None) else exc),
+                    "issue_key": issue_key,
+                }
+            if not repo_path.exists() or not (repo_path / ".git").exists():
+                return [], {
+                    "ok": False,
+                    "error": "local_repo_not_found",
+                    "issue_key": issue_key,
+                    "fields": ["local_repo_path"],
+                    "requested_information": _build_requested_information(["local_repo_path"]),
+                }
+            queue_key = _normalize_queue_key(repo_path)
+            preview_items.append(
+                {
+                    "issue_key": issue_key,
+                    "issue_summary": issue_summary,
+                    "tab_label": _batch_tab_label(issue_key, issue_summary),
+                    "resolved_space_key": resolved_space_key,
+                    "repo_owner": github_config.repo_owner,
+                    "repo_name": github_config.repo_name,
+                    "base_branch": github_config.base_branch,
+                    "local_repo_path": str(repo_path),
+                    "queue_key": queue_key,
+                    "branch_name": _suggest_branch_name(issue_key, issue_summary),
+                    "commit_message": f"{issue_key}: {issue_summary}",
+                }
+            )
+        queue_counts: dict[str, int] = {}
+        for item in preview_items:
+            queue_counts[item["queue_key"]] = queue_counts.get(item["queue_key"], 0) + 1
+        for item in preview_items:
+            item["queue_group_size"] = queue_counts[item["queue_key"]]
+            item["queue_mode"] = "serial" if item["queue_group_size"] > 1 else "parallel"
+        return preview_items, None
 
     @app.get("/")
     def index() -> str:
@@ -3082,6 +3719,341 @@ def create_app() -> Flask:
             }
         )
 
+    @app.post("/api/workflow/batch/preview")
+    def preview_workflow_batch() -> Any:
+        payload = request.get_json(silent=True) or {}
+        issues = _normalize_batch_issues(payload.get("issues"))
+        if not issues:
+            return jsonify({"ok": False, "error": "batch_issues_required", "fields": ["issues"]}), 400
+        github_payload = store.load("github")
+        if not github_payload:
+            return jsonify({"ok": False, "error": "github_config_not_found"}), 400
+        preview_items, error = _build_batch_preview_items(issues, github_payload)
+        if error:
+            return jsonify(error), 400
+        return jsonify(
+            {
+                "ok": True,
+                "issues": preview_items,
+                "selected_issue_count": len(preview_items),
+                "selected_issue_keys": [item["issue_key"] for item in preview_items],
+            }
+        )
+
+    @app.get("/api/workflow/batches")
+    def list_workflow_batches() -> Any:
+        try:
+            limit = max(1, min(int(request.args.get("limit", MAX_RECENT_BATCHES)), 50))
+        except (TypeError, ValueError):
+            limit = MAX_RECENT_BATCHES
+        return jsonify({"ok": True, "batches": list_batches(limit=limit)})
+
+    @app.get("/api/workflow/batch/<batch_id>")
+    def get_workflow_batch(batch_id: str) -> Any:
+        batch = get_batch(batch_id)
+        if batch is None:
+            return jsonify({"ok": False, "error": "workflow_batch_not_found"}), 404
+        return jsonify({"ok": True, **batch})
+
+    @app.post("/api/workflow/batch/run")
+    def run_workflow_batch() -> Any:
+        payload = request.get_json(silent=True) or {}
+        payload["codex_model"] = str(payload.get("codex_model", "")).strip()
+        payload["codex_reasoning_effort"] = _normalize_reasoning_effort(payload.get("codex_reasoning_effort"))
+        issues = _normalize_batch_issues(payload.get("issues"))
+        missing = _required_batch_workflow_fields(payload)
+        if missing:
+            return (
+                jsonify(
+                    {
+                        "ok": False,
+                        "error": "workflow_fields_missing",
+                        "fields": missing,
+                        "requested_information": _build_requested_information(missing),
+                    }
+                ),
+                400,
+            )
+        if not issues:
+            return jsonify({"ok": False, "error": "batch_issues_required", "fields": ["issues"]}), 400
+        if payload["codex_reasoning_effort"] and payload["codex_reasoning_effort"] not in VALID_REASONING_EFFORTS:
+            return (
+                jsonify(
+                    {
+                        "ok": False,
+                        "error": "invalid_reasoning_effort",
+                        "fields": ["codex_reasoning_effort"],
+                        "requested_information": _build_requested_information(["codex_reasoning_effort"]),
+                        "allowed_values": list(VALID_REASONING_EFFORTS),
+                        "message": "Reasoning Effort 는 low, medium, high, xhigh 중 하나여야 합니다.",
+                    }
+                ),
+                400,
+            )
+
+        jira_payload = store.load("jira")
+        github_payload = store.load("github")
+        if not github_payload:
+            return jsonify({"ok": False, "error": "github_config_not_found"}), 400
+
+        try:
+            _find_codex_launcher()
+        except FileNotFoundError as exc:
+            return jsonify({"ok": False, "error": "codex_cli_not_found", "details": str(exc)}), 400
+
+        common_payload = {
+            "codex_model": payload["codex_model"],
+            "codex_reasoning_effort": payload["codex_reasoning_effort"],
+            "work_instruction": str(payload.get("work_instruction", "")).strip(),
+            "acceptance_criteria": str(payload.get("acceptance_criteria", "")).strip(),
+            "test_command": str(payload.get("test_command", "")).strip(),
+            "commit_checklist": str(payload.get("commit_checklist", "")).strip(),
+            "git_author_name": str(payload.get("git_author_name", "")).strip(),
+            "git_author_email": str(payload.get("git_author_email", "")).strip(),
+            "allow_auto_commit": bool(payload.get("allow_auto_commit", True)),
+        }
+
+        candidates, error = _resolve_batch_candidates(issues, common_payload, jira_payload, github_payload)
+        if error is not None:
+            return jsonify(error), 400
+
+        batch = create_batch(issues)
+        for candidate in candidates:
+            issue = candidate["issue"]
+            run_payload = dict(candidate["run_payload"])
+            repo_path = Path(candidate["repo_path"])
+            github_config = candidate["github_config"]
+            run = _new_workflow_run(
+                batch_id=batch["batch_id"],
+                issue_key=issue["issue_key"],
+                issue_summary=issue["issue_summary"],
+                resolved_space_key=str(candidate["resolved_space_key"]),
+                local_repo_path=str(repo_path),
+                queue_key=str(candidate["queue_key"]),
+                request_payload=run_payload,
+                resolved_repo_owner=github_config.repo_owner,
+                resolved_repo_name=github_config.repo_name,
+                resolved_base_branch=github_config.base_branch,
+            )
+            run["jira_comment_sync"] = {
+                "questions": {"status": "skipped", "reason": "not_requested"},
+                "answers": {"status": "skipped", "reason": "not_requested"},
+            }
+            _append_workflow_event(run, "queued", "배치 실행 항목을 등록했습니다.")
+            _register_run(run)
+
+            try:
+                clarification = _run_codex_clarification(repo_path, run_payload)
+            except RuntimeError as exc:
+                error_payload = {
+                    "ok": False,
+                    "status": str(exc),
+                    "message": "사전 확인 단계에서 Codex 응답을 해석하지 못했습니다.",
+                }
+                update_run(
+                    run["run_id"],
+                    lambda target_run, payload=error_payload: (
+                        target_run.__setitem__("queue_state", "finished"),
+                        target_run.__setitem__("clarification_status", "failed"),
+                        _finish_workflow_run(target_run, "failed", payload["message"], result=None, error=payload),
+                    ),
+                )
+                continue
+
+            if clarification["needs_input"]:
+                run_jira_sync = {
+                    "questions": _safe_sync_jira_clarification_questions(
+                        jira_payload,
+                        issue["issue_key"],
+                        clarification["analysis_summary"],
+                        clarification["requested_information"],
+                    ),
+                    "answers": {"status": "skipped", "reason": "not_requested"},
+                }
+                update_run(
+                    run["run_id"],
+                    lambda target_run, sync_data=run_jira_sync, clarification_payload=clarification: (
+                        target_run.__setitem__("status", "needs_input"),
+                        target_run.__setitem__("message", clarification_payload["analysis_summary"]),
+                        target_run.__setitem__("queue_state", "idle"),
+                        target_run.__setitem__("queue_position", 0),
+                        target_run.__setitem__("clarification_status", "needs_input"),
+                        target_run.__setitem__(
+                            "clarification",
+                            {
+                                "analysis_summary": clarification_payload["analysis_summary"],
+                                "requested_information": clarification_payload["requested_information"],
+                                "answers": {},
+                            },
+                        ),
+                        target_run.__setitem__(
+                            "result",
+                            {
+                                "ok": True,
+                                "status": "needs_input",
+                                "analysis_summary": clarification_payload["analysis_summary"],
+                                "requested_information": clarification_payload["requested_information"],
+                                "jira_comment_sync": sync_data,
+                            },
+                        ),
+                        target_run.__setitem__("jira_comment_sync", sync_data),
+                        _append_workflow_event(target_run, "needs_input", clarification_payload["analysis_summary"]),
+                    ),
+                )
+                continue
+
+            update_run(
+                run["run_id"],
+                lambda target_run, clarification_payload=clarification: (
+                    target_run.__setitem__("clarification_status", "ready"),
+                    target_run.__setitem__(
+                        "clarification",
+                        {
+                            "analysis_summary": clarification_payload["analysis_summary"],
+                            "requested_information": [],
+                            "answers": {},
+                        },
+                    ),
+                ),
+            )
+            enqueue_workflow_run(
+                PendingWorkflowJob(
+                    run_id=run["run_id"],
+                    repo_path=repo_path,
+                    github_config=github_config,
+                    payload=run_payload,
+                )
+            )
+
+        batch_snapshot = get_batch(batch["batch_id"])
+        return (
+            jsonify(
+                {
+                    "ok": True,
+                    "batch_id": batch["batch_id"],
+                    "poll_url": f"/api/workflow/batch/{batch['batch_id']}",
+                    "batch": batch_snapshot,
+                    "runs": (batch_snapshot or {}).get("runs", []),
+                }
+            ),
+            202,
+        )
+
+    @app.post("/api/workflow/batch/<batch_id>/runs/<run_id>/answers")
+    def answer_workflow_batch_run(batch_id: str, run_id: str) -> Any:
+        payload = request.get_json(silent=True) or {}
+        answers = _normalize_clarification_answers(payload.get("clarification_answers"))
+        if not answers:
+            return jsonify({"ok": False, "error": "clarification_answers_missing", "fields": ["clarification_answers"]}), 400
+
+        run = get_run(run_id)
+        if run is None or str(run.get("batch_id", "")).strip() != batch_id:
+            return jsonify({"ok": False, "error": "workflow_run_not_found"}), 404
+        if str(run.get("status", "")).strip() != "needs_input":
+            return jsonify({"ok": False, "error": "workflow_run_not_waiting_for_input"}), 400
+
+        repo_path = Path(str(run.get("local_repo_path", "")).strip())
+        if not repo_path.exists() or not (repo_path / ".git").exists():
+            return jsonify({"ok": False, "error": "local_repo_not_found"}), 400
+
+        request_payload = dict(run.get("request_payload") or {})
+        clarification_state = run.get("clarification") or {}
+        request_payload["clarification_questions"] = _normalize_clarification_requests(clarification_state.get("requested_information"))
+        request_payload["clarification_answers"] = answers
+
+        jira_payload = store.load("jira")
+        jira_comment_sync = dict(run.get("jira_comment_sync") or {})
+        jira_comment_sync["answers"] = _safe_sync_jira_clarification_answers(
+            jira_payload,
+            str(run.get("issue_key", "")).strip(),
+            answers,
+            request_payload["clarification_questions"],
+        )
+
+        try:
+            clarification = _run_codex_clarification(repo_path, request_payload)
+        except FileNotFoundError as exc:
+            return jsonify({"ok": False, "error": "codex_cli_not_found", "details": str(exc)}), 400
+        except RuntimeError as exc:
+            return jsonify({"ok": False, "error": str(exc), "message": "사전 확인 단계에서 Codex 응답을 해석하지 못했습니다."}), 502
+
+        if clarification["needs_input"]:
+            jira_comment_sync["questions"] = _safe_sync_jira_clarification_questions(
+                jira_payload,
+                str(run.get("issue_key", "")).strip(),
+                clarification["analysis_summary"],
+                clarification["requested_information"],
+            )
+            updated_run = update_run(
+                run_id,
+                lambda target_run, sync_data=jira_comment_sync, clarification_payload=clarification, next_answers=answers: (
+                    target_run.__setitem__("request_payload", request_payload),
+                    target_run.__setitem__("status", "needs_input"),
+                    target_run.__setitem__("message", clarification_payload["analysis_summary"]),
+                    target_run.__setitem__("clarification_status", "needs_input"),
+                    target_run.__setitem__(
+                        "clarification",
+                        {
+                            "analysis_summary": clarification_payload["analysis_summary"],
+                            "requested_information": clarification_payload["requested_information"],
+                            "answers": next_answers,
+                        },
+                    ),
+                    target_run.__setitem__(
+                        "result",
+                        {
+                            "ok": True,
+                            "status": "needs_input",
+                            "analysis_summary": clarification_payload["analysis_summary"],
+                            "requested_information": clarification_payload["requested_information"],
+                            "jira_comment_sync": sync_data,
+                        },
+                    ),
+                    target_run.__setitem__("jira_comment_sync", sync_data),
+                    _append_workflow_event(target_run, "needs_input", clarification_payload["analysis_summary"]),
+                ),
+            )
+            batch_snapshot = get_batch(batch_id)
+            return jsonify({"ok": True, "status": "needs_input", "run": updated_run, "batch": batch_snapshot})
+
+        github_config = GithubConfig(
+            repo_owner=str(run.get("resolved_repo_owner", "")).strip(),
+            repo_name=str(run.get("resolved_repo_name", "")).strip(),
+            base_branch=str(run.get("resolved_base_branch", "")).strip(),
+            token="",
+        )
+        updated_run = update_run(
+            run_id,
+            lambda target_run, sync_data=jira_comment_sync, next_answers=answers, clarification_payload=clarification: (
+                target_run.__setitem__("request_payload", request_payload),
+                target_run.__setitem__("clarification_status", "ready"),
+                target_run.__setitem__("queue_state", "queued"),
+                target_run.__setitem__("queue_position", 0),
+                target_run.__setitem__(
+                    "clarification",
+                    {
+                        "analysis_summary": clarification_payload["analysis_summary"],
+                        "requested_information": [],
+                        "answers": next_answers,
+                    },
+                ),
+                target_run.__setitem__("result", None),
+                target_run.__setitem__("error", None),
+                target_run.__setitem__("jira_comment_sync", sync_data),
+                _append_workflow_event(target_run, "queued", "추가 답변을 반영해 실행 큐에 다시 등록했습니다."),
+            ),
+        )
+        enqueue_workflow_run(
+            PendingWorkflowJob(
+                run_id=run_id,
+                repo_path=repo_path,
+                github_config=github_config,
+                payload=request_payload,
+            )
+        )
+        batch_snapshot = get_batch(batch_id)
+        return jsonify({"ok": True, "status": "queued", "run": updated_run, "batch": batch_snapshot})
+
     @app.post("/api/workflow/clarify")
     def clarify_workflow() -> Any:
         payload = request.get_json(silent=True) or {}
@@ -3318,26 +4290,36 @@ def create_app() -> Flask:
                 payload["clarification_questions"],
             )
 
-        run = _new_workflow_run()
-        with workflow_runs_lock:
-            workflow_runs[run["run_id"]] = run
-            workflow_runs[run["run_id"]]["jira_comment_sync"] = jira_comment_sync
-            _append_workflow_event(workflow_runs[run["run_id"]], "queued", "실행 요청을 접수했습니다.")
-            _save_workflow_run(workflow_runs[run["run_id"]])
-
-        start_workflow_thread(
-            run["run_id"],
-            github_config,
-            repo_path,
-            {
-                **payload,
-                "resolved_space_key": resolved_space_key,
-                "resolved_repo_owner": github_config.repo_owner,
-                "resolved_repo_name": github_config.repo_name,
-                "resolved_base_branch": github_config.base_branch,
-                "git_author_name": identity["name"],
-                "git_author_email": identity["email"],
-            },
+        run_payload = {
+            **payload,
+            "resolved_space_key": resolved_space_key,
+            "resolved_repo_owner": github_config.repo_owner,
+            "resolved_repo_name": github_config.repo_name,
+            "resolved_base_branch": github_config.base_branch,
+            "git_author_name": identity["name"],
+            "git_author_email": identity["email"],
+        }
+        run = _new_workflow_run(
+            issue_key=str(payload.get("issue_key", "")).strip(),
+            issue_summary=str(payload.get("issue_summary", "")).strip(),
+            resolved_space_key=resolved_space_key,
+            local_repo_path=str(repo_path),
+            queue_key=_normalize_queue_key(repo_path),
+            request_payload=run_payload,
+            resolved_repo_owner=github_config.repo_owner,
+            resolved_repo_name=github_config.repo_name,
+            resolved_base_branch=github_config.base_branch,
+        )
+        run["jira_comment_sync"] = jira_comment_sync
+        _append_workflow_event(run, "queued", "실행 요청을 접수했습니다.")
+        _register_run(run)
+        enqueue_workflow_run(
+            PendingWorkflowJob(
+                run_id=run["run_id"],
+                repo_path=repo_path,
+                github_config=github_config,
+                payload=run_payload,
+            )
         )
 
         response = get_run(run["run_id"])
