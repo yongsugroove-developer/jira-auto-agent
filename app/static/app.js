@@ -43,6 +43,14 @@ const workflowState = {
   lastJiraCommentSync: null,
 };
 
+const repoMappingState = {
+  items: [],
+};
+
+const configFlowState = {
+  repoSuggested: false,
+};
+
 const DEFAULT_AUTOMATION_RESULT_HINT = "Codex 자동 작업을 실행하면 결과를 여기에 표시합니다.";
 
 const VISIBLE_WORKFLOW_PHASES = new Set([
@@ -112,13 +120,16 @@ function parseRepoMappingsText(text) {
     .map((line) => line.trim())
     .filter(Boolean)
     .map((line) => line.split("|").map((part) => part.trim()))
-    .filter((parts) => parts.length === 5 && parts.every(Boolean))
+    .filter((parts) => (parts.length === 5 || parts.length === 6) && parts.slice(0, 5).every(Boolean))
     .map((parts) => ({
-      space_key: parts[0],
+      space_key: parts[0].toUpperCase(),
       repo_owner: parts[1],
       repo_name: parts[2],
       base_branch: parts[3],
       local_repo_path: parts[4],
+      github_token: parts[5] || "",
+      has_saved_token: false,
+      clear_saved_token: false,
     }));
 }
 
@@ -135,17 +146,36 @@ function serializeRepoMappings(items) {
     .join("\n");
 }
 
+function repoMappingTokenSummary(item) {
+  if (item.clear_saved_token) {
+    return "공간 전용 GitHub Token 제거 예정";
+  }
+  if (item.github_token) {
+    return "공간 전용 GitHub Token 새로 입력됨";
+  }
+  if (item.has_saved_token) {
+    return "공간 전용 GitHub Token 저장됨";
+  }
+  return "공간 전용 GitHub Token 입력 필요";
+}
+
+function repoMappingTokenActionButton(item, index) {
+  if (!(item.has_saved_token || item.github_token || item.clear_saved_token)) {
+    return "";
+  }
+  return `
+    <button
+      type="button"
+      class="ghost-button repo-mapping-item__token-toggle"
+      data-repo-mapping-toggle-token="${index}"
+    >
+      ${escapeHtml(item.clear_saved_token ? "토큰 유지" : "공간 토큰 해제")}
+    </button>
+  `;
+}
+
 function currentRepoMappings() {
-  return $("#repo_mapping_list .repo-mapping-item").map(function () {
-    const row = $(this);
-    return {
-      space_key: row.attr("data-space-key") || "",
-      repo_owner: row.attr("data-repo-owner") || "",
-      repo_name: row.attr("data-repo-name") || "",
-      base_branch: row.attr("data-base-branch") || "",
-      local_repo_path: row.attr("data-local-repo-path") || "",
-    };
-  }).get();
+  return repoMappingState.items.map((item) => ({ ...item }));
 }
 
 function syncRepoMappingsField() {
@@ -176,13 +206,14 @@ function renderRepoMappings(items) {
 
   $("#repo_mapping_list").html(rows || '<p class="repo-mapping-empty">아직 추가된 공간 연결이 없습니다.</p>');
   syncRepoMappingsField();
+  updateConfigFlowState();
 }
 
 function clearRepoMappingInputs() {
   $("#mapping_space_key").val("");
   $("#mapping_repo_owner").val("");
   $("#mapping_repo_name").val("");
-  $("#mapping_base_branch").val("main");
+  $("#mapping_base_branch").val("");
   $("#mapping_local_repo_path").val("");
 }
 
@@ -191,7 +222,7 @@ function readRepoMappingInputs() {
     space_key: $("#mapping_space_key").val().trim().toUpperCase(),
     repo_owner: $("#mapping_repo_owner").val().trim(),
     repo_name: $("#mapping_repo_name").val().trim(),
-    base_branch: $("#mapping_base_branch").val().trim() || "main",
+    base_branch: $("#mapping_base_branch").val().trim(),
     local_repo_path: $("#mapping_local_repo_path").val().trim(),
   };
 }
@@ -288,11 +319,115 @@ function clearResultActions(targetId) {
   $(targetId).empty();
 }
 
+function repoMappingTokenSummary(item) {
+  if (item.clear_saved_token) {
+    return "공간 전용 GitHub Token 제거 예정";
+  }
+  if (item.github_token) {
+    return "공간 전용 GitHub Token 새로 입력됨";
+  }
+  if (item.has_saved_token) {
+    return "공간 전용 GitHub Token 저장됨";
+  }
+  return "공간 전용 GitHub Token 입력 필요";
+}
+
+function repoMappingTokenActionButton(item, index) {
+  if (!(item.has_saved_token || item.github_token || item.clear_saved_token)) {
+    return "";
+  }
+  return `
+    <button
+      type="button"
+      class="ghost-button repo-mapping-item__token-toggle"
+      data-repo-mapping-toggle-token="${index}"
+    >
+      ${escapeHtml(item.clear_saved_token ? "토큰 유지" : "공간 토큰 해제")}
+    </button>
+  `;
+}
+
+function currentRepoMappings() {
+  return repoMappingState.items.map((item) => ({ ...item }));
+}
+
+function syncRepoMappingsField() {
+  $("#repo_mappings").val(serializeRepoMappings(currentRepoMappings()));
+}
+
+function renderRepoMappings(items) {
+  repoMappingState.items = (items || []).map((item) => ({
+    space_key: String(item.space_key || "").trim().toUpperCase(),
+    repo_owner: String(item.repo_owner || "").trim(),
+    repo_name: String(item.repo_name || "").trim(),
+    base_branch: String(item.base_branch || "").trim(),
+    local_repo_path: String(item.local_repo_path || "").trim(),
+    github_token: String(item.github_token || "").trim(),
+    has_saved_token: Boolean(item.has_saved_token),
+    clear_saved_token: Boolean(item.clear_saved_token),
+  }));
+
+  const rows = repoMappingState.items
+    .map((item, index) => `
+      <div class="repo-mapping-item">
+        <div class="repo-mapping-item__summary">
+          <strong>${escapeHtml(`공간명 ${item.space_key}`)}</strong>
+          <span>${escapeHtml(`저장소 ${item.repo_owner}/${item.repo_name}`)}</span>
+          <span>${escapeHtml(`기본 브랜치 ${item.base_branch}`)}</span>
+          <span>${escapeHtml(`로컬 경로 ${item.local_repo_path}`)}</span>
+          <span class="repo-mapping-token-status">${escapeHtml(repoMappingTokenSummary(item))}</span>
+        </div>
+        <div class="repo-mapping-item__actions">
+          ${repoMappingTokenActionButton(item, index)}
+          <button type="button" class="ghost-button repo-mapping-item__remove" data-repo-mapping-remove="${index}">제거</button>
+        </div>
+      </div>
+    `)
+    .join("");
+
+  $("#repo_mapping_list").html(rows || '<p class="repo-mapping-empty">아직 추가한 공간 연결이 없습니다.</p>');
+  syncRepoMappingsField();
+  updateConfigFlowState();
+}
+
+function clearRepoMappingInputs() {
+  $("#mapping_space_key").val("");
+  $("#mapping_repo_owner").val("");
+  $("#mapping_repo_name").val("");
+  $("#mapping_base_branch").val("");
+  $("#mapping_local_repo_path").val("");
+  $("#mapping_github_token").val("");
+}
+
+function readRepoMappingInputs() {
+  return {
+    space_key: $("#mapping_space_key").val().trim().toUpperCase(),
+    repo_owner: $("#mapping_repo_owner").val().trim(),
+    repo_name: $("#mapping_repo_name").val().trim(),
+    base_branch: $("#mapping_base_branch").val().trim(),
+    local_repo_path: $("#mapping_local_repo_path").val().trim(),
+    github_token: $("#mapping_github_token").val().trim(),
+    has_saved_token: false,
+    clear_saved_token: false,
+  };
+}
+
+function setGithubTokenHelp(saved) {
+  const helpText = saved
+    ? "저장된 공간 전용 토큰이 있다. 새 값을 비워도 기존 공간 토큰은 유지된다."
+    : "각 공간 연결에는 GitHub Token이 필요하다. 선택한 이슈의 공간 키와 정확히 일치하는 연결만 사용한다.";
+  $("#github_token_help").text(helpText);
+}
+
 function fillConfig(data) {
-  const repoMappings = parseRepoMappingsText(data.repo_mappings || "");
+  const savedTokenSpaces = new Set((data.repo_mapping_token_spaces || []).map((item) => String(item || "").trim().toUpperCase()));
+  const repoMappings = parseRepoMappingsText(data.repo_mappings || "").map((item) => ({
+    ...item,
+    has_saved_token: savedTokenSpaces.has(item.space_key),
+  }));
   renderRepoMappings(repoMappings);
   Object.keys(data).forEach((key) => {
-    if (key === "repo_mappings") {
+    if (["repo_mappings", "repo_mapping_token_spaces", "github_token_saved"].includes(key)) {
       return;
     }
     const el = $("#" + key);
@@ -300,6 +435,70 @@ function fillConfig(data) {
       el.val(data[key]);
     }
   });
+  setGithubTokenHelp(savedTokenSpaces.size > 0);
+  updateConfigFlowState();
+}
+
+function collectConfig() {
+  syncRepoMappingsField();
+  const repoMappingTokens = {};
+  const repoMappingTokenClears = [];
+  currentRepoMappings().forEach((item) => {
+    if (item.github_token) {
+      repoMappingTokens[item.space_key] = item.github_token;
+      return;
+    }
+    if (item.clear_saved_token) {
+      repoMappingTokenClears.push(item.space_key);
+    }
+  });
+
+  return {
+    jira_base_url: $("#jira_base_url").val().trim(),
+    jira_email: $("#jira_email").val().trim(),
+    jira_api_token: $("#jira_api_token").val().trim(),
+    jira_jql: $("#jira_jql").val().trim(),
+    github_owner: $("#github_owner").val().trim(),
+    github_repo: $("#github_repo").val().trim(),
+    github_base_branch: $("#github_base_branch").val().trim(),
+    github_token: $("#github_token").val().trim(),
+    repo_mappings: $("#repo_mappings").val().trim(),
+    repo_mapping_tokens: repoMappingTokens,
+    repo_mapping_token_clears: repoMappingTokenClears,
+    local_repo_path: $("#local_repo_path").val().trim(),
+  };
+}
+
+function setGithubTokenHelp(saved) {
+  const helpText = saved
+    ? "저장된 공간 전용 토큰이 있다. 새 값을 비워도 기존 공간 토큰은 유지된다."
+    : "각 공간 연결에는 GitHub Token이 필요하다. 선택한 이슈의 공간 키와 정확히 일치하는 연결만 사용한다.";
+  $("#github_token_help").text(helpText);
+}
+
+function collectConfig() {
+  syncRepoMappingsField();
+  const repoMappingTokens = {};
+  const repoMappingTokenClears = [];
+  currentRepoMappings().forEach((item) => {
+    if (item.github_token) {
+      repoMappingTokens[item.space_key] = item.github_token;
+      return;
+    }
+    if (item.clear_saved_token) {
+      repoMappingTokenClears.push(item.space_key);
+    }
+  });
+
+  return {
+    jira_base_url: readTextValue("#jira_base_url"),
+    jira_email: readTextValue("#jira_email"),
+    jira_api_token: readTextValue("#jira_api_token"),
+    jira_jql: readTextValue("#jira_jql"),
+    repo_mappings: readTextValue("#repo_mappings"),
+    repo_mapping_tokens: repoMappingTokens,
+    repo_mapping_token_clears: repoMappingTokenClears,
+  };
 }
 
 function fillWorkflow(data) {
@@ -381,6 +580,58 @@ function normalizeGuideTarget(sectionId, stepId) {
 
 function fieldLabel(fieldId) {
   return FIELD_LABELS[fieldId] || fieldId;
+}
+
+function readTextValue(selector) {
+  const element = $(selector);
+  return String(element.val() || "").trim();
+}
+
+function openConfigPanel(panelKey) {
+  const panel = $(`[data-config-panel="${panelKey}"]`);
+  if (panel.length) {
+    panel.prop("open", true);
+  }
+}
+
+function updateConfigStepPills(activeStep, jiraComplete, repoComplete) {
+  const stepMap = {
+    jira: jiraComplete,
+    repo: repoComplete,
+  };
+
+  $("[data-config-flow-step]").each(function () {
+    const step = String($(this).attr("data-config-flow-step") || "").trim();
+    $(this)
+      .toggleClass("is-active", step === activeStep)
+      .toggleClass("is-complete", Boolean(stepMap[step]));
+  });
+}
+
+function updateConfigFlowState() {
+  const jiraComplete = ["#jira_base_url", "#jira_email", "#jira_api_token", "#jira_jql"].every((selector) => readTextValue(selector));
+  const repoComplete = currentRepoMappings().length > 0;
+  const activeStep = repoComplete || $('[data-config-panel="repo"]').prop("open") ? "repo" : "jira";
+
+  $("#jira_config_status")
+    .text(jiraComplete ? "입력 완료" : "4개 입력 필요")
+    .toggleClass("is-complete", jiraComplete);
+  $("#repo_mapping_status")
+    .text(repoComplete ? `${currentRepoMappings().length}개 공간 연결됨` : "공간 연결 필요")
+    .toggleClass("is-complete", repoComplete);
+
+  updateConfigStepPills(activeStep, jiraComplete, repoComplete);
+
+  if (jiraComplete && !configFlowState.repoSuggested) {
+    openConfigPanel("repo");
+    configFlowState.repoSuggested = true;
+    updateConfigStepPills("repo", jiraComplete, repoComplete);
+    return;
+  }
+
+  if (!jiraComplete) {
+    configFlowState.repoSuggested = false;
+  }
 }
 
 function targetFieldBadges(fields) {
@@ -797,7 +1048,7 @@ function setSummaryCard(title, value, detail) {
     <section class="summary-card">
       <p class="summary-card__title">${escapeHtml(title)}</p>
       <strong>${escapeHtml(value || "-")}</strong>
-      <span>${escapeHtml(detail || "")}</span>
+      ${detail ? `<span>${escapeHtml(detail)}</span>` : ""}
     </section>
   `;
 }
@@ -1307,40 +1558,55 @@ $(document).ready(function () {
   clearWorkflowClarification();
   resetIssueDetail();
   renderRepoMappings(parseRepoMappingsText($("#repo_mappings").val()));
+  setGithubTokenHelp(false);
+
+  FIELD_LABELS.local_repo_path = "공간별 로컬 저장소 경로";
   $("#test_command").attr("placeholder", "자동 실행하지 않습니다. 필요하면 참고용 명령만 적어 두세요.");
   $("#mapping_space_key").attr("placeholder", "예: GCPPLDCAD");
+  $("#mapping_base_branch").attr("placeholder", "기본 브랜치").val("");
   $("#mapping_local_repo_path").attr("placeholder", "로컬 저장소 경로");
+  $("#mapping_github_token").attr("placeholder", "공간 전용 GitHub Token");
   $("#add_repo_mapping").text("연결 추가");
-  $(".repo-mapping-help").first().text("Jira 공간명과 연결할 GitHub 레포를 나눠서 입력합니다. 공간명을 먼저 적고, 아래 저장소 정보를 입력한 뒤 추가하세요.");
-  $("#repo_mappings").closest("label").contents().first()[0].textContent = "공간별 저장소 연결";
+  $(".card-header__copy h2").first().text("1. Jira와 공간 설정");
+  $(".config-group-kicker").first().text("입력 흐름");
+  $(".repo-mapping-help").first().text("각 Jira 공간마다 저장소, 브랜치, 로컬 경로, 토큰을 하나씩 추가한다.");
   $("#test_command").closest("label").contents().first()[0].textContent = "참고용 로컬 테스트 명령";
   $("#allow_auto_commit").closest("label").contents().last()[0].textContent = " 로컬 테스트 없이 자동 커밋 허용";
+  $("#test_command").attr("placeholder", "자동 실행하지 않습니다. 필요하면 참고용 명령만 적어 두세요.");
+  $("#repo_mappings").closest("label").contents().first()[0].textContent = "공간별 저장소 연결";
   if (!$(".repo-mapping-section-title").length) {
-    $("<div>", { class: "repo-mapping-section-title", text: "1. Jira 공간명" }).insertBefore("#mapping_space_key");
+    $("<div>", { class: "repo-mapping-section-title", text: "1. Jira 공간 키" }).insertBefore("#mapping_space_key");
     $("<div>", { class: "repo-mapping-section-title", text: "2. 연결할 저장소" }).insertBefore("#mapping_repo_owner");
   }
-
-  FIELD_LABELS.local_repo_path = "기본 로컬 레포 경로";
-  $("#test_command").attr("placeholder", "자동 실행하지 않습니다. 필요하면 참고용 명령만 적어 두세요.");
-  $("#mapping_space_key").attr("placeholder", "예: GCPPLDCAD");
-  $("#mapping_local_repo_path").attr("placeholder", "로컬 레포 경로");
-  $("#add_repo_mapping").text("연결 추가");
-  $(".repo-mapping-help").first().text("여러 Jira 공간을 각각 다른 저장소에 연결할 때만 펼쳐서 입력합니다. 각 공간 연결에는 로컬 레포 경로도 함께 포함됩니다.");
-  const mappingLabel = $("#repo_mappings").closest("label");
-  const localRepoLabel = $("#local_repo_path").closest("label");
-  if (localRepoLabel.length) {
-    localRepoLabel.contents().first()[0].textContent = "기본 로컬 레포 경로";
-  }
-  $("#test_command").closest("label").contents().first()[0].textContent = "참고용 로컬 테스트 명령";
-  $("#allow_auto_commit").closest("label").contents().last()[0].textContent = " 로컬 테스트 없이 자동 커밋 허용";
   $("#jira_issue_comments").closest(".detail-card").find("h3").text("최근 코멘트");
   $("#jira_issue_description").closest(".detail-card").find("h3").text("선택 이슈 상세");
   $("#automation_test_output").closest(".detail-card").find("h3").text("문법 검사 출력");
   const sectionTitles = $(".repo-mapping-section-title");
   if (sectionTitles.length >= 2) {
-    $(sectionTitles[0]).text("1. Jira 공간명");
+    $(sectionTitles[0]).text("1. Jira 공간 키");
     $(sectionTitles[1]).text("2. 연결할 저장소");
   }
+  $("#jira_base_url, #jira_email, #jira_api_token, #jira_jql").on("input change", function () {
+    updateConfigFlowState();
+  });
+  $(document).on("click", "[data-config-flow-step]", function () {
+    const panelKey = String($(this).attr("data-config-flow-step") || "").trim();
+    openConfigPanel(panelKey);
+    updateConfigStepPills(
+      panelKey,
+      ["#jira_base_url", "#jira_email", "#jira_api_token", "#jira_jql"].every((selector) => readTextValue(selector)),
+      currentRepoMappings().length > 0,
+    );
+  });
+  $(document).on("toggle", "[data-config-panel]", function () {
+    const panelKey = String($(this).attr("data-config-panel") || "").trim();
+    updateConfigStepPills(
+      panelKey || "jira",
+      ["#jira_base_url", "#jira_email", "#jira_api_token", "#jira_jql"].every((selector) => readTextValue(selector)),
+      currentRepoMappings().length > 0,
+    );
+  });
+  updateConfigFlowState();
 
   $("#open_setup_guide").on("click", function () {
     openGuide("jira", "jira-base-url");
@@ -1461,6 +1727,16 @@ $(document).ready(function () {
       data: JSON.stringify(collectConfig()),
     })
       .done((data) => {
+        const savedTokenSpaces = new Set((data.repo_mapping_token_spaces || []).map((item) => String(item || "").trim().toUpperCase()));
+        const refreshedItems = currentRepoMappings().map((item) => ({
+          ...item,
+          github_token: "",
+          has_saved_token: savedTokenSpaces.has(item.space_key),
+          clear_saved_token: false,
+        }));
+        renderRepoMappings(refreshedItems);
+        $("#github_token").val("");
+        setGithubTokenHelp(Boolean(data.github_token_saved));
         clearResultActions("#config_result_actions");
         setResult("#config_result", data);
       })
@@ -1690,6 +1966,56 @@ $(document).ready(function () {
       return;
     }
     $("#run_automation").trigger("click");
+  });
+
+  $("#add_repo_mapping").off("click").on("click", function () {
+    const nextItem = readRepoMappingInputs();
+    const missing = ["space_key", "repo_owner", "repo_name", "base_branch", "local_repo_path"]
+      .filter((key) => !String(nextItem[key] || "").trim());
+    if (missing.length) {
+      setResult("#config_result", {
+        ok: false,
+        error: "repo_mapping_fields_missing",
+        fields: missing,
+        message: "공간명, owner, repo, base branch, local path를 모두 입력해 주세요.",
+      });
+      return;
+    }
+
+    const existing = currentRepoMappings().find((item) => item.space_key === nextItem.space_key);
+    const items = currentRepoMappings().filter((item) => item.space_key !== nextItem.space_key);
+    items.push({
+      ...nextItem,
+      has_saved_token: existing ? existing.has_saved_token : false,
+      clear_saved_token: false,
+    });
+    renderRepoMappings(items);
+    clearRepoMappingInputs();
+    setResult("#config_result", { ok: true, message: `매핑을 추가했습니다: ${nextItem.space_key}` });
+  });
+
+  $(document).off("click", "[data-repo-mapping-remove]").on("click", "[data-repo-mapping-remove]", function () {
+    const removeIndex = Number($(this).attr("data-repo-mapping-remove"));
+    const items = currentRepoMappings().filter((_, index) => index !== removeIndex);
+    renderRepoMappings(items);
+  });
+
+  $(document).off("click", "[data-repo-mapping-toggle-token]").on("click", "[data-repo-mapping-toggle-token]", function () {
+    const toggleIndex = Number($(this).attr("data-repo-mapping-toggle-token"));
+    const items = currentRepoMappings();
+    const target = items[toggleIndex];
+    if (!target) {
+      return;
+    }
+
+    if (target.clear_saved_token) {
+      target.clear_saved_token = false;
+    } else if (target.github_token) {
+      target.github_token = "";
+    } else if (target.has_saved_token) {
+      target.clear_saved_token = true;
+    }
+    renderRepoMappings(items);
   });
 
   $("#run_automation").off("click").on("click", function () {

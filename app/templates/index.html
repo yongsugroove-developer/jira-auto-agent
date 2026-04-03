@@ -33,43 +33,83 @@
 
       <section class="config-sticky-group">
         <p class="config-group-kicker">공통 정보</p>
-        <div class="grid">
-          <label>Jira Base URL<input id="jira_base_url" type="text" placeholder="https://your-domain.atlassian.net"></label>
-          <label>Jira Email<input id="jira_email" type="email" placeholder="user@example.com"></label>
-          <label>Jira API Token<input id="jira_api_token" type="password" placeholder="Jira API Token"></label>
-          <label>JQL<input id="jira_jql" type="text" placeholder="assignee = currentUser() AND status in (Backlog, 'To Do')"></label>
-          <label>GitHub Owner<input id="github_owner" type="text" placeholder="org-or-user"></label>
-          <label>GitHub Repo<input id="github_repo" type="text" placeholder="repository-name"></label>
-          <label>Base Branch<input id="github_base_branch" type="text" value="main"></label>
-          <label>GitHub Token<input id="github_token" type="password" placeholder="ghp_..."></label>
-          <label class="wide">Local Repo Path<input id="local_repo_path" type="text" placeholder="/workspace/your-repo"></label>
+        <div class="config-step-pills" aria-label="설정 단계">
+          <button type="button" class="config-step-pill is-active" data-config-flow-step="jira">
+            <span class="config-step-pill__index">1</span>
+            <span class="config-step-pill__text">
+              <strong>Jira 입력</strong>
+              <small>연결에 필요한 4개 값</small>
+            </span>
+          </button>
+          <button type="button" class="config-step-pill" data-config-flow-step="repo">
+            <span class="config-step-pill__index">2</span>
+            <span class="config-step-pill__text">
+              <strong>공간별 저장소 연결</strong>
+              <small>공간마다 별도 설정 필수</small>
+            </span>
+          </button>
         </div>
 
-        <details class="config-space-panel">
-          <summary>공간별 저장소 설정</summary>
-          <div class="config-space-panel__body">
-            <label class="wide repo-mapping-panel-host">
-              공간별 저장소 연결
-              <textarea id="repo_mappings" rows="1" hidden></textarea>
-              <div class="repo-mapping-builder">
-                <p class="repo-mapping-help">공간마다 다른 저장소를 써야 할 때만 아래에서 연결을 추가한다.</p>
-                <div class="repo-mapping-inputs">
-                  <input id="mapping_space_key" type="text" placeholder="예: GCPPLDCAD">
-                  <input id="mapping_repo_owner" type="text" placeholder="GitHub owner">
-                  <input id="mapping_repo_name" type="text" placeholder="GitHub repo">
-                  <input id="mapping_base_branch" type="text" value="main" placeholder="기본 브랜치">
-                  <input id="mapping_local_repo_path" type="text" placeholder="로컬 저장소 경로">
-                </div>
-                <div class="actions">
-                  <button id="add_repo_mapping" type="button" class="secondary-button">연결 추가</button>
-                </div>
-                <div id="repo_mapping_list" class="repo-mapping-list">
-                  <p class="repo-mapping-empty">아직 추가된 공간 연결이 없다.</p>
+        <div class="config-flow">
+          <details class="config-panel config-panel--jira" data-config-panel="jira" open>
+            <summary class="config-panel__summary">
+              <div class="config-panel__track">1</div>
+              <div class="config-panel__copy">
+                <p class="config-panel__eyebrow">Jira</p>
+                <h3>Jira 연결 정보</h3>
+                <p class="grid-note">지금은 Jira 영역만 먼저 열어 4개 값을 입력한다. 입력이 채워지면 다음 단계로 자연스럽게 이어진다.</p>
+              </div>
+              <span id="jira_config_status" class="config-panel__status">4개 입력 필요</span>
+            </summary>
+            <div class="config-panel__body">
+              <div class="config-panel__body-inner">
+                <div class="grid">
+                  <label>Jira Base URL<input id="jira_base_url" type="text" placeholder="https://your-domain.atlassian.net"></label>
+                  <label>Jira Email<input id="jira_email" type="email" placeholder="user@example.com"></label>
+                  <label>Jira API Token<input id="jira_api_token" type="password" placeholder="Jira API Token"></label>
+                  <label>JQL<input id="jira_jql" type="text" placeholder="assignee = currentUser() AND status in (Backlog, 'To Do')"></label>
                 </div>
               </div>
-            </label>
-          </div>
-        </details>
+            </div>
+          </details>
+
+          <details class="config-panel config-panel--repo config-space-panel" data-config-panel="repo">
+            <summary class="config-panel__summary">
+              <div class="config-panel__track">2</div>
+              <div class="config-panel__copy">
+                <p class="config-panel__eyebrow">Repo Mapping</p>
+                <h3>공간별 저장소 연결</h3>
+                <p id="github_token_help" class="grid-note">각 Jira 공간은 저장소와 GitHub Token을 개별로 가져야 한다. 이슈의 공간 키와 일치하는 연결이 없으면 즉시 오류로 처리한다.</p>
+              </div>
+              <span id="repo_mapping_status" class="config-panel__status">공간 연결 필요</span>
+            </summary>
+            <div class="config-space-panel__body config-panel__body">
+              <div class="config-panel__body-inner">
+                <label class="wide repo-mapping-panel-host">
+                  공간별 저장소 연결
+                  <textarea id="repo_mappings" rows="1" hidden></textarea>
+                  <div class="repo-mapping-builder">
+                    <p class="repo-mapping-help">각 Jira 공간마다 아래 연결을 반드시 추가한다. 한 번에 하나씩 입력하고 목록에 쌓아 간다.</p>
+                    <div class="repo-mapping-inputs">
+                      <input id="mapping_space_key" type="text" placeholder="예: GCPPLDCAD">
+                      <input id="mapping_repo_owner" type="text" placeholder="GitHub owner">
+                      <input id="mapping_repo_name" type="text" placeholder="GitHub repo">
+                      <input id="mapping_base_branch" type="text" placeholder="기본 브랜치">
+                      <input id="mapping_local_repo_path" type="text" placeholder="로컬 저장소 경로">
+                      <input id="mapping_github_token" type="password" placeholder="공간 전용 GitHub Token">
+                    </div>
+                    <div class="actions">
+                      <button id="add_repo_mapping" type="button" class="secondary-button">연결 추가</button>
+                    </div>
+                    <div id="repo_mapping_list" class="repo-mapping-list">
+                      <p class="repo-mapping-empty">아직 추가된 공간 연결이 없다.</p>
+                    </div>
+                  </div>
+                </label>
+              </div>
+            </div>
+          </details>
+        </div>
         <pre id="config_result" class="result"></pre>
         <div id="config_result_actions" class="result-actions"></div>
       </section>
@@ -98,6 +138,16 @@
         <tbody id="issue_table"></tbody>
       </table>
 
+      <section id="jira_selection_summary" class="selection-summary">
+        <div class="selection-summary__copy">
+          <strong id="selected_issue_count">선택한 이슈 0건</strong>
+          <p id="selected_issue_keys" class="grid-note">이슈를 선택하면 여기에서 배치 대상을 요약한다.</p>
+        </div>
+        <div class="selection-summary__actions">
+          <button id="clear_issue_selection" type="button" class="secondary-button">선택 해제</button>
+        </div>
+      </section>
+
       <div class="detail-grid jira-detail-grid">
         <section class="detail-card">
           <h3>선택 이슈 상세</h3>
@@ -117,20 +167,23 @@
       <div class="card-header">
         <div class="card-header__copy">
           <p class="section-kicker">Workflow</p>
-          <h2>3. Codex 자동 작업 준비와 실행</h2>
+          <h2>3. Codex 배치 작업 준비와 실행</h2>
         </div>
         <div class="card-header__actions">
           <button id="check_repo" type="button">레포 상태 확인</button>
-          <button id="prepare_workflow" type="button">선택 이슈로 기본값 채우기</button>
-          <button id="run_automation" type="button" class="primary-button">Codex 자동 작업 실행</button>
+          <button id="prepare_workflow" type="button">배치 미리보기 갱신</button>
+          <button id="run_automation" type="button" class="primary-button">선택 이슈 배치 실행</button>
         </div>
       </div>
 
+      <div class="workflow-hidden-inputs" hidden>
+        <input id="issue_key" type="hidden">
+        <input id="issue_summary" type="hidden">
+        <input id="branch_name" type="hidden">
+        <input id="commit_message" type="hidden">
+      </div>
+
       <div class="grid workflow-grid">
-        <label>Issue Key<input id="issue_key" type="text" placeholder="DEMO-102"></label>
-        <label class="wide">Issue Summary<input id="issue_summary" type="text" placeholder="브랜치 생성 API 추가"></label>
-        <label>Branch Name<input id="branch_name" type="text" placeholder="feature/DEMO-102-branch-create-api"></label>
-        <label class="wide">Commit Message<input id="commit_message" type="text" placeholder="DEMO-102: 브랜치 생성 API 추가"></label>
         <label>Codex Model<input id="codex_model" type="text" placeholder="비우면 로컬 기본값 사용{% if codex_defaults.model %} ({{ codex_defaults.model }}){% endif %}"></label>
         <label>Reasoning Effort
           <select id="codex_reasoning_effort">
@@ -148,99 +201,145 @@
         <label>Git Author Email<input id="git_author_email" type="email" placeholder="codex@example.com"></label>
       </div>
 
+      <section id="workflow_batch_preview_card" class="detail-card batch-preview-panel">
+        <div class="batch-preview-panel__header">
+          <div>
+            <h3>배치 실행 미리보기</h3>
+            <p class="grid-note">저장된 GitHub 설정과 선택한 이슈 기준으로 각 작업 브랜치, 커밋 메시지, 큐 그룹을 미리 확인한다.</p>
+          </div>
+          <strong id="workflow_batch_preview_count" class="field-pill">0건</strong>
+        </div>
+        <div id="workflow_batch_preview_list" class="batch-preview-list">
+          <p class="batch-preview-empty">이슈를 선택하면 미리보기를 표시한다.</p>
+        </div>
+      </section>
+
       <div class="actions">
         <label class="checkbox-row"><input id="allow_auto_commit" type="checkbox" checked> 로컬 테스트 없이 자동 커밋 허용</label>
       </div>
 
       <pre id="workflow_result" class="result"></pre>
       <div id="workflow_result_actions" class="result-actions"></div>
-
-      <section id="workflow_clarification_panel" class="detail-card clarification-panel" hidden>
-        <h3>추가 확인 필요</h3>
-        <p id="workflow_clarification_summary" class="detail-copy">작업 전에 추가 확인이 필요하면 여기에 표시한다.</p>
-        <div id="workflow_clarification_questions" class="clarification-question-list"></div>
-        <section id="workflow_clarification_sync" class="sync-status-panel" hidden>
-          <div class="sync-status-panel__header">
-            <h4>Jira 코멘트 동기화</h4>
-            <p>질문과 답변이 해당 Jira 이슈 코멘트에 남았는지 바로 확인한다.</p>
-          </div>
-          <div id="workflow_clarification_sync_list" class="sync-status-list"></div>
-        </section>
-        <div class="actions">
-          <button id="submit_clarification_answers" type="button" class="primary-button">답변 반영 후 다시 실행</button>
-          <button id="dismiss_workflow_clarification" type="button" class="secondary-button">질문 닫기</button>
-        </div>
-      </section>
     </section>
 
-    <section id="automation_result_section" class="card" hidden>
+    <section id="work_status_section" class="card" hidden>
       <div class="card-header">
         <div class="card-header__copy">
-          <p class="section-kicker">Results</p>
-          <h2>4. 실행 결과</h2>
-          <p id="automation_result_hint" class="card-header__note">Codex 자동 작업을 실행하면 결과를 여기에 표시한다.</p>
+          <p class="section-kicker">Workspace</p>
+          <h2>4. 작업 현황</h2>
         </div>
         <div class="card-header__actions">
-          <button
-            id="toggle_automation_result"
-            type="button"
-            class="secondary-button"
-            aria-expanded="true"
-            aria-controls="automation_result_body"
-          >접기</button>
+          <button id="refresh_batch_workspace" type="button" class="secondary-button">새로고침</button>
+          <button id="focus_running_run" type="button" class="secondary-button">진행 중 탭으로 이동</button>
+          <button id="toggle_failed_runs" type="button" class="secondary-button" aria-pressed="false">실패 탭만 보기</button>
         </div>
       </div>
 
-      <div id="automation_result_body" class="automation-result-body">
-        <div class="summary-grid" id="automation_overview"></div>
+      <div class="work-status-layout">
+        <section class="work-status-main">
+          <section id="work_status_empty" class="detail-card work-status-empty">
+            <h3>활성 배치 없음</h3>
+            <p class="detail-copy">배치 실행을 시작하면 여기에서 이슈별 탭을 확인할 수 있다.</p>
+          </section>
 
-        <section id="automation_sync_status_card" class="detail-card sync-status-panel" hidden>
-          <div class="sync-status-panel__header">
-            <h3>Jira 코멘트 동기화</h3>
-            <p>사전 질문과 사용자 답변이 Jira 이슈 코멘트에 기록된 상태를 확인한다.</p>
+          <div id="work_status_content" hidden>
+            <div id="batch_summary_cards" class="summary-grid"></div>
+            <section id="batch_flow_panel" class="detail-card work-flow-panel">
+              <div class="work-flow-panel__header">
+                <div>
+                  <h3>진행 플로우</h3>
+                </div>
+                <p id="batch_flow_caption" class="work-flow-panel__caption">배치를 선택하면 전체 진행 흐름을 표시한다.</p>
+              </div>
+              <div id="batch_flow_board" class="batch-flow-board">
+                <p class="batch-preview-empty">배치를 선택하면 각 일감의 현재 위치를 플로우차트로 표시한다.</p>
+              </div>
+            </section>
+
+            <div id="batch_run_tabs" class="workspace-tabs workspace-tabs--runs" role="tablist" aria-label="작업 탭"></div>
+
+            <section class="work-run-shell">
+              <div class="work-run-shell__header">
+                <div id="batch_run_meta" class="issue-meta"></div>
+                <div id="batch_detail_tabs" class="workspace-tabs workspace-tabs--detail" role="tablist" aria-label="작업 상세 탭"></div>
+              </div>
+
+              <section id="batch_detail_panel_overview" class="workspace-detail-panel" data-detail-panel="overview">
+                <section class="detail-card">
+                  <h3>실행 개요</h3>
+                  <div id="batch_run_overview" class="summary-grid"></div>
+                </section>
+              </section>
+
+              <section id="batch_detail_panel_summary" class="workspace-detail-panel" data-detail-panel="summary" hidden>
+                <div class="detail-grid">
+                  <section class="detail-card">
+                    <h3>요청 의도</h3>
+                    <p id="batch_run_intent" class="detail-copy">실행 후 표시한다.</p>
+                  </section>
+                  <section class="detail-card">
+                    <h3>구현 요약</h3>
+                    <p id="batch_run_implementation" class="detail-copy">실행 후 표시한다.</p>
+                  </section>
+                  <section class="detail-card">
+                    <h3>검증 요약</h3>
+                    <p id="batch_run_validation" class="detail-copy">실행 후 표시한다.</p>
+                  </section>
+                  <section class="detail-card">
+                    <h3>잔여 리스크</h3>
+                    <ul id="batch_run_risks" class="file-list"></ul>
+                  </section>
+                </div>
+              </section>
+
+              <section id="batch_detail_panel_clarification" class="workspace-detail-panel" data-detail-panel="clarification" hidden>
+                <section class="detail-card">
+                  <h3>질문과 답변</h3>
+                  <p id="batch_run_clarification_summary" class="detail-copy">추가 확인이 필요한 경우 이슈 탭 안에서 질문과 답변을 처리한다.</p>
+                  <div id="batch_run_clarification_state" class="clarification-state-banner"></div>
+                  <div id="batch_run_clarification_questions" class="clarification-question-list"></div>
+                  <div id="batch_run_clarification_answers" class="clarification-answer-list"></div>
+                  <div id="batch_run_clarification_actions" class="actions" hidden>
+                    <button id="submit_batch_run_answers" type="button" class="primary-button">답변 반영 후 실행 계속</button>
+                  </div>
+                </section>
+
+                <section id="batch_run_sync_status_card" class="detail-card sync-status-panel" hidden>
+                  <div class="sync-status-panel__header">
+                    <h3>Jira 코멘트</h3>
+                    <p>사전 질문과 사용자 답변이 Jira 이슈 코멘트에 남았는지 확인한다.</p>
+                  </div>
+                  <div id="batch_run_sync_status_list" class="sync-status-list"></div>
+                </section>
+              </section>
+
+              <section id="batch_detail_panel_artifacts" class="workspace-detail-panel" data-detail-panel="artifacts" hidden>
+                <section class="detail-card">
+                  <h3>처리 파일</h3>
+                  <ul id="batch_run_files" class="file-list"></ul>
+                </section>
+
+                <section class="detail-card">
+                  <h3>Diff</h3>
+                  <pre id="batch_run_diff" class="result result-tall"></pre>
+                </section>
+              </section>
+
+              <section id="batch_detail_panel_logs" class="workspace-detail-panel" data-detail-panel="logs" hidden>
+                <div class="detail-grid">
+                  <section class="detail-card">
+                    <h3>문법 검사 출력</h3>
+                    <pre id="batch_run_test_output" class="result"></pre>
+                  </section>
+                  <section class="detail-card">
+                    <h3>실행 로그</h3>
+                    <pre id="batch_run_log" class="result result-scroll"></pre>
+                  </section>
+                </div>
+              </section>
+            </section>
           </div>
-          <div id="automation_sync_status_list" class="sync-status-list"></div>
         </section>
-
-        <div class="detail-grid">
-          <section class="detail-card">
-            <h3>모델이 파악한 요청 의도</h3>
-            <p id="automation_intent" class="detail-copy">자동 작업 실행 후 표시한다.</p>
-          </section>
-          <section class="detail-card">
-            <h3>구현 요약</h3>
-            <p id="automation_implementation" class="detail-copy">자동 작업 실행 후 표시한다.</p>
-          </section>
-          <section class="detail-card">
-            <h3>검증 요약</h3>
-            <p id="automation_validation" class="detail-copy">자동 작업 실행 후 표시한다.</p>
-          </section>
-          <section class="detail-card">
-            <h3>잔여 리스크</h3>
-            <ul id="automation_risks" class="file-list"></ul>
-          </section>
-        </div>
-
-        <section class="detail-card">
-          <h3>처리 파일</h3>
-          <ul id="automation_files" class="file-list"></ul>
-        </section>
-
-        <section class="detail-card">
-          <h3>Diff</h3>
-          <pre id="automation_diff" class="result result-tall"></pre>
-        </section>
-
-        <div class="detail-grid">
-          <section class="detail-card">
-            <h3>문법 검사 출력</h3>
-            <pre id="automation_test_output" class="result"></pre>
-          </section>
-          <section class="detail-card">
-            <h3>실행 로그</h3>
-            <pre id="automation_log" class="result result-scroll"></pre>
-          </section>
-        </div>
       </div>
     </section>
   </main>
@@ -250,9 +349,7 @@
     <section class="guide-modal" role="dialog" aria-modal="true" aria-labelledby="guide_modal_title">
       <div class="guide-modal__header">
         <div>
-          <p class="eyebrow">Guided Setup</p>
           <h2 id="guide_modal_title">설정 수집 가이드</h2>
-          <p id="guide_modal_summary" class="guide-modal__summary">Jira, GitHub, 로컬 저장소, 자동화 입력 정보를 어디에서 확인하는지 단계별로 안내한다.</p>
         </div>
         <button id="close_setup_guide" type="button" class="ghost-button">닫기</button>
       </div>
@@ -293,6 +390,7 @@
     window.__AGENTATION_CONFIG__ = {{ agentation_frontend|tojson }};
   </script>
   <script src="{{ url_for('static', filename='app.js') }}"></script>
+  <script src="{{ url_for('static', filename='batch-workspace.js') }}"></script>
   {% if agentation_frontend.bundle_ready %}
   <script type="module" src="{{ url_for('static', filename='react/agentation-panel.js') }}"></script>
   {% endif %}
