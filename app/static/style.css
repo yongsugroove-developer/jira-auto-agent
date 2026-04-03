@@ -903,6 +903,19 @@ tbody tr:hover {
   overflow-wrap: anywhere;
 }
 
+.repo-mapping-token-status {
+  font-weight: 700;
+  color: var(--accent-strong);
+}
+
+.repo-mapping-item__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+  flex-shrink: 0;
+}
+
 .repo-mapping-item__remove {
   flex-shrink: 0;
 }

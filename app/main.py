@@ -1021,18 +1021,80 @@ def _load_encryption_key() -> bytes:
     return key
 
 
-def _required_config_fields(payload: dict[str, Any]) -> list[str]:
+def _normalize_repo_mapping_token_map(raw_value: Any) -> dict[str, str]:
+    if not isinstance(raw_value, dict):
+        return {}
+    normalized: dict[str, str] = {}
+    for raw_space_key, raw_token in raw_value.items():
+        space_key = _normalize_space_key(raw_space_key)
+        token = str(raw_token or "").strip()
+        if space_key and token:
+            normalized[space_key] = token
+    return normalized
+
+
+def _normalize_space_key_list(raw_value: Any) -> set[str]:
+    if not isinstance(raw_value, (list, tuple, set)):
+        return set()
+    normalized: set[str] = set()
+    for item in raw_value:
+        space_key = _normalize_space_key(item)
+        if space_key:
+            normalized.add(space_key)
+    return normalized
+
+
+def _repo_mapping_missing_token_spaces(
+    payload: dict[str, Any],
+    existing_github_payload: dict[str, Any] | None = None,
+) -> list[str]:
+    repo_mappings, repo_mapping_errors = _parse_repo_mappings(payload.get("repo_mappings", ""))
+    if repo_mapping_errors or not repo_mappings:
+        return []
+
+    existing_github_payload = existing_github_payload or {}
+    global_token = str(
+        payload.get("github_token", existing_github_payload.get("token", ""))
+    ).strip()
+    if global_token:
+        return []
+
+    stored_mapping_tokens = _normalize_repo_mapping_token_map(existing_github_payload.get("repo_mapping_tokens", {}))
+    incoming_mapping_tokens = _normalize_repo_mapping_token_map(payload.get("repo_mapping_tokens", {}))
+    cleared_spaces = _normalize_space_key_list(payload.get("repo_mapping_token_clears", []))
+
+    missing_spaces: list[str] = []
+    for mapping in repo_mappings:
+        space_key = mapping["space_key"]
+        inline_token = str(mapping.get("github_token", "")).strip()
+        effective_token = ""
+        if space_key not in cleared_spaces:
+            effective_token = incoming_mapping_tokens.get(space_key, "") or inline_token or stored_mapping_tokens.get(space_key, "")
+        if not effective_token:
+            missing_spaces.append(space_key)
+    return missing_spaces
+
+
+def _required_config_fields(
+    payload: dict[str, Any],
+    existing_github_payload: dict[str, Any] | None = None,
+) -> list[str]:
     required = {
         "jira_base_url": payload.get("jira_base_url"),
         "jira_email": payload.get("jira_email"),
         "jira_api_token": payload.get("jira_api_token"),
         "jira_jql": payload.get("jira_jql"),
-        "github_token": payload.get("github_token"),
     }
     missing = [name for name, value in required.items() if not str(value or "").strip()]
     repo_mappings = str(payload.get("repo_mappings", "")).strip()
     if repo_mappings:
+        if _repo_mapping_missing_token_spaces(payload, existing_github_payload):
+            missing.append("repo_mappings")
         return missing
+
+    github_token = str(payload.get("github_token", (existing_github_payload or {}).get("token", ""))).strip()
+    if not github_token:
+        missing.append("github_token")
     if _has_legacy_repo_fields(payload):
         return missing
     return [*missing, "repo_mappings"]
@@ -1261,7 +1323,7 @@ def _parse_repo_mappings(raw_value: Any) -> tuple[list[dict[str, str]], list[str
         if not line:
             continue
         parts = [part.strip() for part in line.split("|")]
-        if len(parts) != 5 or any(not part for part in parts):
+        if len(parts) not in (5, 6) or any(not part for part in parts[:5]):
             errors.append(f"line {line_number}")
             continue
         mappings.append(
@@ -1271,9 +1333,27 @@ def _parse_repo_mappings(raw_value: Any) -> tuple[list[dict[str, str]], list[str
                 "repo_name": parts[2],
                 "base_branch": parts[3],
                 "local_repo_path": parts[4],
+                "github_token": parts[5] if len(parts) == 6 else "",
             }
         )
     return mappings, errors
+
+
+def _serialize_repo_mappings(mappings: list[dict[str, str]]) -> str:
+    lines: list[str] = []
+    for mapping in mappings:
+        line = "|".join(
+            [
+                _normalize_space_key(mapping.get("space_key", "")),
+                str(mapping.get("repo_owner", "")).strip(),
+                str(mapping.get("repo_name", "")).strip(),
+                str(mapping.get("base_branch", "")).strip(),
+                str(mapping.get("local_repo_path", "")).strip(),
+            ]
+        )
+        if "||" not in line and line.strip("|"):
+            lines.append(line)
+    return "\n".join(lines)
 
 
 def _has_legacy_repo_fields(payload: dict[str, Any]) -> bool:
@@ -1293,6 +1373,8 @@ def _resolve_repo_context(github_payload: dict[str, Any], issue_key: Any) -> Rep
         raise ValueError(f"invalid_repo_mappings:{','.join(errors)}")
 
     space_key = _issue_space_key(issue_key)
+    global_token = str(github_payload.get("token", github_payload.get("github_token", ""))).strip()
+    repo_mapping_tokens = _normalize_repo_mapping_token_map(github_payload.get("repo_mapping_tokens", {}))
     if mappings:
         if not space_key:
             raise KeyError("issue_key_required_for_repo_mapping")
@@ -1304,7 +1386,9 @@ def _resolve_repo_context(github_payload: dict[str, Any], issue_key: Any) -> Rep
                         repo_owner=mapping["repo_owner"],
                         repo_name=mapping["repo_name"],
                         base_branch=mapping["base_branch"],
-                        token=str(github_payload.get("token", github_payload.get("github_token", ""))).strip(),
+                        token=str(mapping.get("github_token", "")).strip()
+                        or repo_mapping_tokens.get(space_key, "")
+                        or global_token,
                     ),
                     local_repo_path=Path(mapping["local_repo_path"]).expanduser(),
                 )
@@ -1319,7 +1403,7 @@ def _resolve_repo_context(github_payload: dict[str, Any], issue_key: Any) -> Rep
             repo_owner=str(github_payload.get("repo_owner", github_payload.get("github_owner", ""))).strip(),
             repo_name=str(github_payload.get("repo_name", github_payload.get("github_repo", ""))).strip(),
             base_branch=str(github_payload.get("base_branch", github_payload.get("github_base_branch", ""))).strip(),
-            token=str(github_payload.get("token", github_payload.get("github_token", ""))).strip(),
+            token=global_token,
         ),
         local_repo_path=Path(str(github_payload.get("local_repo_path", "")).strip()).expanduser(),
     )
@@ -3477,6 +3561,7 @@ def create_app() -> Flask:
     def get_config() -> Any:
         jira = store.load("jira") or {}
         github = store.load("github") or {}
+        repo_mapping_tokens = _normalize_repo_mapping_token_map(github.get("repo_mapping_tokens", {}))
         saved_config = {
             "jira_base_url": jira.get("base_url", ""),
             "jira_email": jira.get("email", ""),
@@ -3486,7 +3571,9 @@ def create_app() -> Flask:
             "github_repo": github.get("repo_name", ""),
             "github_base_branch": github.get("base_branch", "main"),
             "github_token": "",
+            "github_token_saved": bool(str(github.get("token", "")).strip()),
             "repo_mappings": github.get("repo_mappings", ""),
+            "repo_mapping_token_spaces": sorted(repo_mapping_tokens.keys()),
             "local_repo_path": github.get("local_repo_path", ""),
         }
         return jsonify(saved_config)
@@ -3494,21 +3581,29 @@ def create_app() -> Flask:
     @app.post("/api/config/validate")
     def validate_config() -> Any:
         payload = request.get_json(silent=True) or {}
-        missing = _required_config_fields(payload)
-        return jsonify(
-            {
-                "valid": len(missing) == 0,
-                "missing_fields": missing,
-                "requested_information": _build_requested_information(missing),
-            }
-        )
+        github = store.load("github") or {}
+        missing = _required_config_fields(payload, github)
+        missing_token_spaces = _repo_mapping_missing_token_spaces(payload, github)
+        response: dict[str, Any] = {
+            "valid": len(missing) == 0,
+            "missing_fields": missing,
+            "requested_information": _build_requested_information(missing),
+        }
+        if missing_token_spaces:
+            response["repo_mapping_token_missing_spaces"] = missing_token_spaces
+        return jsonify(response)
 
     @app.post("/api/config/save")
     def save_config() -> Any:
         payload = request.get_json(silent=True) or {}
-        missing = _required_config_fields(payload)
+        existing_github = store.load("github") or {}
+        missing = _required_config_fields(payload, existing_github)
         if missing:
-            return jsonify({"ok": False, "error": "required_fields_missing", "fields": missing}), 400
+            response: dict[str, Any] = {"ok": False, "error": "required_fields_missing", "fields": missing}
+            missing_token_spaces = _repo_mapping_missing_token_spaces(payload, existing_github)
+            if missing_token_spaces:
+                response["repo_mapping_token_missing_spaces"] = missing_token_spaces
+            return jsonify(response), 400
 
         repo_mappings, repo_mapping_errors = _parse_repo_mappings(payload.get("repo_mappings", ""))
         if repo_mapping_errors:
@@ -3524,8 +3619,29 @@ def create_app() -> Flask:
                 400,
             )
 
+        existing_mapping_tokens = _normalize_repo_mapping_token_map(existing_github.get("repo_mapping_tokens", {}))
+        incoming_mapping_tokens = _normalize_repo_mapping_token_map(payload.get("repo_mapping_tokens", {}))
+        cleared_mapping_token_spaces = _normalize_space_key_list(payload.get("repo_mapping_token_clears", []))
+        final_repo_mapping_tokens: dict[str, str] = {}
+        for mapping in repo_mappings:
+            space_key = mapping["space_key"]
+            if space_key in cleared_mapping_token_spaces:
+                continue
+            token = incoming_mapping_tokens.get(space_key, "") or str(mapping.get("github_token", "")).strip()
+            if token:
+                final_repo_mapping_tokens[space_key] = token
+                continue
+            existing_token = existing_mapping_tokens.get(space_key, "")
+            if existing_token:
+                final_repo_mapping_tokens[space_key] = existing_token
+
         jira = _to_jira_config(payload)
-        github = _to_github_config(payload)
+        github = GithubConfig(
+            repo_owner=str(payload.get("github_owner", "")).strip(),
+            repo_name=str(payload.get("github_repo", "")).strip(),
+            base_branch=str(payload.get("github_base_branch", "")).strip(),
+            token=str(payload.get("github_token", existing_github.get("token", ""))).strip(),
+        )
         local_repo_path = str(payload["local_repo_path"]).strip()
 
         store.save(
@@ -3544,12 +3660,20 @@ def create_app() -> Flask:
                 "repo_name": github.repo_name,
                 "base_branch": github.base_branch,
                 "token": github.token,
-                "repo_mappings": str(payload.get("repo_mappings", "")).strip(),
+                "repo_mappings": _serialize_repo_mappings(repo_mappings),
                 "repo_mapping_count": len(repo_mappings),
+                "repo_mapping_tokens": final_repo_mapping_tokens,
                 "local_repo_path": local_repo_path,
             },
         )
-        return jsonify({"ok": True, "message": "설정을 암호화 저장했습니다."})
+        return jsonify(
+            {
+                "ok": True,
+                "message": "설정을 암호화 저장했습니다.",
+                "repo_mapping_token_spaces": sorted(final_repo_mapping_tokens.keys()),
+                "github_token_saved": bool(github.token),
+            }
+        )
 
     @app.post("/api/jira/backlog")
     def jira_backlog() -> Any:

@@ -44,6 +44,7 @@
           <label>GitHub Token<input id="github_token" type="password" placeholder="ghp_..."></label>
           <label class="wide">Local Repo Path<input id="local_repo_path" type="text" placeholder="/workspace/your-repo"></label>
         </div>
+        <p id="github_token_help" class="grid-note">공통 GitHub Token은 기본값이다. 공간별 저장소에 별도 Token을 입력하면 해당 저장소 작업에 우선 적용된다.</p>
 
         <details class="config-space-panel">
           <summary>공간별 저장소 설정</summary>
@@ -59,6 +60,7 @@
                   <input id="mapping_repo_name" type="text" placeholder="GitHub repo">
                   <input id="mapping_base_branch" type="text" value="main" placeholder="기본 브랜치">
                   <input id="mapping_local_repo_path" type="text" placeholder="로컬 저장소 경로">
+                  <input id="mapping_github_token" type="password" placeholder="공간 전용 GitHub Token (선택)">
                 </div>
                 <div class="actions">
                   <button id="add_repo_mapping" type="button" class="secondary-button">연결 추가</button>

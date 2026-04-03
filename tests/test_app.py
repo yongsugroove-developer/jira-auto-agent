@@ -75,6 +75,8 @@ def test_index_page_renders_automation_fields() -> None:
     assert 'class="config-space-panel"' in html
     assert 'id="workflow_batch_preview_card"' in html
     assert 'id="workflow_batch_preview_list"' in html
+    assert 'id="github_token_help"' in html
+    assert 'id="mapping_github_token"' in html
     assert 'id="jira_issue_description"' in html
     assert 'id="jira_issue_comments"' in html
     assert 'id="work_status_section"' in html
@@ -496,6 +498,181 @@ def test_load_repo_context_uses_space_mapping() -> None:
     assert config.repo_name == "ops-repo"
     assert config.base_branch == "main"
     assert str(repo_path).replace("\\", "/").endswith("C:/repos/ops")
+
+
+def test_load_repo_context_prefers_space_token_over_global_token() -> None:
+    github_payload = {
+        "token": "global-token",
+        "repo_mappings": "DEMO|team|demo-repo|main|C:/repos/demo",
+        "repo_mapping_tokens": {"DEMO": "space-token"},
+    }
+
+    config, _, _ = main_module._load_repo_context(github_payload, "DEMO-1")
+
+    assert config.token == "space-token"
+
+
+def test_load_repo_context_falls_back_to_global_token_when_space_token_missing() -> None:
+    github_payload = {
+        "token": "global-token",
+        "repo_mappings": "DEMO|team|demo-repo|main|C:/repos/demo",
+    }
+
+    config, _, _ = main_module._load_repo_context(github_payload, "DEMO-1")
+
+    assert config.token == "global-token"
+
+
+def test_validate_config_accepts_space_tokens_without_global_token(monkeypatch, tmp_path) -> None:
+    app = create_app()
+    client = app.test_client()
+
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+
+    response = client.post(
+        "/api/config/validate",
+        json={
+            "jira_base_url": "https://example.atlassian.net",
+            "jira_email": "tester@example.com",
+            "jira_api_token": "jira-token",
+            "jira_jql": "project = DEMO",
+            "github_owner": "team",
+            "github_repo": "demo-repo",
+            "github_base_branch": "main",
+            "github_token": "",
+            "repo_mappings": f"DEMO|team|demo-repo|main|{repo_path}",
+            "repo_mapping_tokens": {"DEMO": "space-token"},
+            "local_repo_path": str(repo_path),
+        },
+    )
+
+    assert response.status_code == 200
+    data = response.get_json()
+    assert data is not None
+    assert data["valid"] is True
+    assert data["missing_fields"] == []
+
+
+def test_validate_config_reports_space_token_missing_when_no_global_token(tmp_path) -> None:
+    app = create_app()
+    client = app.test_client()
+
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+
+    response = client.post(
+        "/api/config/validate",
+        json={
+            "jira_base_url": "https://example.atlassian.net",
+            "jira_email": "tester@example.com",
+            "jira_api_token": "jira-token",
+            "jira_jql": "project = DEMO",
+            "github_owner": "team",
+            "github_repo": "demo-repo",
+            "github_base_branch": "main",
+            "github_token": "",
+            "repo_mappings": f"DEMO|team|demo-repo|main|{repo_path}",
+            "local_repo_path": str(repo_path),
+        },
+    )
+
+    assert response.status_code == 200
+    data = response.get_json()
+    assert data is not None
+    assert data["valid"] is False
+    assert data["missing_fields"] == ["repo_mappings"]
+    assert data["repo_mapping_token_missing_spaces"] == ["DEMO"]
+
+
+def test_save_config_stores_space_tokens_separately_and_hides_them(monkeypatch, tmp_path) -> None:
+    db_path = tmp_path / "app.db"
+    monkeypatch.setattr(main_module, "DB_PATH", db_path)
+    monkeypatch.setattr(main_module, "DATA_DIR", tmp_path)
+    monkeypatch.setenv("APP_ENC_KEY", main_module.Fernet.generate_key().decode("utf-8"))
+
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+
+    app = create_app()
+    client = app.test_client()
+
+    save_response = client.post(
+        "/api/config/save",
+        json={
+            "jira_base_url": "https://example.atlassian.net",
+            "jira_email": "tester@example.com",
+            "jira_api_token": "jira-token",
+            "jira_jql": "project = DEMO",
+            "github_owner": "team",
+            "github_repo": "demo-repo",
+            "github_base_branch": "main",
+            "github_token": "",
+            "repo_mappings": f"DEMO|team|demo-repo|main|{repo_path}",
+            "repo_mapping_tokens": {"DEMO": "space-token"},
+            "local_repo_path": str(repo_path),
+        },
+    )
+
+    assert save_response.status_code == 200
+    save_data = save_response.get_json()
+    assert save_data is not None
+    assert save_data["repo_mapping_token_spaces"] == ["DEMO"]
+    assert save_data["github_token_saved"] is False
+
+    store = main_module.CredentialStore(db_path, main_module._load_encryption_key())
+    github_payload = store.load("github")
+    assert github_payload is not None
+    assert github_payload["repo_mapping_tokens"] == {"DEMO": "space-token"}
+    assert github_payload["repo_mappings"] == f"DEMO|team|demo-repo|main|{repo_path}"
+
+    load_response = client.get("/api/config")
+    assert load_response.status_code == 200
+    load_data = load_response.get_json()
+    assert load_data is not None
+    assert load_data["github_token"] == ""
+    assert load_data["repo_mapping_token_spaces"] == ["DEMO"]
+    assert "repo_mapping_tokens" not in load_data
+
+
+def test_save_config_preserves_existing_space_token_when_blank_on_reload(monkeypatch, tmp_path) -> None:
+    db_path = tmp_path / "app.db"
+    monkeypatch.setattr(main_module, "DB_PATH", db_path)
+    monkeypatch.setattr(main_module, "DATA_DIR", tmp_path)
+    monkeypatch.setenv("APP_ENC_KEY", main_module.Fernet.generate_key().decode("utf-8"))
+
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+
+    app = create_app()
+    client = app.test_client()
+
+    first_save = {
+        "jira_base_url": "https://example.atlassian.net",
+        "jira_email": "tester@example.com",
+        "jira_api_token": "jira-token",
+        "jira_jql": "project = DEMO",
+        "github_owner": "team",
+        "github_repo": "demo-repo",
+        "github_base_branch": "main",
+        "github_token": "",
+        "repo_mappings": f"DEMO|team|demo-repo|main|{repo_path}",
+        "repo_mapping_tokens": {"DEMO": "space-token"},
+        "local_repo_path": str(repo_path),
+    }
+    second_save = {
+        **first_save,
+        "repo_mapping_tokens": {},
+        "repo_mapping_token_clears": [],
+    }
+
+    assert client.post("/api/config/save", json=first_save).status_code == 200
+    assert client.post("/api/config/save", json=second_save).status_code == 200
+
+    store = main_module.CredentialStore(db_path, main_module._load_encryption_key())
+    github_payload = store.load("github")
+    assert github_payload is not None
+    assert github_payload["repo_mapping_tokens"] == {"DEMO": "space-token"}
 
 
 def test_github_check_requires_issue_key_when_repo_mappings_exist(monkeypatch) -> None:
