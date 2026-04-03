@@ -82,6 +82,8 @@ FIELD_LABEL_OVERRIDES = {
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 LOGGER = logging.getLogger(__name__)
+WORKFLOW_BATCH_FILE_LOCK = threading.Lock()
+WORKFLOW_RUN_FILE_LOCK = threading.Lock()
 
 
 @dataclass
@@ -674,12 +676,25 @@ def _workflow_batch_snapshot(batch: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _atomic_write_json(target_path: Path, payload: dict[str, Any], *, lock: threading.Lock) -> None:
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = target_path.with_suffix(f".{uuid.uuid4().hex}.tmp")
+    serialized = json.dumps(payload, ensure_ascii=False, indent=2)
+    with lock:
+        try:
+            temp_path.write_text(serialized, encoding="utf-8")
+            temp_path.replace(target_path)
+        finally:
+            try:
+                if temp_path.exists():
+                    temp_path.unlink()
+            except OSError:
+                pass
+
+
 def _save_workflow_batch(batch: dict[str, Any]) -> None:
-    WORKFLOW_BATCHES_DIR.mkdir(parents=True, exist_ok=True)
     target_path = _workflow_batch_path(batch["batch_id"])
-    temp_path = target_path.with_suffix(".tmp")
-    temp_path.write_text(json.dumps(_workflow_batch_snapshot(batch), ensure_ascii=False, indent=2), encoding="utf-8")
-    temp_path.replace(target_path)
+    _atomic_write_json(target_path, _workflow_batch_snapshot(batch), lock=WORKFLOW_BATCH_FILE_LOCK)
 
 
 def _load_workflow_batch(batch_id: str) -> dict[str, Any] | None:
@@ -777,11 +792,8 @@ def _batch_aggregate_status(runs: list[dict[str, Any]]) -> tuple[str, dict[str, 
 
 
 def _save_workflow_run(run: dict[str, Any]) -> None:
-    WORKFLOW_RUNS_DIR.mkdir(parents=True, exist_ok=True)
     target_path = _workflow_run_path(run["run_id"])
-    temp_path = target_path.with_suffix(".tmp")
-    temp_path.write_text(json.dumps(_workflow_run_snapshot(run), ensure_ascii=False, indent=2), encoding="utf-8")
-    temp_path.replace(target_path)
+    _atomic_write_json(target_path, _workflow_run_snapshot(run), lock=WORKFLOW_RUN_FILE_LOCK)
 
 
 def _load_workflow_run(run_id: str) -> dict[str, Any] | None:
@@ -1060,13 +1072,6 @@ def _repo_mapping_missing_token_spaces(
         return []
 
     existing_github_payload = existing_github_payload or {}
-    global_token = _effective_secret_value(
-        payload.get("github_token", ""),
-        existing_github_payload.get("token", ""),
-    )
-    if global_token:
-        return []
-
     stored_mapping_tokens = _normalize_repo_mapping_token_map(existing_github_payload.get("repo_mapping_tokens", {}))
     incoming_mapping_tokens = _normalize_repo_mapping_token_map(payload.get("repo_mapping_tokens", {}))
     cleared_spaces = _normalize_space_key_list(payload.get("repo_mapping_token_clears", []))
@@ -1095,20 +1100,11 @@ def _required_config_fields(
     }
     missing = [name for name, value in required.items() if not str(value or "").strip()]
     repo_mappings = str(payload.get("repo_mappings", "")).strip()
-    if repo_mappings:
-        if _repo_mapping_missing_token_spaces(payload, existing_github_payload):
-            missing.append("repo_mappings")
-        return missing
-
-    github_token = _effective_secret_value(
-        payload.get("github_token", ""),
-        (existing_github_payload or {}).get("token", ""),
-    )
-    if not github_token:
-        missing.append("github_token")
-    if _has_legacy_repo_fields(payload):
-        return missing
-    return [*missing, "repo_mappings"]
+    if not repo_mappings:
+        return [*missing, "repo_mappings"]
+    if _repo_mapping_missing_token_spaces(payload, existing_github_payload):
+        missing.append("repo_mappings")
+    return missing
 
 
 def _required_workflow_fields(payload: dict[str, Any]) -> list[str]:
@@ -1384,40 +1380,29 @@ def _resolve_repo_context(github_payload: dict[str, Any], issue_key: Any) -> Rep
         raise ValueError(f"invalid_repo_mappings:{','.join(errors)}")
 
     space_key = _issue_space_key(issue_key)
-    global_token = str(github_payload.get("token", github_payload.get("github_token", ""))).strip()
     repo_mapping_tokens = _normalize_repo_mapping_token_map(github_payload.get("repo_mapping_tokens", {}))
-    if mappings:
-        if not space_key:
-            raise KeyError("issue_key_required_for_repo_mapping")
-        for mapping in mappings:
-            if mapping["space_key"] == space_key:
-                return RepoContext(
-                    space_key=space_key,
-                    github=GithubConfig(
-                        repo_owner=mapping["repo_owner"],
-                        repo_name=mapping["repo_name"],
-                        base_branch=mapping["base_branch"],
-                        token=str(mapping.get("github_token", "")).strip()
-                        or repo_mapping_tokens.get(space_key, "")
-                        or global_token,
-                    ),
-                    local_repo_path=Path(mapping["local_repo_path"]).expanduser(),
-                )
-        raise KeyError(f"repo_mapping_not_found:{space_key}")
-
-    if not _has_legacy_repo_fields(github_payload):
+    if not mappings:
         raise KeyError("repo_mapping_not_configured")
 
-    return RepoContext(
-        space_key=space_key,
-        github=GithubConfig(
-            repo_owner=str(github_payload.get("repo_owner", github_payload.get("github_owner", ""))).strip(),
-            repo_name=str(github_payload.get("repo_name", github_payload.get("github_repo", ""))).strip(),
-            base_branch=str(github_payload.get("base_branch", github_payload.get("github_base_branch", ""))).strip(),
-            token=global_token,
-        ),
-        local_repo_path=Path(str(github_payload.get("local_repo_path", "")).strip()).expanduser(),
-    )
+    if not space_key:
+        raise KeyError("issue_key_required_for_repo_mapping")
+    for mapping in mappings:
+        if mapping["space_key"] != space_key:
+            continue
+        resolved_token = str(mapping.get("github_token", "")).strip() or repo_mapping_tokens.get(space_key, "")
+        if not resolved_token:
+            raise KeyError(f"repo_mapping_token_missing:{space_key}")
+        return RepoContext(
+            space_key=space_key,
+            github=GithubConfig(
+                repo_owner=mapping["repo_owner"],
+                repo_name=mapping["repo_name"],
+                base_branch=mapping["base_branch"],
+                token=resolved_token,
+            ),
+            local_repo_path=Path(mapping["local_repo_path"]).expanduser(),
+        )
+    raise KeyError(f"repo_mapping_not_found:{space_key}")
 
 
 def _jira_headers(config: JiraConfig) -> dict[str, str]:
@@ -3228,8 +3213,10 @@ def create_app() -> Flask:
             ],
         ]
         updated_at = max([value for value in updated_values if value], default=batch.get("updated_at", batch.get("created_at", _utcnow_iso())))
+        snapshot_to_save: dict[str, Any] | None = None
         with workflow_batches_lock:
             current_batch = workflow_batches.get(batch_id, batch)
+            previous_snapshot = _workflow_batch_snapshot(current_batch)
             current_batch["status"] = status
             current_batch["counts"] = counts
             current_batch["message"] = _batch_status_message(status, counts)
@@ -3238,8 +3225,11 @@ def create_app() -> Flask:
             current_batch["run_ids"] = [str(run.get("run_id", "")).strip() for run in runs]
             current_batch["runs"] = [_workflow_batch_run_ref(run) for run in runs]
             workflow_batches[batch_id] = current_batch
-            _save_workflow_batch(current_batch)
             snapshot = _workflow_batch_snapshot(current_batch)
+            if snapshot != previous_snapshot:
+                snapshot_to_save = snapshot
+        if snapshot_to_save is not None:
+            _save_workflow_batch(snapshot_to_save)
         return {**snapshot, "runs": runs, "suggested_active_run_id": suggested_active_run_id}
 
     def _sync_batch_from_run_snapshot(run_snapshot: dict[str, Any]) -> None:
@@ -3460,7 +3450,7 @@ def create_app() -> Flask:
                 github_config, repo_path, resolved_space_key = _load_repo_context(github_payload, issue_key)
             except KeyError as exc:
                 error_code = str(exc.args[0])
-                requested_fields = ["repo_mappings"] if error_code.startswith("repo_mapping_not_found:") else ["issue_key"]
+                requested_fields = ["repo_mappings"] if error_code.startswith("repo_mapping") else ["issue_key"]
                 return [], {
                     "ok": False,
                     "error": error_code,
@@ -3578,14 +3568,14 @@ def create_app() -> Flask:
             "jira_email": jira.get("email", ""),
             "jira_jql": jira.get("jql", ""),
             "jira_api_token": "",
-            "github_owner": github.get("repo_owner", ""),
-            "github_repo": github.get("repo_name", ""),
-            "github_base_branch": github.get("base_branch", "main"),
+            "github_owner": "",
+            "github_repo": "",
+            "github_base_branch": "",
             "github_token": "",
-            "github_token_saved": bool(str(github.get("token", "")).strip()),
+            "github_token_saved": False,
             "repo_mappings": github.get("repo_mappings", ""),
             "repo_mapping_token_spaces": sorted(repo_mapping_tokens.keys()),
-            "local_repo_path": github.get("local_repo_path", ""),
+            "local_repo_path": "",
         }
         return jsonify(saved_config)
 
@@ -3648,12 +3638,11 @@ def create_app() -> Flask:
 
         jira = _to_jira_config(payload)
         github = GithubConfig(
-            repo_owner=str(payload.get("github_owner", "")).strip(),
-            repo_name=str(payload.get("github_repo", "")).strip(),
-            base_branch=str(payload.get("github_base_branch", "")).strip(),
-            token=_effective_secret_value(payload.get("github_token", ""), existing_github.get("token", "")),
+            repo_owner="",
+            repo_name="",
+            base_branch="",
+            token="",
         )
-        local_repo_path = str(payload["local_repo_path"]).strip()
 
         store.save(
             "jira",
@@ -3674,7 +3663,7 @@ def create_app() -> Flask:
                 "repo_mappings": _serialize_repo_mappings(repo_mappings),
                 "repo_mapping_count": len(repo_mappings),
                 "repo_mapping_tokens": final_repo_mapping_tokens,
-                "local_repo_path": local_repo_path,
+                "local_repo_path": "",
             },
         )
         return jsonify(
@@ -3682,7 +3671,7 @@ def create_app() -> Flask:
                 "ok": True,
                 "message": "설정을 암호화 저장했습니다.",
                 "repo_mapping_token_spaces": sorted(final_repo_mapping_tokens.keys()),
-                "github_token_saved": bool(github.token),
+                "github_token_saved": False,
             }
         )
 
@@ -3764,7 +3753,7 @@ def create_app() -> Flask:
             config, local_repo_path, resolved_space_key = _load_repo_context(github_payload, issue_key)
         except KeyError as exc:
             error_code = str(exc.args[0])
-            requested_fields = ["repo_mappings"] if error_code.startswith("repo_mapping_not_found:") else ["issue_key"]
+            requested_fields = ["repo_mappings"] if error_code.startswith("repo_mapping") else ["issue_key"]
             return (
                 jsonify(
                     {
@@ -4239,7 +4228,7 @@ def create_app() -> Flask:
             github_config, repo_path, resolved_space_key = _load_repo_context(github_payload, payload.get("issue_key", ""))
         except KeyError as exc:
             error_code = str(exc.args[0])
-            requested_fields = ["repo_mappings"] if error_code.startswith("repo_mapping_not_found:") else ["issue_key"]
+            requested_fields = ["repo_mappings"] if error_code.startswith("repo_mapping") else ["issue_key"]
             return (
                 jsonify(
                     {
@@ -4371,7 +4360,7 @@ def create_app() -> Flask:
             github_config, repo_path, resolved_space_key = _load_repo_context(github_payload, payload.get("issue_key", ""))
         except KeyError as exc:
             error_code = str(exc.args[0])
-            requested_fields = ["repo_mappings"] if error_code.startswith("repo_mapping_not_found:") else ["issue_key"]
+            requested_fields = ["repo_mappings"] if error_code.startswith("repo_mapping") else ["issue_key"]
             return (
                 jsonify(
                     {

@@ -2,11 +2,43 @@ import json
 import subprocess
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import pytest
+
 import app.main as main_module
 from app.main import create_app
+
+
+def _repo_mapping_line(
+    space_key: str,
+    repo_path: Path | str,
+    *,
+    repo_owner: str = "owner",
+    repo_name: str = "repo",
+    base_branch: str = "main",
+    token: str = "token",
+) -> str:
+    return "|".join([space_key, repo_owner, repo_name, base_branch, str(repo_path), token])
+
+
+def _github_mapping_payload(
+    *mappings: str,
+    repo_owner: str = "owner",
+    repo_name: str = "repo",
+    base_branch: str = "main",
+) -> dict[str, str | dict[str, str]]:
+    return {
+        "repo_owner": repo_owner,
+        "repo_name": repo_name,
+        "base_branch": base_branch,
+        "token": "",
+        "repo_mappings": "\n".join(mappings),
+        "repo_mapping_tokens": {},
+        "local_repo_path": "",
+    }
 
 
 def test_setup_guide_contains_expected_sections_and_steps() -> None:
@@ -72,20 +104,42 @@ def test_index_page_renders_automation_fields() -> None:
     assert 'id="mock_mode"' not in html
     assert 'id="backlog_result"' not in html
     assert "<h1>" not in html
-    assert 'class="config-space-panel"' in html
+    assert 'config-space-panel' in html
     assert 'id="workflow_batch_preview_card"' in html
     assert 'id="workflow_batch_preview_list"' in html
+    assert 'id="batch_flow_board"' in html
+    assert 'id="batch_flow_caption"' in html
     assert 'id="github_token_help"' in html
     assert 'id="mapping_github_token"' in html
+    assert 'data-config-flow-step="jira"' in html
+    assert 'data-config-flow-step="repo"' in html
+    assert 'data-config-panel="jira"' in html
+    assert 'data-config-panel="repo"' in html
+    assert 'id="github_owner"' not in html
+    assert 'id="github_repo"' not in html
+    assert 'id="github_base_branch"' not in html
+    assert 'id="github_token"' not in html
+    assert 'id="local_repo_path"' not in html
     assert 'id="jira_issue_description"' in html
     assert 'id="jira_issue_comments"' in html
     assert 'id="work_status_section"' in html
-    assert 'id="batch_list"' in html
+    assert 'id="batch_list"' not in html
     assert 'id="batch_run_tabs"' in html
+    assert 'id="batch_detail_tabs"' in html
+    assert 'data-detail-panel="overview"' in html
+    assert 'data-detail-panel="summary"' in html
+    assert 'data-detail-panel="clarification"' in html
+    assert 'data-detail-panel="artifacts"' in html
+    assert 'data-detail-panel="logs"' in html
     assert 'id="batch_run_diff"' in html
     assert 'id="batch_run_sync_status_card"' in html
     assert 'id="submit_batch_run_answers"' in html
     assert 'src="/static/batch-workspace.js"' in html
+    assert 'id="work_status_hint"' not in html
+    assert "Jira 연결 정보를 먼저 입력한 뒤, 이슈 공간별 저장소를 이어서 연결한다." not in html
+    assert "여러 이슈를 함께 선택하면 배치 실행으로 처리한다." not in html
+    assert "공통 지시만 입력하면 선택한 각 이슈에 대해 브랜치와 커밋 메시지를 자동으로 생성한다." not in html
+    assert "최근 배치와 이슈별 작업 상태를 여기에서 추적한다." not in html
     assert html.index('id="load_config"') < html.index('class="config-sticky-group"')
     assert html.index('id="load_backlog"') < html.index("<table>")
     assert html.index('id="check_repo"') < html.index('class="grid workflow-grid"')
@@ -374,13 +428,7 @@ def test_clarify_workflow_returns_requested_information(monkeypatch, tmp_path) -
 
     def fake_load(self, provider: str):  # noqa: ANN001
         if provider == "github":
-            return {
-                "repo_owner": "owner",
-                "repo_name": "repo",
-                "base_branch": "main",
-                "token": "token",
-                "local_repo_path": str(repo_path),
-            }
+            return _github_mapping_payload(_repo_mapping_line("DEMO", repo_path))
         if provider == "jira":
             return {
                 "base_url": "https://example.atlassian.net",
@@ -487,8 +535,8 @@ def test_clarify_workflow_returns_requested_information(monkeypatch, tmp_path) -
 
 def test_load_repo_context_uses_space_mapping() -> None:
     github_payload = {
-        "token": "token",
         "repo_mappings": "DEMO|team|demo-repo|develop|C:/repos/demo\nOPS|team|ops-repo|main|C:/repos/ops",
+        "repo_mapping_tokens": {"DEMO": "demo-token", "OPS": "ops-token"},
     }
 
     config, repo_path, space_key = main_module._load_repo_context(github_payload, "ops-321")
@@ -512,15 +560,16 @@ def test_load_repo_context_prefers_space_token_over_global_token() -> None:
     assert config.token == "space-token"
 
 
-def test_load_repo_context_falls_back_to_global_token_when_space_token_missing() -> None:
+def test_load_repo_context_requires_space_token_when_space_token_missing() -> None:
     github_payload = {
         "token": "global-token",
         "repo_mappings": "DEMO|team|demo-repo|main|C:/repos/demo",
     }
 
-    config, _, _ = main_module._load_repo_context(github_payload, "DEMO-1")
+    with pytest.raises(KeyError) as exc_info:
+        main_module._load_repo_context(github_payload, "DEMO-1")
 
-    assert config.token == "global-token"
+    assert exc_info.value.args[0] == "repo_mapping_token_missing:DEMO"
 
 
 def test_validate_config_accepts_space_tokens_without_global_token(monkeypatch, tmp_path) -> None:
@@ -537,13 +586,8 @@ def test_validate_config_accepts_space_tokens_without_global_token(monkeypatch, 
             "jira_email": "tester@example.com",
             "jira_api_token": "jira-token",
             "jira_jql": "project = DEMO",
-            "github_owner": "team",
-            "github_repo": "demo-repo",
-            "github_base_branch": "main",
-            "github_token": "",
             "repo_mappings": f"DEMO|team|demo-repo|main|{repo_path}",
             "repo_mapping_tokens": {"DEMO": "space-token"},
-            "local_repo_path": str(repo_path),
         },
     )
 
@@ -572,12 +616,7 @@ def test_validate_config_reports_space_token_missing_when_no_global_token(monkey
             "jira_email": "tester@example.com",
             "jira_api_token": "jira-token",
             "jira_jql": "project = DEMO",
-            "github_owner": "team",
-            "github_repo": "demo-repo",
-            "github_base_branch": "main",
-            "github_token": "",
             "repo_mappings": f"DEMO|team|demo-repo|main|{repo_path}",
-            "local_repo_path": str(repo_path),
         },
     )
 
@@ -608,13 +647,8 @@ def test_save_config_stores_space_tokens_separately_and_hides_them(monkeypatch, 
             "jira_email": "tester@example.com",
             "jira_api_token": "jira-token",
             "jira_jql": "project = DEMO",
-            "github_owner": "team",
-            "github_repo": "demo-repo",
-            "github_base_branch": "main",
-            "github_token": "",
             "repo_mappings": f"DEMO|team|demo-repo|main|{repo_path}",
             "repo_mapping_tokens": {"DEMO": "space-token"},
-            "local_repo_path": str(repo_path),
         },
     )
 
@@ -629,6 +663,8 @@ def test_save_config_stores_space_tokens_separately_and_hides_them(monkeypatch, 
     assert github_payload is not None
     assert github_payload["repo_mapping_tokens"] == {"DEMO": "space-token"}
     assert github_payload["repo_mappings"] == f"DEMO|team|demo-repo|main|{repo_path}"
+    assert github_payload["token"] == ""
+    assert github_payload["local_repo_path"] == ""
 
     load_response = client.get("/api/config")
     assert load_response.status_code == 200
@@ -637,6 +673,7 @@ def test_save_config_stores_space_tokens_separately_and_hides_them(monkeypatch, 
     assert load_data["github_token"] == ""
     assert load_data["repo_mapping_token_spaces"] == ["DEMO"]
     assert "repo_mapping_tokens" not in load_data
+    assert load_data["local_repo_path"] == ""
 
 
 def test_save_config_preserves_existing_space_token_when_blank_on_reload(monkeypatch, tmp_path) -> None:
@@ -656,13 +693,8 @@ def test_save_config_preserves_existing_space_token_when_blank_on_reload(monkeyp
         "jira_email": "tester@example.com",
         "jira_api_token": "jira-token",
         "jira_jql": "project = DEMO",
-        "github_owner": "team",
-        "github_repo": "demo-repo",
-        "github_base_branch": "main",
-        "github_token": "",
         "repo_mappings": f"DEMO|team|demo-repo|main|{repo_path}",
         "repo_mapping_tokens": {"DEMO": "space-token"},
-        "local_repo_path": str(repo_path),
     }
     second_save = {
         **first_save,
@@ -679,7 +711,7 @@ def test_save_config_preserves_existing_space_token_when_blank_on_reload(monkeyp
     assert github_payload["repo_mapping_tokens"] == {"DEMO": "space-token"}
 
 
-def test_validate_config_accepts_blank_global_token_when_existing_token_is_saved(monkeypatch, tmp_path) -> None:
+def test_validate_config_ignores_saved_global_token_when_space_token_is_missing(monkeypatch, tmp_path) -> None:
     db_path = tmp_path / "app.db"
     monkeypatch.setattr(main_module, "DB_PATH", db_path)
     monkeypatch.setattr(main_module, "DATA_DIR", tmp_path)
@@ -690,18 +722,18 @@ def test_validate_config_accepts_blank_global_token_when_existing_token_is_saved
 
     store = main_module.CredentialStore(db_path, main_module._load_encryption_key())
     store.save(
-        "github",
-        {
-            "repo_owner": "team",
-            "repo_name": "demo-repo",
-            "base_branch": "main",
-            "token": "saved-global-token",
-            "repo_mappings": f"DEMO|team|demo-repo|main|{repo_path}",
-            "repo_mapping_count": 1,
-            "repo_mapping_tokens": {},
-            "local_repo_path": str(repo_path),
-        },
-    )
+            "github",
+            {
+                "repo_owner": "team",
+                "repo_name": "demo-repo",
+                "base_branch": "main",
+                "token": "saved-global-token",
+                "repo_mappings": f"DEMO|team|demo-repo|main|{repo_path}",
+                "repo_mapping_count": 1,
+                "repo_mapping_tokens": {},
+                "local_repo_path": "",
+            },
+        )
 
     app = create_app()
     client = app.test_client()
@@ -712,22 +744,19 @@ def test_validate_config_accepts_blank_global_token_when_existing_token_is_saved
             "jira_email": "tester@example.com",
             "jira_api_token": "jira-token",
             "jira_jql": "project = DEMO",
-            "github_owner": "team",
-            "github_repo": "demo-repo",
-            "github_base_branch": "main",
-            "github_token": "",
             "repo_mappings": f"DEMO|team|demo-repo|main|{repo_path}",
-            "local_repo_path": str(repo_path),
         },
     )
 
     assert response.status_code == 200
     data = response.get_json()
     assert data is not None
-    assert data["valid"] is True
+    assert data["valid"] is False
+    assert data["missing_fields"] == ["repo_mappings"]
+    assert data["repo_mapping_token_missing_spaces"] == ["DEMO"]
 
 
-def test_save_config_preserves_existing_global_token_when_field_is_blank(monkeypatch, tmp_path) -> None:
+def test_save_config_clears_legacy_global_token_when_only_space_mapping_is_saved(monkeypatch, tmp_path) -> None:
     db_path = tmp_path / "app.db"
     monkeypatch.setattr(main_module, "DB_PATH", db_path)
     monkeypatch.setattr(main_module, "DATA_DIR", tmp_path)
@@ -738,18 +767,18 @@ def test_save_config_preserves_existing_global_token_when_field_is_blank(monkeyp
 
     store = main_module.CredentialStore(db_path, main_module._load_encryption_key())
     store.save(
-        "github",
-        {
-            "repo_owner": "team",
-            "repo_name": "demo-repo",
-            "base_branch": "main",
-            "token": "saved-global-token",
-            "repo_mappings": f"DEMO|team|demo-repo|main|{repo_path}",
-            "repo_mapping_count": 1,
-            "repo_mapping_tokens": {},
-            "local_repo_path": str(repo_path),
-        },
-    )
+            "github",
+            {
+                "repo_owner": "team",
+                "repo_name": "demo-repo",
+                "base_branch": "main",
+                "token": "saved-global-token",
+                "repo_mappings": f"DEMO|team|demo-repo|main|{repo_path}",
+                "repo_mapping_count": 1,
+                "repo_mapping_tokens": {"DEMO": "saved-space-token"},
+                "local_repo_path": "",
+            },
+        )
 
     app = create_app()
     client = app.test_client()
@@ -760,21 +789,17 @@ def test_save_config_preserves_existing_global_token_when_field_is_blank(monkeyp
             "jira_email": "tester@example.com",
             "jira_api_token": "jira-token",
             "jira_jql": "project = DEMO",
-            "github_owner": "team",
-            "github_repo": "demo-repo",
-            "github_base_branch": "main",
-            "github_token": "",
             "repo_mappings": f"DEMO|team|demo-repo|main|{repo_path}",
             "repo_mapping_tokens": {},
             "repo_mapping_token_clears": [],
-            "local_repo_path": str(repo_path),
         },
     )
 
     assert response.status_code == 200
     github_payload = store.load("github")
     assert github_payload is not None
-    assert github_payload["token"] == "saved-global-token"
+    assert github_payload["token"] == ""
+    assert github_payload["repo_mapping_tokens"] == {"DEMO": "saved-space-token"}
 
 
 def test_github_check_requires_issue_key_when_repo_mappings_exist(monkeypatch) -> None:
@@ -821,13 +846,7 @@ def test_github_check_creates_project_memory_on_repo_access(monkeypatch, tmp_pat
 
     def fake_load(self, provider: str):  # noqa: ANN001
         if provider == "github":
-            return {
-                "repo_owner": "owner",
-                "repo_name": "repo",
-                "base_branch": "main",
-                "token": "token",
-                "local_repo_path": str(repo_path),
-            }
+            return _github_mapping_payload(_repo_mapping_line("DEMO", repo_path))
         return None
 
     class FakeResponse:
@@ -852,13 +871,7 @@ def test_github_check_creates_project_memory_on_repo_access(monkeypatch, tmp_pat
 def test_run_workflow_returns_stubbed_automation_result(monkeypatch) -> None:
     def fake_load(self, provider: str):  # noqa: ANN001
         if provider == "github":
-            return {
-                "repo_owner": "owner",
-                "repo_name": "repo",
-                "base_branch": "main",
-                "token": "token",
-                "local_repo_path": ".",
-            }
+            return _github_mapping_payload(_repo_mapping_line("DEMO", "."))
         return None
 
     def fake_find_codex_launcher() -> list[str]:
@@ -955,13 +968,7 @@ def test_run_workflow_passes_normalized_clarification_answers(monkeypatch) -> No
 
     def fake_load(self, provider: str):  # noqa: ANN001
         if provider == "github":
-            return {
-                "repo_owner": "owner",
-                "repo_name": "repo",
-                "base_branch": "main",
-                "token": "token",
-                "local_repo_path": ".",
-            }
+            return _github_mapping_payload(_repo_mapping_line("DEMO", "."))
         if provider == "jira":
             return {
                 "base_url": "https://example.atlassian.net",
@@ -1098,13 +1105,7 @@ def test_run_workflow_records_project_history(monkeypatch, tmp_path) -> None:
 
     def fake_load(self, provider: str):  # noqa: ANN001
         if provider == "github":
-            return {
-                "repo_owner": "owner",
-                "repo_name": "repo",
-                "base_branch": "main",
-                "token": "token",
-                "local_repo_path": str(repo_path),
-            }
+            return _github_mapping_payload(_repo_mapping_line("DEMO", repo_path))
         return None
 
     def fake_execute(repo_path, github_config, payload, reporter=None):  # noqa: ANN001
@@ -1182,13 +1183,7 @@ def test_workflow_run_persists_across_app_recreation(monkeypatch, tmp_path) -> N
 
     def fake_load(self, provider: str):  # noqa: ANN001
         if provider == "github":
-            return {
-                "repo_owner": "owner",
-                "repo_name": "repo",
-                "base_branch": "main",
-                "token": "token",
-                "local_repo_path": ".",
-            }
+            return _github_mapping_payload(_repo_mapping_line("DEMO", "."))
         return None
 
     def fake_find_codex_launcher() -> list[str]:
@@ -1411,14 +1406,12 @@ def test_preview_workflow_batch_returns_queue_groups(monkeypatch, tmp_path) -> N
 
     def fake_load(self, provider: str):  # noqa: ANN001
         if provider == "github":
-            return {
-                "repo_owner": "default-owner",
-                "repo_name": "default-repo",
-                "base_branch": "main",
-                "token": "token",
-                "repo_mappings": f"DEMO|team|demo-repo|main|{repo_one}\nOPS|ops|ops-repo|develop|{repo_two}",
-                "local_repo_path": str(repo_one),
-            }
+            return _github_mapping_payload(
+                _repo_mapping_line("DEMO", repo_one, repo_owner="team", repo_name="demo-repo", token="demo-token"),
+                _repo_mapping_line("OPS", repo_two, repo_owner="ops", repo_name="ops-repo", base_branch="develop", token="ops-token"),
+                repo_owner="default-owner",
+                repo_name="default-repo",
+            )
         return None
 
     monkeypatch.setattr(main_module.CredentialStore, "load", fake_load)
@@ -1452,14 +1445,11 @@ def test_preview_workflow_batch_fails_when_space_mapping_is_missing(monkeypatch,
 
     def fake_load(self, provider: str):  # noqa: ANN001
         if provider == "github":
-            return {
-                "repo_owner": "default-owner",
-                "repo_name": "default-repo",
-                "base_branch": "main",
-                "token": "token",
-                "repo_mappings": f"DEMO|team|demo-repo|main|{repo_path}",
-                "local_repo_path": str(repo_path),
-            }
+            return _github_mapping_payload(
+                _repo_mapping_line("DEMO", repo_path, repo_owner="team", repo_name="demo-repo"),
+                repo_owner="default-owner",
+                repo_name="default-repo",
+            )
         return None
 
     monkeypatch.setattr(main_module.CredentialStore, "load", fake_load)
@@ -1482,14 +1472,11 @@ def test_preview_workflow_batch_fails_when_local_repo_is_missing(monkeypatch, tm
 
     def fake_load(self, provider: str):  # noqa: ANN001
         if provider == "github":
-            return {
-                "repo_owner": "default-owner",
-                "repo_name": "default-repo",
-                "base_branch": "main",
-                "token": "token",
-                "repo_mappings": f"DEMO|team|demo-repo|main|{missing_repo}",
-                "local_repo_path": str(missing_repo),
-            }
+            return _github_mapping_payload(
+                _repo_mapping_line("DEMO", missing_repo, repo_owner="team", repo_name="demo-repo"),
+                repo_owner="default-owner",
+                repo_name="default-repo",
+            )
         return None
 
     monkeypatch.setattr(main_module.CredentialStore, "load", fake_load)
@@ -1520,13 +1507,7 @@ def test_run_workflow_batch_returns_batch_with_runs(monkeypatch, tmp_path) -> No
 
     def fake_load(self, provider: str):  # noqa: ANN001
         if provider == "github":
-            return {
-                "repo_owner": "owner",
-                "repo_name": "repo",
-                "base_branch": "main",
-                "token": "token",
-                "local_repo_path": str(repo_path),
-            }
+            return _github_mapping_payload(_repo_mapping_line("DEMO", repo_path))
         if provider == "jira":
             return {
                 "base_url": "https://example.atlassian.net",
@@ -1635,14 +1616,9 @@ def test_run_workflow_batch_fails_when_space_mapping_is_missing(monkeypatch, tmp
 
     def fake_load(self, provider: str):  # noqa: ANN001
         if provider == "github":
-            return {
-                "repo_owner": "owner",
-                "repo_name": "repo",
-                "base_branch": "main",
-                "token": "token",
-                "repo_mappings": f"DEMO|team|demo-repo|main|{repo_path}",
-                "local_repo_path": str(repo_path),
-            }
+            return _github_mapping_payload(
+                _repo_mapping_line("DEMO", repo_path, repo_owner="team", repo_name="demo-repo")
+            )
         return None
 
     monkeypatch.setattr(main_module.CredentialStore, "load", fake_load)
@@ -1672,14 +1648,9 @@ def test_run_workflow_batch_fails_when_local_repo_is_missing(monkeypatch, tmp_pa
 
     def fake_load(self, provider: str):  # noqa: ANN001
         if provider == "github":
-            return {
-                "repo_owner": "owner",
-                "repo_name": "repo",
-                "base_branch": "main",
-                "token": "token",
-                "repo_mappings": f"DEMO|team|demo-repo|main|{missing_repo}",
-                "local_repo_path": str(missing_repo),
-            }
+            return _github_mapping_payload(
+                _repo_mapping_line("DEMO", missing_repo, repo_owner="team", repo_name="demo-repo")
+            )
         return None
 
     monkeypatch.setattr(main_module.CredentialStore, "load", fake_load)
@@ -1717,13 +1688,7 @@ def test_answer_workflow_batch_run_requeues_and_completes(monkeypatch, tmp_path)
 
     def fake_load(self, provider: str):  # noqa: ANN001
         if provider == "github":
-            return {
-                "repo_owner": "owner",
-                "repo_name": "repo",
-                "base_branch": "main",
-                "token": "token",
-                "local_repo_path": str(repo_path),
-            }
+            return _github_mapping_payload(_repo_mapping_line("DEMO", repo_path))
         if provider == "jira":
             return {
                 "base_url": "https://example.atlassian.net",
@@ -1837,13 +1802,7 @@ def test_workflow_batch_persists_across_app_recreation(monkeypatch, tmp_path) ->
 
     def fake_load(self, provider: str):  # noqa: ANN001
         if provider == "github":
-            return {
-                "repo_owner": "owner",
-                "repo_name": "repo",
-                "base_branch": "main",
-                "token": "token",
-                "local_repo_path": str(repo_path),
-            }
+            return _github_mapping_payload(_repo_mapping_line("DEMO", repo_path))
         return None
 
     def fake_run_codex_clarification(repo_path, payload):  # noqa: ANN001
@@ -1918,6 +1877,67 @@ def test_workflow_batch_persists_across_app_recreation(monkeypatch, tmp_path) ->
     assert batch_data["runs"][0]["status"] == "completed"
 
 
+def test_list_workflow_batches_is_safe_under_concurrent_polling(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(main_module, "WORKFLOW_RUNS_DIR", tmp_path / "workflow-runs")
+    monkeypatch.setattr(main_module, "WORKFLOW_BATCHES_DIR", tmp_path / "workflow-batches")
+
+    timestamp = datetime.now(timezone.utc).isoformat()
+    batch_id = "batch-concurrent"
+    run_id = "run-concurrent"
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+
+    run = {
+        "run_id": run_id,
+        "batch_id": batch_id,
+        "issue_key": "DEMO-1",
+        "issue_summary": "concurrent poll",
+        "tab_label": "DEMO-1 concurrent poll",
+        "status": "needs_input",
+        "message": "추가 확인이 필요합니다.",
+        "queue_key": str(repo_path),
+        "queue_state": "idle",
+        "queue_position": 0,
+        "local_repo_path": str(repo_path),
+        "resolved_space_key": "DEMO",
+        "clarification_status": "ready",
+        "created_at": timestamp,
+        "updated_at": timestamp,
+        "events": [],
+        "result": None,
+        "error": None,
+    }
+    batch = {
+        "batch_id": batch_id,
+        "status": "needs_input",
+        "message": "추가 확인이 필요합니다.",
+        "created_at": timestamp,
+        "updated_at": timestamp,
+        "active_run_id": run_id,
+        "run_ids": [run_id],
+        "runs": [main_module._workflow_batch_run_ref(run)],
+        "counts": {"queued": 0, "running": 0, "needs_input": 1, "completed": 0, "failed": 0, "total": 1},
+        "selected_issue_keys": ["DEMO-1"],
+        "selected_issue_count": 1,
+    }
+
+    main_module._save_workflow_run(run)
+    main_module._save_workflow_batch(batch)
+
+    app = create_app()
+
+    def fetch_status() -> tuple[int, dict[str, object] | None]:
+        client = app.test_client()
+        response = client.get("/api/workflow/batches?limit=12")
+        return response.status_code, response.get_json(silent=True)
+
+    with ThreadPoolExecutor(max_workers=16) as executor:
+        responses = list(executor.map(lambda _: fetch_status(), range(160)))
+
+    assert all(status == 200 for status, _ in responses)
+    assert all(payload and payload["ok"] is True for _, payload in responses)
+
+
 def test_batch_queue_serializes_same_repo_path(monkeypatch, tmp_path) -> None:
     repo_path = tmp_path / "repo"
     repo_path.mkdir()
@@ -1932,13 +1952,7 @@ def test_batch_queue_serializes_same_repo_path(monkeypatch, tmp_path) -> None:
 
     def fake_load(self, provider: str):  # noqa: ANN001
         if provider == "github":
-            return {
-                "repo_owner": "owner",
-                "repo_name": "repo",
-                "base_branch": "main",
-                "token": "token",
-                "local_repo_path": str(repo_path),
-            }
+            return _github_mapping_payload(_repo_mapping_line("DEMO", repo_path))
         return None
 
     def fake_execute(repo_path, github_config, payload, reporter=None):  # noqa: ANN001
@@ -2013,14 +2027,10 @@ def test_batch_queue_runs_different_repo_paths_in_parallel(monkeypatch, tmp_path
 
     def fake_load(self, provider: str):  # noqa: ANN001
         if provider == "github":
-            return {
-                "repo_owner": "owner",
-                "repo_name": "repo",
-                "base_branch": "main",
-                "token": "token",
-                "repo_mappings": f"DEMO|team|demo-repo|main|{repo_one}\nOPS|ops|ops-repo|main|{repo_two}",
-                "local_repo_path": str(repo_one),
-            }
+            return _github_mapping_payload(
+                _repo_mapping_line("DEMO", repo_one, repo_owner="team", repo_name="demo-repo"),
+                _repo_mapping_line("OPS", repo_two, repo_owner="ops", repo_name="ops-repo"),
+            )
         return None
 
     def fake_execute(repo_path, github_config, payload, reporter=None):  # noqa: ANN001

@@ -6,6 +6,8 @@
     recentBatches: [],
     activeBatch: null,
     activeBatchId: null,
+    activeDetailTab: "overview",
+    clarificationDrafts: {},
     failedOnly: false,
   };
 
@@ -13,8 +15,32 @@
     activeBatchId: "jira-auto-agent.active-batch-id",
   };
 
+  const DETAIL_TABS = [
+    { id: "overview", label: "실행 개요" },
+    { id: "summary", label: "결과 요약" },
+    { id: "clarification", label: "질문과 코멘트" },
+    { id: "artifacts", label: "산출물" },
+    { id: "logs", label: "로그" },
+  ];
+
+  const FLOW_STEPS = [
+    { id: "queued", label: "접수" },
+    { id: "prepare", label: "준비" },
+    { id: "execute", label: "실행" },
+    { id: "review", label: "검토" },
+    { id: "done", label: "완료" },
+  ];
+
   function batchRunStorageKey(batchId) {
     return `jira-auto-agent.active-run.${String(batchId || "").trim()}`;
+  }
+
+  function batchDetailStorageKey(batchId) {
+    return `jira-auto-agent.active-detail.${String(batchId || "").trim()}`;
+  }
+
+  function clarificationDraftKey(batchId, runId) {
+    return `${String(batchId || "").trim()}:${String(runId || "").trim()}`;
   }
 
   function safeStorageGet(key) {
@@ -249,6 +275,61 @@
     }
   }
 
+  function clarificationFocusState() {
+    const active = document.activeElement;
+    if (!active) {
+      return null;
+    }
+    const field = String($(active).attr("data-batch-clarification-answer") || "").trim();
+    if (!field) {
+      return null;
+    }
+    return {
+      field,
+      selectionStart: typeof active.selectionStart === "number" ? active.selectionStart : null,
+      selectionEnd: typeof active.selectionEnd === "number" ? active.selectionEnd : null,
+      scrollTop: typeof active.scrollTop === "number" ? active.scrollTop : 0,
+    };
+  }
+
+  function clarificationEditorFocused() {
+    return Boolean(clarificationFocusState());
+  }
+
+  function currentClarificationDrafts(batchId, runId) {
+    return batchWorkspaceState.clarificationDrafts[clarificationDraftKey(batchId, runId)] || {};
+  }
+
+  function setClarificationDraftValue(batchId, runId, field, value) {
+    const key = clarificationDraftKey(batchId, runId);
+    const drafts = { ...currentClarificationDrafts(batchId, runId) };
+    drafts[field] = value;
+    batchWorkspaceState.clarificationDrafts[key] = drafts;
+  }
+
+  function clearClarificationDrafts(batchId, runId) {
+    delete batchWorkspaceState.clarificationDrafts[clarificationDraftKey(batchId, runId)];
+  }
+
+  function restoreClarificationFocus(focusState) {
+    if (!focusState) {
+      return;
+    }
+    const target = $("#batch_run_clarification_questions [data-batch-clarification-answer]").filter(function () {
+      return String($(this).attr("data-batch-clarification-answer") || "").trim() === focusState.field;
+    }).get(0);
+    if (!target) {
+      return;
+    }
+    target.focus();
+    if (focusState.selectionStart != null && focusState.selectionEnd != null && typeof target.setSelectionRange === "function") {
+      target.setSelectionRange(focusState.selectionStart, focusState.selectionEnd);
+    }
+    if (typeof target.scrollTop === "number") {
+      target.scrollTop = focusState.scrollTop || 0;
+    }
+  }
+
   function stopBatchPolling() {
     if (batchWorkspaceState.pollTimer) {
       window.clearTimeout(batchWorkspaceState.pollTimer);
@@ -261,65 +342,55 @@
       return false;
     }
     const status = String(batch.status || "").trim();
-    if (status === "queued" || status === "running" || status === "needs_input") {
+    if (status === "queued" || status === "running") {
       return true;
     }
     const runs = batch.runs || [];
-    return runs.some((run) => ["queued", "running", "needs_input"].includes(String(run.status || "").trim()));
+    return runs.some((run) => ["queued", "running"].includes(String(run.status || "").trim()));
   }
 
   function scheduleBatchPoll(batchId) {
     stopBatchPolling();
     batchWorkspaceState.pollTimer = window.setTimeout(() => {
+      if (clarificationEditorFocused()) {
+        scheduleBatchPoll(batchId);
+        return;
+      }
       loadBatch(batchId, { preserveSelection: true, silentListRefresh: false });
     }, 2000);
-  }
-
-  function renderBatchList(batches) {
-    batchWorkspaceState.recentBatches = batches || [];
-    if (!batchWorkspaceState.recentBatches.length) {
-      $("#batch_list").html('<p class="batch-list__empty">실행한 배치가 아직 없다.</p>');
-      return;
-    }
-
-    const cards = batchWorkspaceState.recentBatches.map((batch) => {
-      const isActive = String(batch.batch_id) === String(batchWorkspaceState.activeBatchId || "");
-      const counts = batch.counts || {};
-      const countText = [
-        `완료 ${counts.completed || 0}`,
-        `실패 ${counts.failed || 0}`,
-        `확인 ${counts.needs_input || 0}`,
-      ].join(" / ");
-      return `
-        <button type="button" class="batch-list-item ${isActive ? "is-active" : ""}" data-batch-id="${escapeHtml(batch.batch_id)}">
-          <div class="batch-list-item__header">
-            <div class="batch-list-item__title">
-              <strong>${escapeHtml(batch.batch_id.slice(0, 10))}</strong>
-              <span>${escapeHtml((batch.selected_issue_keys || []).join(", ") || "이슈 정보 없음")}</span>
-            </div>
-            ${statusBadge(batch.status)}
-          </div>
-          <div class="batch-list-item__meta">
-            <div>${escapeHtml(countText)}</div>
-            <div>업데이트 ${escapeHtml(formatTimestamp(batch.updated_at))}</div>
-          </div>
-        </button>
-      `;
-    }).join("");
-    $("#batch_list").html(cards);
   }
 
   function renderBatchSummary(batch) {
     const counts = batch.counts || {};
     const cards = [
-      setSummaryCard("배치 ID", String(batch.batch_id || "").slice(0, 10) || "-", batch.message || ""),
-      setSummaryCard("상태", batch.status || "-", `업데이트 ${formatTimestamp(batch.updated_at)}`),
-      setSummaryCard("전체 이슈", String(counts.total || 0), (batch.selected_issue_keys || []).join(", ")),
-      setSummaryCard("완료", String(counts.completed || 0), `실패 ${counts.failed || 0}`),
-      setSummaryCard("추가 확인", String(counts.needs_input || 0), `대기 ${counts.queued || 0}`),
-      setSummaryCard("활성 탭", batch.active_run_id || "-", batch.suggested_active_run_id ? `추천 ${batch.suggested_active_run_id}` : ""),
+      setSummaryCard("배치 ID", String(batch.batch_id || "").slice(0, 10) || "-"),
+      setSummaryCard("상태", batch.status || "-"),
+      setSummaryCard("전체 이슈", `${counts.total || 0}건`),
+      setSummaryCard("진행 중", `${(counts.queued || 0) + (counts.running || 0)}건`),
+      setSummaryCard("추가 확인", `${counts.needs_input || 0}건`),
+      setSummaryCard("완료", `${counts.completed || 0}건`),
+      setSummaryCard("실패", `${counts.failed || 0}건`),
     ].join("");
     $("#batch_summary_cards").html(cards);
+  }
+
+  function preferredDetailTab(batch) {
+    if (!batch || !batch.batch_id) {
+      return DETAIL_TABS[0].id;
+    }
+    const stored = safeStorageGet(batchDetailStorageKey(batch.batch_id));
+    if (stored && DETAIL_TABS.some((item) => item.id === stored)) {
+      return stored;
+    }
+    return DETAIL_TABS[0].id;
+  }
+
+  function setActiveDetailTab(batchId, detailTab) {
+    const normalized = DETAIL_TABS.some((item) => item.id === detailTab) ? detailTab : DETAIL_TABS[0].id;
+    batchWorkspaceState.activeDetailTab = normalized;
+    if (batchId) {
+      safeStorageSet(batchDetailStorageKey(batchId), normalized);
+    }
   }
 
   function preferredRunId(batch) {
@@ -340,27 +411,54 @@
     return failedRuns.length ? failedRuns : runs;
   }
 
+  function activeFlowRuns(batch) {
+    return (batch.runs || []).filter((run) => ["queued", "running", "needs_input"].includes(String(run.status || "").trim()));
+  }
+
   function renderRunTabs(batch, activeRunId) {
     const runs = visibleRuns(batch);
     const tabs = runs.map((run) => {
       const isActive = String(run.run_id) === String(activeRunId);
-      const queueText = run.queue_state === "queued" && run.queue_position ? `큐 ${run.queue_position}` : (run.queue_state || "");
+      const title = String(run.issue_summary || run.tab_label || run.issue_key || run.run_id || "").trim();
       return `
         <button
           type="button"
-          class="workspace-tab ${isActive ? "is-active" : ""}"
+          class="workspace-tab workspace-tab--run ${isActive ? "is-active" : ""}"
           role="tab"
           aria-selected="${isActive ? "true" : "false"}"
           data-run-id="${escapeHtml(run.run_id)}"
         >
           <span class="workspace-tab__meta">
-            <strong>${escapeHtml(run.tab_label || run.issue_key || run.run_id)}</strong>
-            <small>${escapeHtml(queueText || run.status || "")}</small>
+            <span class="workspace-tab__eyebrow">${escapeHtml(run.issue_key || "Issue")}</span>
+            <strong>${escapeHtml(title || run.run_id)}</strong>
           </span>
         </button>
       `;
     }).join("");
     $("#batch_run_tabs").html(tabs || '<p class="batch-list__empty">표시할 실행 탭이 없다.</p>');
+  }
+
+  function renderDetailTabs(activeDetailTab) {
+    const tabs = DETAIL_TABS.map((item) => {
+      const isActive = item.id === activeDetailTab;
+      return `
+        <button
+          type="button"
+          class="workspace-tab workspace-tab--detail ${isActive ? "is-active" : ""}"
+          role="tab"
+          aria-selected="${isActive ? "true" : "false"}"
+          data-detail-tab="${escapeHtml(item.id)}"
+        >
+          <span class="workspace-tab__meta">
+            <strong>${escapeHtml(item.label)}</strong>
+          </span>
+        </button>
+      `;
+    }).join("");
+    $("#batch_detail_tabs").html(tabs);
+    DETAIL_TABS.forEach((item) => {
+      $(`[data-detail-panel="${item.id}"]`).prop("hidden", item.id !== activeDetailTab);
+    });
   }
 
   function runPayload(run) {
@@ -379,6 +477,126 @@
     $("#batch_run_meta").html(items);
   }
 
+  function flowStatusLabel(run, payload, latestEvent) {
+    const status = String(run.status || payload.status || "").trim();
+    if (status === "needs_input") {
+      return "추가 확인 답변을 기다린다.";
+    }
+    if (status === "failed" || status === "partially_completed") {
+      return run.message || payload.message || "실패 또는 부분 완료 상태다.";
+    }
+    if (latestEvent && latestEvent.message) {
+      return latestEvent.message;
+    }
+    if (status === "completed") {
+      return "배치 작업이 완료됐다.";
+    }
+    if (status === "running") {
+      return "현재 단계를 계속 진행 중이다.";
+    }
+    if (run.queue_state === "queued") {
+      return run.queue_position ? `큐에서 ${run.queue_position}번째 순서를 기다린다.` : "큐 대기 상태다.";
+    }
+    return run.message || payload.message || "대기 중이다.";
+  }
+
+  function resolveFlowState(run, payload) {
+    const latestEvent = typeof latestWorkflowEvent === "function" ? latestWorkflowEvent(run) : null;
+    const phase = String((latestEvent && latestEvent.phase) || "").trim();
+    const status = String(run.status || payload.status || "").trim();
+    let activeStepId = "queued";
+
+    if (status === "needs_input") {
+      activeStepId = "review";
+    } else if (["completed", "failed", "partially_completed"].includes(status)) {
+      activeStepId = "done";
+    } else if (["syntax_start", "syntax_end", "stage_changes", "stage_ready", "commit_start", "commit_end"].includes(phase)) {
+      activeStepId = "review";
+    } else if (phase.startsWith("codex") || status === "running") {
+      activeStepId = "execute";
+    } else if (["branch_prepare", "branch_ready"].includes(phase) || run.queue_state === "running") {
+      activeStepId = "prepare";
+    }
+
+    const activeIndex = FLOW_STEPS.findIndex((step) => step.id === activeStepId);
+    const completedRun = status === "completed";
+    const failedRun = status === "failed" || status === "partially_completed";
+    const steps = FLOW_STEPS.map((step, index) => {
+      let className = "";
+      if (completedRun) {
+        className = "is-complete";
+      } else if (failedRun) {
+        if (index < activeIndex) {
+          className = "is-complete";
+        } else if (index === activeIndex) {
+          className = "is-failed";
+        }
+      } else if (index < activeIndex) {
+        className = "is-complete";
+      } else if (index === activeIndex) {
+        className = "is-active";
+      }
+      return { ...step, className };
+    });
+
+    return {
+      failedRun,
+      message: flowStatusLabel(run, payload, latestEvent),
+      steps,
+    };
+  }
+
+  function renderBatchFlowBoard(batch, activeRunId) {
+    const runs = activeFlowRuns(batch);
+    if (!runs.length) {
+      $("#batch_flow_panel").prop("hidden", true);
+      $("#batch_flow_board").empty();
+      $("#batch_flow_caption").text("");
+      return;
+    }
+    $("#batch_flow_panel").prop("hidden", false);
+
+    const counts = {
+      running: runs.filter((run) => String(run.status || "").trim() === "running").length,
+      needsInput: runs.filter((run) => String(run.status || "").trim() === "needs_input").length,
+      queued: runs.filter((run) => String(run.status || "").trim() === "queued").length,
+    };
+    $("#batch_flow_caption").text(
+      `실행 ${counts.running}건 / 대기 ${counts.queued}건 / 확인 ${counts.needsInput}건`
+    );
+
+    const rows = runs.map((run) => {
+      const payload = runPayload(run);
+      const flow = resolveFlowState(run, payload);
+      const isActive = String(run.run_id) === String(activeRunId);
+      const track = flow.steps.map((step) => `
+        <div class="batch-flow-step ${step.className}">
+          <span class="batch-flow-step__dot" aria-hidden="true"></span>
+          <span class="batch-flow-step__label">${escapeHtml(step.label)}</span>
+        </div>
+      `).join("");
+      const title = String(run.issue_summary || run.tab_label || run.issue_key || run.run_id || "").trim();
+      return `
+        <article class="batch-flow-row ${isActive ? "is-active" : ""} ${flow.failedRun ? "is-failed" : ""}">
+          <div class="batch-flow-row__header">
+            <div class="batch-flow-row__title">
+              <strong>${escapeHtml(title || run.run_id)}</strong>
+              <span>${escapeHtml(run.issue_key || "")}</span>
+            </div>
+            <div class="batch-flow-row__badges">
+              ${statusBadge(run.status)}
+              ${queueMetaBadge(run)}
+            </div>
+          </div>
+          <div class="batch-flow-track">${track}</div>
+          <p class="batch-flow-row__message">${escapeHtml(flow.message)}</p>
+        </article>
+      `;
+    }).join("");
+
+    $("#batch_flow_board").html(rows);
+  }
+
   function renderRunOverview(run, payload) {
     const latestEvent = typeof latestWorkflowEvent === "function" ? latestWorkflowEvent(run) : null;
     const phaseLabels = typeof WORKFLOW_PHASE_LABELS === "object" ? WORKFLOW_PHASE_LABELS : {};
@@ -392,7 +610,7 @@
       setSummaryCard("브랜치", payload.branch_name || "-", payload.current_branch ? `현재 브랜치 ${payload.current_branch}` : ""),
       setSummaryCard("커밋", payload.commit_sha || "-", payload.commit_message || ""),
       setSummaryCard("문법 검사", syntaxReturncode == null ? "-" : String(syntaxReturncode), syntaxFiles.length ? `대상 파일 ${syntaxFiles.length}개` : (payload.test_command || "")),
-      setSummaryCard("업데이트", formatTimestamp(run.updated_at || run.finished_at || run.started_at || run.created_at), run.run_id || ""),
+      setSummaryCard("업데이트", formatTimestamp(run.updated_at || run.finished_at || run.started_at || run.created_at)),
     ].join("");
     $("#batch_run_overview").html(cards);
   }
@@ -413,7 +631,11 @@
     const clarification = run.clarification || {};
     const requested = clarification.requested_information || [];
     const answers = clarification.answers || {};
+    const batchId = batchWorkspaceState.activeBatchId;
+    const runId = String(run.run_id || "").trim();
+    const draftAnswers = currentClarificationDrafts(batchId, runId);
     const editable = String(run.status || "").trim() === "needs_input" && requested.length > 0;
+    const focusState = clarificationFocusState();
 
     renderText(
       "#batch_run_clarification_summary",
@@ -423,7 +645,9 @@
 
     if (requested.length) {
       const questionItems = requested.map((item) => {
-        const answer = String(answers[item.field] || "").trim();
+        const answer = Object.prototype.hasOwnProperty.call(draftAnswers, item.field)
+          ? String(draftAnswers[item.field] || "")
+          : String(answers[item.field] || "");
         return `
           <label class="clarification-question">
             <span class="clarification-question__label">${escapeHtml(item.label || item.field)}</span>
@@ -463,6 +687,9 @@
 
     $("#batch_run_clarification_actions").prop("hidden", !editable);
     $("#submit_batch_run_answers").data("runId", run.run_id);
+    if (editable) {
+      restoreClarificationFocus(focusState);
+    }
   }
 
   function renderRunSync(run, payload) {
@@ -472,8 +699,9 @@
     }
   }
 
-  function renderRunDetail(run) {
+  function renderRunDetail(run, activeDetailTab) {
     const payload = runPayload(run);
+    renderDetailTabs(activeDetailTab);
     renderRunMeta(run, payload);
     renderRunOverview(run, payload);
     renderText("#batch_run_intent", payload.model_intent, "실행 후 표시한다.");
@@ -508,23 +736,35 @@
       ? preferredRunId(batch)
       : (preferredRunId(batch) || (runs[0] && runs[0].run_id));
     const activeRun = runs.find((run) => String(run.run_id) === String(activeRunId)) || runs[0] || null;
+    const activeDetailTab = preferredDetailTab(batch);
 
     if (!activeRun) {
       $("#batch_run_tabs").html('<p class="batch-list__empty">표시할 실행 탭이 없다.</p>');
+      $("#batch_detail_tabs").empty();
       $("#batch_run_meta").empty();
+      $("#batch_flow_panel").prop("hidden", true);
+      $("#batch_flow_board").empty();
+      $("#batch_flow_caption").text("");
       return;
     }
 
     setActiveRun(batch.batch_id, activeRun.run_id);
+    setActiveDetailTab(batch.batch_id, activeDetailTab);
     renderRunTabs(batch, activeRun.run_id);
-    renderRunDetail(activeRun);
+    renderBatchFlowBoard(batch, activeRun.run_id);
+    renderRunDetail(activeRun, activeDetailTab);
   }
 
   function clearActiveBatchView() {
     batchWorkspaceState.activeBatch = null;
     batchWorkspaceState.activeBatchId = null;
+    batchWorkspaceState.activeDetailTab = DETAIL_TABS[0].id;
     $("#work_status_empty").prop("hidden", false);
     $("#work_status_content").prop("hidden", true);
+    $("#batch_flow_panel").prop("hidden", true);
+    $("#batch_flow_board").empty();
+    $("#batch_flow_caption").text("");
+    $("#batch_detail_tabs").empty();
   }
 
   function loadBatch(batchId, options) {
@@ -539,8 +779,15 @@
           clearActiveBatchView();
           return;
         }
-        renderActiveBatch(data, options);
-        if (!options || !options.silentListRefresh) {
+        const freezeClarificationRender = clarificationEditorFocused();
+        if (freezeClarificationRender) {
+          batchWorkspaceState.activeBatch = data;
+          batchWorkspaceState.activeBatchId = data.batch_id;
+          safeStorageSet(STORAGE_KEYS.activeBatchId, data.batch_id);
+        } else {
+          renderActiveBatch(data, options);
+        }
+        if ((!options || !options.silentListRefresh) && !freezeClarificationRender) {
           loadRecentBatches(batchId, true);
         }
         if (currentBatchShouldPoll(data)) {
@@ -575,7 +822,7 @@
     $.getJSON("/api/workflow/batches?limit=12")
       .done((data) => {
         const batches = data.batches || [];
-        renderBatchList(batches);
+        batchWorkspaceState.recentBatches = batches;
         if (!batches.length) {
           $("#work_status_section").prop("hidden", true);
           clearActiveBatchView();
@@ -625,10 +872,10 @@
       data: JSON.stringify({ clarification_answers: answers }),
     })
       .done((data) => {
+        clearClarificationDrafts(batch.batch_id, runId);
         setResult("#workflow_result", data);
         if (data.batch) {
           renderActiveBatch(data.batch, { preserveSelection: true });
-          renderBatchList(batchWorkspaceState.recentBatches);
         } else {
           loadBatch(batch.batch_id, { preserveSelection: true });
         }
@@ -731,15 +978,6 @@
       scheduleBatchPreview();
     });
 
-    $(document).on("click", "[data-batch-id]", function () {
-      const batchId = String($(this).attr("data-batch-id") || "").trim();
-      if (!batchId) {
-        return;
-      }
-      loadBatch(batchId, { preserveSelection: true });
-      loadRecentBatches(batchId, true);
-    });
-
     $(document).on("click", "[data-run-id]", function () {
       const batch = batchWorkspaceState.activeBatch;
       const runId = String($(this).attr("data-run-id") || "").trim();
@@ -748,6 +986,26 @@
       }
       setActiveRun(batch.batch_id, runId);
       renderActiveBatch(batch, { preserveSelection: true });
+    });
+
+    $(document).on("click", "[data-detail-tab]", function () {
+      const batch = batchWorkspaceState.activeBatch;
+      const detailTab = String($(this).attr("data-detail-tab") || "").trim();
+      if (!batch || !detailTab) {
+        return;
+      }
+      setActiveDetailTab(batch.batch_id, detailTab);
+      renderActiveBatch(batch, { preserveSelection: true });
+    });
+
+    $(document).on("input", "[data-batch-clarification-answer]", function () {
+      const batchId = batchWorkspaceState.activeBatchId;
+      const runId = String($("#submit_batch_run_answers").data("runId") || "").trim();
+      const field = String($(this).attr("data-batch-clarification-answer") || "").trim();
+      if (!batchId || !runId || !field) {
+        return;
+      }
+      setClarificationDraftValue(batchId, runId, field, String($(this).val() || ""));
     });
 
     $("#clear_issue_selection").on("click", function () {

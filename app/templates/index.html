@@ -33,45 +33,83 @@
 
       <section class="config-sticky-group">
         <p class="config-group-kicker">공통 정보</p>
-        <div class="grid">
-          <label>Jira Base URL<input id="jira_base_url" type="text" placeholder="https://your-domain.atlassian.net"></label>
-          <label>Jira Email<input id="jira_email" type="email" placeholder="user@example.com"></label>
-          <label>Jira API Token<input id="jira_api_token" type="password" placeholder="Jira API Token"></label>
-          <label>JQL<input id="jira_jql" type="text" placeholder="assignee = currentUser() AND status in (Backlog, 'To Do')"></label>
-          <label>GitHub Owner<input id="github_owner" type="text" placeholder="org-or-user"></label>
-          <label>GitHub Repo<input id="github_repo" type="text" placeholder="repository-name"></label>
-          <label>Base Branch<input id="github_base_branch" type="text" value="main"></label>
-          <label>GitHub Token<input id="github_token" type="password" placeholder="ghp_..."></label>
-          <label class="wide">Local Repo Path<input id="local_repo_path" type="text" placeholder="/workspace/your-repo"></label>
+        <div class="config-step-pills" aria-label="설정 단계">
+          <button type="button" class="config-step-pill is-active" data-config-flow-step="jira">
+            <span class="config-step-pill__index">1</span>
+            <span class="config-step-pill__text">
+              <strong>Jira 입력</strong>
+              <small>연결에 필요한 4개 값</small>
+            </span>
+          </button>
+          <button type="button" class="config-step-pill" data-config-flow-step="repo">
+            <span class="config-step-pill__index">2</span>
+            <span class="config-step-pill__text">
+              <strong>공간별 저장소 연결</strong>
+              <small>공간마다 별도 설정 필수</small>
+            </span>
+          </button>
         </div>
-        <p id="github_token_help" class="grid-note">공통 GitHub Token은 기본값이다. 공간별 저장소에 별도 Token을 입력하면 해당 저장소 작업에 우선 적용된다.</p>
 
-        <details class="config-space-panel">
-          <summary>공간별 저장소 설정</summary>
-          <div class="config-space-panel__body">
-            <label class="wide repo-mapping-panel-host">
-              공간별 저장소 연결
-              <textarea id="repo_mappings" rows="1" hidden></textarea>
-              <div class="repo-mapping-builder">
-                <p class="repo-mapping-help">공간마다 다른 저장소를 써야 할 때만 아래에서 연결을 추가한다.</p>
-                <div class="repo-mapping-inputs">
-                  <input id="mapping_space_key" type="text" placeholder="예: GCPPLDCAD">
-                  <input id="mapping_repo_owner" type="text" placeholder="GitHub owner">
-                  <input id="mapping_repo_name" type="text" placeholder="GitHub repo">
-                  <input id="mapping_base_branch" type="text" value="main" placeholder="기본 브랜치">
-                  <input id="mapping_local_repo_path" type="text" placeholder="로컬 저장소 경로">
-                  <input id="mapping_github_token" type="password" placeholder="공간 전용 GitHub Token (선택)">
-                </div>
-                <div class="actions">
-                  <button id="add_repo_mapping" type="button" class="secondary-button">연결 추가</button>
-                </div>
-                <div id="repo_mapping_list" class="repo-mapping-list">
-                  <p class="repo-mapping-empty">아직 추가된 공간 연결이 없다.</p>
+        <div class="config-flow">
+          <details class="config-panel config-panel--jira" data-config-panel="jira" open>
+            <summary class="config-panel__summary">
+              <div class="config-panel__track">1</div>
+              <div class="config-panel__copy">
+                <p class="config-panel__eyebrow">Jira</p>
+                <h3>Jira 연결 정보</h3>
+                <p class="grid-note">지금은 Jira 영역만 먼저 열어 4개 값을 입력한다. 입력이 채워지면 다음 단계로 자연스럽게 이어진다.</p>
+              </div>
+              <span id="jira_config_status" class="config-panel__status">4개 입력 필요</span>
+            </summary>
+            <div class="config-panel__body">
+              <div class="config-panel__body-inner">
+                <div class="grid">
+                  <label>Jira Base URL<input id="jira_base_url" type="text" placeholder="https://your-domain.atlassian.net"></label>
+                  <label>Jira Email<input id="jira_email" type="email" placeholder="user@example.com"></label>
+                  <label>Jira API Token<input id="jira_api_token" type="password" placeholder="Jira API Token"></label>
+                  <label>JQL<input id="jira_jql" type="text" placeholder="assignee = currentUser() AND status in (Backlog, 'To Do')"></label>
                 </div>
               </div>
-            </label>
-          </div>
-        </details>
+            </div>
+          </details>
+
+          <details class="config-panel config-panel--repo config-space-panel" data-config-panel="repo">
+            <summary class="config-panel__summary">
+              <div class="config-panel__track">2</div>
+              <div class="config-panel__copy">
+                <p class="config-panel__eyebrow">Repo Mapping</p>
+                <h3>공간별 저장소 연결</h3>
+                <p id="github_token_help" class="grid-note">각 Jira 공간은 저장소와 GitHub Token을 개별로 가져야 한다. 이슈의 공간 키와 일치하는 연결이 없으면 즉시 오류로 처리한다.</p>
+              </div>
+              <span id="repo_mapping_status" class="config-panel__status">공간 연결 필요</span>
+            </summary>
+            <div class="config-space-panel__body config-panel__body">
+              <div class="config-panel__body-inner">
+                <label class="wide repo-mapping-panel-host">
+                  공간별 저장소 연결
+                  <textarea id="repo_mappings" rows="1" hidden></textarea>
+                  <div class="repo-mapping-builder">
+                    <p class="repo-mapping-help">각 Jira 공간마다 아래 연결을 반드시 추가한다. 한 번에 하나씩 입력하고 목록에 쌓아 간다.</p>
+                    <div class="repo-mapping-inputs">
+                      <input id="mapping_space_key" type="text" placeholder="예: GCPPLDCAD">
+                      <input id="mapping_repo_owner" type="text" placeholder="GitHub owner">
+                      <input id="mapping_repo_name" type="text" placeholder="GitHub repo">
+                      <input id="mapping_base_branch" type="text" placeholder="기본 브랜치">
+                      <input id="mapping_local_repo_path" type="text" placeholder="로컬 저장소 경로">
+                      <input id="mapping_github_token" type="password" placeholder="공간 전용 GitHub Token">
+                    </div>
+                    <div class="actions">
+                      <button id="add_repo_mapping" type="button" class="secondary-button">연결 추가</button>
+                    </div>
+                    <div id="repo_mapping_list" class="repo-mapping-list">
+                      <p class="repo-mapping-empty">아직 추가된 공간 연결이 없다.</p>
+                    </div>
+                  </div>
+                </label>
+              </div>
+            </div>
+          </details>
+        </div>
         <pre id="config_result" class="result"></pre>
         <div id="config_result_actions" class="result-actions"></div>
       </section>
@@ -82,7 +120,6 @@
         <div class="card-header__copy">
           <p class="section-kicker">Jira</p>
           <h2>2. Jira 백로그 조회</h2>
-          <p class="card-header__note">여러 이슈를 함께 선택하면 배치 실행으로 처리한다. 선택한 이슈의 첫 번째 항목은 상세 정보 패널과 저장소 확인 기준으로 사용한다.</p>
         </div>
         <div class="card-header__actions">
           <button id="load_backlog" type="button">백로그 조회</button>
@@ -131,7 +168,6 @@
         <div class="card-header__copy">
           <p class="section-kicker">Workflow</p>
           <h2>3. Codex 배치 작업 준비와 실행</h2>
-          <p class="card-header__note">공통 지시만 입력하면 선택한 각 이슈에 대해 브랜치와 커밋 메시지를 자동으로 생성한다. 질문, 코멘트, 로그는 작업 현황 탭에서 이슈별로 확인한다.</p>
         </div>
         <div class="card-header__actions">
           <button id="check_repo" type="button">레포 상태 확인</button>
@@ -191,7 +227,6 @@
         <div class="card-header__copy">
           <p class="section-kicker">Workspace</p>
           <h2>4. 작업 현황</h2>
-          <p id="work_status_hint" class="card-header__note">배치 실행을 시작하면 최근 배치와 이슈별 작업 상태를 여기에서 추적한다.</p>
         </div>
         <div class="card-header__actions">
           <button id="refresh_batch_workspace" type="button" class="secondary-button">새로고침</button>
@@ -201,89 +236,107 @@
       </div>
 
       <div class="work-status-layout">
-        <aside class="work-status-sidebar">
-          <div class="work-status-sidebar__header">
-            <h3>최근 배치</h3>
-            <p class="grid-note">페이지를 다시 열어도 최근 배치 목록과 진행 중 상태를 복구한다.</p>
-          </div>
-          <div id="batch_list" class="batch-list">
-            <p class="batch-list__empty">실행한 배치가 아직 없다.</p>
-          </div>
-        </aside>
-
         <section class="work-status-main">
           <section id="work_status_empty" class="detail-card work-status-empty">
             <h3>활성 배치 없음</h3>
-            <p class="detail-copy">배치 실행을 시작하거나 왼쪽 목록에서 최근 배치를 선택하면 여기에서 이슈별 탭을 확인할 수 있다.</p>
+            <p class="detail-copy">배치 실행을 시작하면 여기에서 이슈별 탭을 확인할 수 있다.</p>
           </section>
 
           <div id="work_status_content" hidden>
             <div id="batch_summary_cards" class="summary-grid"></div>
-            <div id="batch_run_tabs" class="workspace-tabs" role="tablist" aria-label="이슈별 작업 현황 탭"></div>
-            <div id="batch_run_meta" class="issue-meta"></div>
-
-            <section class="detail-card">
-              <h3>실행 개요</h3>
-              <div id="batch_run_overview" class="summary-grid"></div>
-            </section>
-
-            <div class="detail-grid">
-              <section class="detail-card">
-                <h3>요청 의도</h3>
-                <p id="batch_run_intent" class="detail-copy">실행 후 표시한다.</p>
-              </section>
-              <section class="detail-card">
-                <h3>구현 요약</h3>
-                <p id="batch_run_implementation" class="detail-copy">실행 후 표시한다.</p>
-              </section>
-              <section class="detail-card">
-                <h3>검증 요약</h3>
-                <p id="batch_run_validation" class="detail-copy">실행 후 표시한다.</p>
-              </section>
-              <section class="detail-card">
-                <h3>잔여 리스크</h3>
-                <ul id="batch_run_risks" class="file-list"></ul>
-              </section>
-            </div>
-
-            <section class="detail-card">
-              <h3>질문과 답변</h3>
-              <p id="batch_run_clarification_summary" class="detail-copy">추가 확인이 필요한 경우 이슈 탭 안에서 질문과 답변을 처리한다.</p>
-              <div id="batch_run_clarification_questions" class="clarification-question-list"></div>
-              <div id="batch_run_clarification_answers" class="clarification-answer-list"></div>
-              <div id="batch_run_clarification_actions" class="actions" hidden>
-                <button id="submit_batch_run_answers" type="button" class="primary-button">답변 반영 후 실행 계속</button>
+            <section id="batch_flow_panel" class="detail-card work-flow-panel">
+              <div class="work-flow-panel__header">
+                <div>
+                  <h3>진행 플로우</h3>
+                </div>
+                <p id="batch_flow_caption" class="work-flow-panel__caption">배치를 선택하면 전체 진행 흐름을 표시한다.</p>
+              </div>
+              <div id="batch_flow_board" class="batch-flow-board">
+                <p class="batch-preview-empty">배치를 선택하면 각 일감의 현재 위치를 플로우차트로 표시한다.</p>
               </div>
             </section>
 
-            <section id="batch_run_sync_status_card" class="detail-card sync-status-panel" hidden>
-              <div class="sync-status-panel__header">
-                <h3>Jira 코멘트</h3>
-                <p>사전 질문과 사용자 답변이 Jira 이슈 코멘트에 남았는지 확인한다.</p>
+            <div id="batch_run_tabs" class="workspace-tabs workspace-tabs--runs" role="tablist" aria-label="작업 탭"></div>
+
+            <section class="work-run-shell">
+              <div class="work-run-shell__header">
+                <div id="batch_run_meta" class="issue-meta"></div>
+                <div id="batch_detail_tabs" class="workspace-tabs workspace-tabs--detail" role="tablist" aria-label="작업 상세 탭"></div>
               </div>
-              <div id="batch_run_sync_status_list" class="sync-status-list"></div>
-            </section>
 
-            <section class="detail-card">
-              <h3>처리 파일</h3>
-              <ul id="batch_run_files" class="file-list"></ul>
-            </section>
-
-            <section class="detail-card">
-              <h3>Diff</h3>
-              <pre id="batch_run_diff" class="result result-tall"></pre>
-            </section>
-
-            <div class="detail-grid">
-              <section class="detail-card">
-                <h3>문법 검사 출력</h3>
-                <pre id="batch_run_test_output" class="result"></pre>
+              <section id="batch_detail_panel_overview" class="workspace-detail-panel" data-detail-panel="overview">
+                <section class="detail-card">
+                  <h3>실행 개요</h3>
+                  <div id="batch_run_overview" class="summary-grid"></div>
+                </section>
               </section>
-              <section class="detail-card">
-                <h3>실행 로그</h3>
-                <pre id="batch_run_log" class="result result-scroll"></pre>
+
+              <section id="batch_detail_panel_summary" class="workspace-detail-panel" data-detail-panel="summary" hidden>
+                <div class="detail-grid">
+                  <section class="detail-card">
+                    <h3>요청 의도</h3>
+                    <p id="batch_run_intent" class="detail-copy">실행 후 표시한다.</p>
+                  </section>
+                  <section class="detail-card">
+                    <h3>구현 요약</h3>
+                    <p id="batch_run_implementation" class="detail-copy">실행 후 표시한다.</p>
+                  </section>
+                  <section class="detail-card">
+                    <h3>검증 요약</h3>
+                    <p id="batch_run_validation" class="detail-copy">실행 후 표시한다.</p>
+                  </section>
+                  <section class="detail-card">
+                    <h3>잔여 리스크</h3>
+                    <ul id="batch_run_risks" class="file-list"></ul>
+                  </section>
+                </div>
               </section>
-            </div>
+
+              <section id="batch_detail_panel_clarification" class="workspace-detail-panel" data-detail-panel="clarification" hidden>
+                <section class="detail-card">
+                  <h3>질문과 답변</h3>
+                  <p id="batch_run_clarification_summary" class="detail-copy">추가 확인이 필요한 경우 이슈 탭 안에서 질문과 답변을 처리한다.</p>
+                  <div id="batch_run_clarification_questions" class="clarification-question-list"></div>
+                  <div id="batch_run_clarification_answers" class="clarification-answer-list"></div>
+                  <div id="batch_run_clarification_actions" class="actions" hidden>
+                    <button id="submit_batch_run_answers" type="button" class="primary-button">답변 반영 후 실행 계속</button>
+                  </div>
+                </section>
+
+                <section id="batch_run_sync_status_card" class="detail-card sync-status-panel" hidden>
+                  <div class="sync-status-panel__header">
+                    <h3>Jira 코멘트</h3>
+                    <p>사전 질문과 사용자 답변이 Jira 이슈 코멘트에 남았는지 확인한다.</p>
+                  </div>
+                  <div id="batch_run_sync_status_list" class="sync-status-list"></div>
+                </section>
+              </section>
+
+              <section id="batch_detail_panel_artifacts" class="workspace-detail-panel" data-detail-panel="artifacts" hidden>
+                <section class="detail-card">
+                  <h3>처리 파일</h3>
+                  <ul id="batch_run_files" class="file-list"></ul>
+                </section>
+
+                <section class="detail-card">
+                  <h3>Diff</h3>
+                  <pre id="batch_run_diff" class="result result-tall"></pre>
+                </section>
+              </section>
+
+              <section id="batch_detail_panel_logs" class="workspace-detail-panel" data-detail-panel="logs" hidden>
+                <div class="detail-grid">
+                  <section class="detail-card">
+                    <h3>문법 검사 출력</h3>
+                    <pre id="batch_run_test_output" class="result"></pre>
+                  </section>
+                  <section class="detail-card">
+                    <h3>실행 로그</h3>
+                    <pre id="batch_run_log" class="result result-scroll"></pre>
+                  </section>
+                </div>
+              </section>
+            </section>
           </div>
         </section>
       </div>
@@ -295,9 +348,7 @@
     <section class="guide-modal" role="dialog" aria-modal="true" aria-labelledby="guide_modal_title">
       <div class="guide-modal__header">
         <div>
-          <p class="eyebrow">Guided Setup</p>
           <h2 id="guide_modal_title">설정 수집 가이드</h2>
-          <p id="guide_modal_summary" class="guide-modal__summary">Jira, GitHub, 로컬 저장소, 자동화 입력 정보를 어디에서 확인하는지 단계별로 안내한다.</p>
         </div>
         <button id="close_setup_guide" type="button" class="ghost-button">닫기</button>
       </div>
