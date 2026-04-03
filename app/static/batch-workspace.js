@@ -540,6 +540,7 @@
     });
 
     return {
+      activeStepId,
       failedRun,
       message: flowStatusLabel(run, payload, latestEvent),
       steps,
@@ -569,6 +570,8 @@
       const payload = runPayload(run);
       const flow = resolveFlowState(run, payload);
       const isActive = String(run.run_id) === String(activeRunId);
+      const normalizedStatus = String(run.status || "").trim().replace(/_/g, "-") || "idle";
+      const isProcessing = ["queued", "running", "needs_input"].includes(String(run.status || "").trim());
       const track = flow.steps.map((step) => `
         <div class="batch-flow-step ${step.className}">
           <span class="batch-flow-step__dot" aria-hidden="true"></span>
@@ -577,7 +580,7 @@
       `).join("");
       const title = String(run.issue_summary || run.tab_label || run.issue_key || run.run_id || "").trim();
       return `
-        <article class="batch-flow-row ${isActive ? "is-active" : ""} ${flow.failedRun ? "is-failed" : ""}">
+        <article class="batch-flow-row ${isActive ? "is-active" : ""} ${flow.failedRun ? "is-failed" : ""} is-status-${escapeHtml(normalizedStatus)} ${isProcessing ? "is-processing" : ""}" data-flow-state="${escapeHtml(flow.activeStepId)}">
           <div class="batch-flow-row__header">
             <div class="batch-flow-row__title">
               <strong>${escapeHtml(title || run.run_id)}</strong>
@@ -634,8 +637,36 @@
     const batchId = batchWorkspaceState.activeBatchId;
     const runId = String(run.run_id || "").trim();
     const draftAnswers = currentClarificationDrafts(batchId, runId);
+    const hasAnswers = Object.keys(answers).length > 0;
     const editable = String(run.status || "").trim() === "needs_input" && requested.length > 0;
     const focusState = clarificationFocusState();
+    const normalizedStatus = String(run.status || "").trim();
+
+    let stateVariant = "is-idle";
+    let stateTitle = "추가 질문 없음";
+    let stateMessage = "현재 배치에서 추가 입력이 필요한 질문이 없다.";
+    if (editable && hasAnswers) {
+      stateVariant = "is-followup";
+      stateTitle = "추가 질문 도착";
+      stateMessage = "이전에 제출한 답변은 잠금 상태이며, 아래 새 질문에만 추가로 답변할 수 있다.";
+    } else if (editable) {
+      stateVariant = "is-pending";
+      stateTitle = "답변 대기 중";
+      stateMessage = "답변을 제출하면 이번 배치에서는 추가 질문이 다시 생기지 않는 한 수정할 수 없다.";
+    } else if (hasAnswers) {
+      stateVariant = "is-locked";
+      stateTitle = "답변 제출 완료";
+      stateMessage = ["queued", "running"].includes(normalizedStatus)
+        ? "제출한 답변이 현재 배치에 반영되어 다시 진행 중이다. 새로운 질문이 없는 한 수정할 수 없다."
+        : "제출한 답변이 현재 배치에 반영됐다. 이번 배치에서는 새로운 질문이 없는 한 수정할 수 없다.";
+    }
+
+    $("#batch_run_clarification_state").html(`
+      <div class="clarification-state-banner__body ${stateVariant}">
+        <strong>${escapeHtml(stateTitle)}</strong>
+        <p>${escapeHtml(stateMessage)}</p>
+      </div>
+    `);
 
     renderText(
       "#batch_run_clarification_summary",
@@ -649,8 +680,11 @@
           ? String(draftAnswers[item.field] || "")
           : String(answers[item.field] || "");
         return `
-          <label class="clarification-question">
-            <span class="clarification-question__label">${escapeHtml(item.label || item.field)}</span>
+          <${editable ? "label" : "article"} class="clarification-question ${editable ? "" : "clarification-question--locked"}">
+            <div class="clarification-question__header">
+              <span class="clarification-question__label">${escapeHtml(item.label || item.field)}</span>
+              ${editable ? "" : '<span class="clarification-lock-badge">수정 잠금</span>'}
+            </div>
             <strong class="clarification-question__prompt">${escapeHtml(item.question || "")}</strong>
             <small class="clarification-question__reason">${escapeHtml(item.why || "")}</small>
             ${editable ? `
@@ -660,20 +694,20 @@
                 placeholder="${escapeHtml(item.placeholder || "답변을 입력하세요.")}"
               >${escapeHtml(answer)}</textarea>
             ` : `
-              <div class="clarification-answer-item">
-                <strong>${escapeHtml(item.label || item.field)}</strong>
+              <div class="clarification-answer-item clarification-answer-item--submitted">
+                <strong>제출한 답변</strong>
                 <p>${escapeHtml(answer || "답변 없음")}</p>
               </div>
             `}
-          </label>
+          </${editable ? "label" : "article"}>
         `;
       }).join("");
       $("#batch_run_clarification_questions").html(questionItems);
     } else {
-      $("#batch_run_clarification_questions").html('<p class="batch-preview-empty">추가 질문이 없다.</p>');
+      $("#batch_run_clarification_questions").html(`<p class="batch-preview-empty">${escapeHtml(hasAnswers ? "추가 질문은 없으며, 아래 제출 답변이 현재 배치에 반영되어 있다." : "추가 질문이 없다.")}</p>`);
     }
 
-    if (!editable && Object.keys(answers).length) {
+    if (hasAnswers) {
       const answerItems = Object.entries(answers).map(([field, answer]) => `
         <article class="clarification-answer-item">
           <strong>${escapeHtml(field)}</strong>

@@ -131,6 +131,7 @@ def test_index_page_renders_automation_fields() -> None:
     assert 'data-detail-panel="clarification"' in html
     assert 'data-detail-panel="artifacts"' in html
     assert 'data-detail-panel="logs"' in html
+    assert 'id="batch_run_clarification_state"' in html
     assert 'id="batch_run_diff"' in html
     assert 'id="batch_run_sync_status_card"' in html
     assert 'id="submit_batch_run_answers"' in html

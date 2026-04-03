@@ -683,7 +683,14 @@ def _atomic_write_json(target_path: Path, payload: dict[str, Any], *, lock: thre
     with lock:
         try:
             temp_path.write_text(serialized, encoding="utf-8")
-            temp_path.replace(target_path)
+            for attempt in range(6):
+                try:
+                    temp_path.replace(target_path)
+                    break
+                except PermissionError:
+                    if attempt == 5:
+                        raise
+                    time.sleep(0.01 * (attempt + 1))
         finally:
             try:
                 if temp_path.exists():
