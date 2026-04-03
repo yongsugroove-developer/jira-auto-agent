@@ -250,6 +250,55 @@ def test_agentation_frontend_config_normalizes_localhost(monkeypatch) -> None:
     assert config["endpoint"] == "http://127.0.0.1:4747"
 
 
+def test_find_codex_launcher_prefers_code_cli_path(monkeypatch, tmp_path) -> None:
+    configured_cmd = tmp_path / "codex.cmd"
+    configured_cmd.write_text("@echo off\r\n", encoding="utf-8")
+
+    monkeypatch.setenv("CODEX_CLI_PATH", str(configured_cmd))
+    monkeypatch.setattr(main_module, "REPO_LOCAL_CODEX_JS", tmp_path / "missing.js")
+    monkeypatch.setattr(main_module, "REPO_LOCAL_CODEX_CMD", tmp_path / "missing.cmd")
+    monkeypatch.setattr(main_module, "REPO_LOCAL_CODEX_BIN", tmp_path / "missing")
+    monkeypatch.setattr(main_module.shutil, "which", lambda name: None)
+
+    launcher = main_module._find_codex_launcher()
+
+    assert launcher == ["cmd.exe", "/d", "/c", str(configured_cmd)]
+
+
+def test_find_codex_launcher_prefers_repo_local_install(monkeypatch, tmp_path) -> None:
+    repo_local_js = tmp_path / ".tools" / "codex" / "node_modules" / "@openai" / "codex" / "bin" / "codex.js"
+    repo_local_js.parent.mkdir(parents=True, exist_ok=True)
+    repo_local_js.write_text("console.log('codex');\n", encoding="utf-8")
+
+    monkeypatch.delenv("CODEX_CLI_PATH", raising=False)
+    monkeypatch.setattr(main_module, "REPO_LOCAL_CODEX_JS", repo_local_js)
+    monkeypatch.setattr(main_module, "REPO_LOCAL_CODEX_CMD", tmp_path / "missing.cmd")
+    monkeypatch.setattr(main_module, "REPO_LOCAL_CODEX_BIN", tmp_path / "missing")
+    monkeypatch.setenv("APPDATA", str(tmp_path / "appdata"))
+    monkeypatch.setattr(
+        main_module.shutil,
+        "which",
+        lambda name: "C:\\Program Files\\nodejs\\node.exe" if name == "node" else None,
+    )
+
+    launcher = main_module._find_codex_launcher()
+
+    assert launcher == ["C:\\Program Files\\nodejs\\node.exe", str(repo_local_js)]
+
+
+def test_windows_packaging_scripts_exist_with_phase1_defaults() -> None:
+    bootstrap = Path("scripts/bootstrap-dev.ps1").read_text(encoding="utf-8")
+    check_env = Path("scripts/check-env.ps1").read_text(encoding="utf-8")
+    run_dev = Path("scripts/run-dev.ps1").read_text(encoding="utf-8")
+    freeze = Path("scripts/freeze-phase1.ps1").read_text(encoding="utf-8")
+
+    assert '$PinnedCodexVersion = "0.104.0"' in bootstrap
+    assert '@openai/codex@$PinnedCodexVersion' in bootstrap
+    assert 'CODEX_CLI_PATH' in check_env
+    assert 'AGENTATION_ENABLED = "0"' in run_dev
+    assert 'phase-1-freeze' in freeze
+
+
 def test_mock_jira_issue_detail_returns_description_and_comments() -> None:
     app = create_app()
     client = app.test_client()

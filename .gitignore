@@ -1,9 +1,12 @@
 __pycache__/
 *.pyc
 .venv/
+.pytest-tmp/
 frontend/node_modules/
+.tools/
 data/app.db
 data/.enc_key
+data/workflow-batches/
 data/workflow-runs/
 data/project-memory/
 docs/project-overview.md

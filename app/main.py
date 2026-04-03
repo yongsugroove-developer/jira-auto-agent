@@ -71,6 +71,11 @@ AGENTATION_CSS_BUNDLE = AGENTATION_STATIC_DIR / "agentation-panel.css"
 AGENTATION_LOCAL_ENDPOINT = "http://127.0.0.1:4747"
 AGENTATION_STARTUP_TIMEOUT_SECONDS = 10
 AGENTATION_HEALTHCHECK_INTERVAL_SECONDS = 5
+REPO_LOCAL_TOOLS_DIR = BASE_DIR / ".tools"
+REPO_LOCAL_CODEX_DIR = REPO_LOCAL_TOOLS_DIR / "codex"
+REPO_LOCAL_CODEX_JS = REPO_LOCAL_CODEX_DIR / "node_modules" / "@openai" / "codex" / "bin" / "codex.js"
+REPO_LOCAL_CODEX_CMD = REPO_LOCAL_CODEX_DIR / "node_modules" / ".bin" / "codex.cmd"
+REPO_LOCAL_CODEX_BIN = REPO_LOCAL_CODEX_DIR / "node_modules" / ".bin" / "codex"
 FIELD_LABEL_OVERRIDES = {
     "repo_mappings": "공간별 저장소 연결",
     "local_repo_path": "기본 로컬 레포 경로",
@@ -2134,6 +2139,15 @@ def _commit_env(identity: dict[str, str]) -> dict[str, str]:
 
 
 def _find_codex_launcher() -> list[str]:
+    configured_path = str(os.getenv("CODEX_CLI_PATH", "")).strip()
+    if configured_path:
+        configured_launcher = _codex_launcher_from_path(Path(configured_path).expanduser(), source_name="CODEX_CLI_PATH")
+        return configured_launcher
+
+    repo_local_launcher = _repo_local_codex_launcher()
+    if repo_local_launcher:
+        return repo_local_launcher
+
     node_path = shutil.which("node")
     appdata = Path(os.getenv("APPDATA", ""))
     codex_js = appdata / "npm" / "node_modules" / "@openai" / "codex" / "bin" / "codex.js"
@@ -2149,6 +2163,34 @@ def _find_codex_launcher() -> list[str]:
         return [codex_bin]
 
     raise FileNotFoundError("Codex CLI was not found. Install @openai/codex and sign in first.")
+
+
+def _repo_local_codex_launcher() -> list[str] | None:
+    if REPO_LOCAL_CODEX_JS.exists():
+        return _codex_launcher_from_path(REPO_LOCAL_CODEX_JS, source_name="repo-local Codex CLI")
+    if os.name == "nt" and REPO_LOCAL_CODEX_CMD.exists():
+        return _codex_launcher_from_path(REPO_LOCAL_CODEX_CMD, source_name="repo-local Codex CLI")
+    if REPO_LOCAL_CODEX_BIN.exists():
+        return _codex_launcher_from_path(REPO_LOCAL_CODEX_BIN, source_name="repo-local Codex CLI")
+    return None
+
+
+def _codex_launcher_from_path(path: Path, *, source_name: str) -> list[str]:
+    resolved_path = path.expanduser()
+    if not resolved_path.exists():
+        raise FileNotFoundError(f"{source_name} path was not found: {resolved_path}")
+
+    suffix = resolved_path.suffix.lower()
+    if suffix == ".js":
+        node_path = shutil.which("node")
+        if not node_path:
+            raise FileNotFoundError(f"Node.js is required to run {source_name}: {resolved_path}")
+        return [node_path, str(resolved_path)]
+
+    if suffix == ".cmd":
+        return ["cmd.exe", "/d", "/c", str(resolved_path)]
+
+    return [str(resolved_path)]
 
 
 def _display_command(command: list[str]) -> str:
