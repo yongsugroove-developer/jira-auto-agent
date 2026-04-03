@@ -1,98 +1,90 @@
 # jira-auto-agent
 
-Jira 백로그를 기준으로 GitHub 레포지토리 작업 준비를 수행하는 Web UI PoC입니다.
+Jira 백로그 이슈를 기준으로 로컬 Git 저장소 작업을 준비하고, Codex 기반 자동 작업과 배치 실행 상태를 한 화면에서 관리하는 Flask UI PoC다.
 
-## 구현 범위 (현재)
+## 목적
 
-- Web UI에서 Jira/GitHub/로컬 레포 정보를 입력하고 필수값 검증
-- 입력 정보를 암호화해 로컬 SQLite에 저장/재사용
-- 설정 가이드 모달에서 Jira/GitHub/로컬 레포 정보를 어디서 찾는지 단계별 안내
-- Jira 백로그 조회(Mock 또는 실제 Jira API)
-- GitHub 레포/브랜치 상태 확인
-- 선택한 Jira 이슈 기준 브랜치명/커밋 메시지 템플릿 생성
-- 필요한 추가 정보 목록을 UI/응답으로 안내
+- Jira 이슈를 조회하고 여러 건을 선택한다.
+- Jira 공간 키별로 GitHub 저장소와 로컬 저장소를 연결한다.
+- Codex 작업 지시, 수용 기준, 커밋 체크리스트를 입력해 배치 작업을 실행한다.
+- 실행 중 상태, clarification 질문/답변, 산출물, 로그를 작업 현황 화면에서 추적한다.
 
-## 설정 가이드 모달
+## 주요 문서
 
-- 설정 입력 카드의 `설정 가이드 보기` 버튼으로 모달을 엽니다.
-- 가이드는 `Jira`, `GitHub`, `로컬 레포` 3개 섹션으로 나뉘며, 상단 탭과 좌측 step 목록으로 이동합니다.
-- 각 step은 왜 필요한지, 어디서 찾는지, 예시 값, 주의사항, 연결되는 입력칸을 순서대로 보여줍니다.
-- `해당 입력칸 강조` 버튼을 누르면 모달이 닫히고, 실제 입력 필드로 스크롤 이동하며 하이라이트합니다.
-- `필수값 검사` 결과에서 누락 필드가 있으면 `누락된 항목 안내 열기` 버튼으로 바로 가이드 step을 열 수 있습니다.
+- [운영 가이드](docs/operator-guide.md)
+- [Agent 작업 흐름 메모](docs/agent-workflow.md)
+- [PoC 계획 문서](docs/jira-github-commit-automation-plan.md)
 
-## 수집 가능한 정보
+## 빠른 시작
 
-- Jira: `jira_base_url`, `jira_email`, `jira_api_token`, `jira_jql`
-- GitHub: `github_owner`, `github_repo`, `github_base_branch`, `github_token`
-- 로컬 레포: `local_repo_path`
-
-## 디렉터리 구조
-
-- `app/main.py`: Flask API 및 워크플로 오케스트레이션
-- `app/templates/index.html`: Web UI 화면
-- `app/static/app.js`: jQuery 이벤트/요청 처리
-- `app/static/style.css`: UI 스타일
-- `tests/test_app.py`: API 기본 테스트
-- `docs/jira-github-commit-automation-plan.md`: PoC 계획 문서
-
-## 설치 및 실행
-
-### Windows PowerShell
+### 1. Python 의존성 설치
 
 ```powershell
 python -m venv .venv
 .venv\Scripts\Activate.ps1
 python -m pip install -r requirements.txt
+```
+
+### 2. 서버 실행
+
+```powershell
 python app/main.py
 ```
 
-### macOS / Linux
+브라우저에서 `http://localhost:5000`으로 접속한다.
 
-```bash
-python -m venv .venv
-source .venv/bin/activate
-python -m pip install -r requirements.txt
-python app/main.py
-```
+## 선택 사항: Agentation 프런트엔드 번들
 
-브라우저에서 `http://localhost:5000` 접속
-
-## 테스트
-
-```bash
-PYTHONPATH=. pytest -q
-```
-
-## 보안 참고
-
-- 자격정보는 `data/app.db`에 암호화 저장됩니다.
-- 암호화 키는 기본적으로 `data/.enc_key` 파일에 생성됩니다.
-- 운영 환경에서는 `APP_ENC_KEY` 환경변수 주입을 권장합니다.
-
-## 다음 단계
-
-- Jira 이슈 선택 후 실제 Git 브랜치 생성/체크아웃
-- diff 생성 및 승인 후 파일 반영
-- 테스트 통과 시 커밋 자동화
-
-## React Agentation 경로
-
-기존 Flask + jQuery 화면은 유지하고, 페이지 안에 React 19 기반 Agentation 패널을 부분 삽입했다.
-
-### 프런트엔드 설치
+Agentation React 패널을 함께 쓰려면 프런트엔드 번들을 한 번 빌드해야 한다.
 
 ```powershell
 cd frontend
-"C:\Program Files\nodejs\npm.cmd" install
-"C:\Program Files\nodejs\npm.cmd" run build
+npm install
+npm run build
 ```
 
-빌드가 끝나면 정적 자산이 `app/static/react` 아래에 생성되고, Flask 화면에서 자동으로 로드된다.
+빌드 결과물은 `app/static/react` 아래에 생성된다.
 
-### 환경 변수
+## 필수 환경 변수
 
-- `AGENTATION_ENDPOINT`: 기본값은 `http://localhost:4747`
-- `AGENTATION_ENABLED`: 기본값은 `1`, `0`이면 React 패널은 렌더링되지만 Agentation 툴바는 비활성화된다.
-- `AGENTATION_AUTOSTART`: 기본값은 `1`, 로컬 엔드포인트를 쓸 때 Flask 시작 시 `agentation-mcp server`를 자동으로 띄운다.
+- `APP_ENC_KEY`
+  - Jira API Token과 공간별 GitHub Token을 암호화할 때 쓰는 키다.
+  - 지정하지 않으면 `data/.enc_key`를 생성해 로컬에 저장한다.
+- `JIRA_AGENT_DEBUG`
+  - `1`, `true`, `yes`, `on` 중 하나면 Flask debug 모드로 실행한다.
 
-기본 설정에서는 `python app/main.py` 실행 시 로컬 Agentation 서버도 함께 기동된다. 이미 `4747` 포트에서 정상 서버가 떠 있으면 기존 서버를 재사용한다.
+## Agentation 관련 환경 변수
+
+- `AGENTATION_ENABLED`
+  - 기본값 `1`
+  - `0`이면 Agentation React 패널을 로드하지 않는다.
+- `AGENTATION_ENDPOINT`
+  - 기본값 `http://127.0.0.1:4747`
+- `AGENTATION_AUTOSTART`
+  - 기본값 `1`
+  - 로컬 실행 시 `agentation-mcp server` 자동 기동 여부를 제어한다.
+
+## 저장 데이터
+
+- `data/app.db`
+  - Jira 설정, 공간별 저장소 연결, 암호화된 토큰 저장
+- `data/workflow-batches`
+  - 최근 배치 상태 스냅샷
+- `data/workflow-runs`
+  - 개별 실행 로그와 결과 스냅샷
+- `data/project-memory`
+  - 공유 프로젝트 메모 런타임 산출물
+
+## 테스트
+
+```powershell
+python -m pytest -q
+```
+
+## 현재 UI 기준 참고
+
+- 설정 화면은 Jira 입력과 공간별 저장소 연결 2단계로 구성된다.
+- 공간별 GitHub Token은 저장소 연결마다 별도로 저장된다.
+- 로컬 테스트 명령 입력은 현재 UI에서 숨겨져 있다.
+- 자동 커밋은 `로컬 테스트 없이 자동 커밋 허용` 체크박스 기준으로 동작한다.
+- clarification이 필요한 실행은 작업 현황의 질문/코멘트 탭에서 답변을 제출하면 이어서 진행된다.

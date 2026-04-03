@@ -50,10 +50,11 @@ def test_setup_guide_contains_expected_sections_and_steps() -> None:
 
     data = response.get_json()
     assert data is not None
-    assert data["version"] == 3
+    assert data["version"] == 4
 
     sections = data["sections"]
     assert [section["id"] for section in sections] == ["jira", "github", "local_repo", "automation"]
+    sections_by_id = {section["id"]: section for section in sections}
 
     step_ids = {step["id"] for section in sections for step in section["steps"]}
     assert "jira-api-token" in step_ids
@@ -63,8 +64,22 @@ def test_setup_guide_contains_expected_sections_and_steps() -> None:
     assert "automation-test-command" in step_ids
     assert "automation-git-author" in step_ids
 
+    github_steps = {step["id"]: step for step in sections_by_id["github"]["steps"]}
+    assert "전역 기본 저장소" in sections_by_id["github"]["summary"]
+    assert github_steps["github-owner-repo"]["target_fields"] == ["mapping_repo_owner", "mapping_repo_name"]
+    assert github_steps["github-token"]["target_fields"] == ["mapping_github_token"]
+    assert github_steps["github-space-repo-mappings"]["target_fields"] == ["mapping_space_key", "mapping_local_repo_path"]
 
-def test_validate_config_missing_fields_include_guide_metadata() -> None:
+    automation_steps = {step["id"]: step for step in sections_by_id["automation"]["steps"]}
+    assert "숨겨져 있지만" in automation_steps["automation-test-command"]["purpose"]
+    assert automation_steps["automation-test-command"]["target_fields"] == ["allow_auto_commit", "commit_checklist"]
+
+
+def test_validate_config_missing_fields_include_guide_metadata(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(main_module, "DB_PATH", tmp_path / "app.db")
+    monkeypatch.setattr(main_module, "DATA_DIR", tmp_path)
+    monkeypatch.setenv("APP_ENC_KEY", main_module.Fernet.generate_key().decode("utf-8"))
+
     app = create_app()
     client = app.test_client()
 
@@ -94,6 +109,7 @@ def test_index_page_renders_automation_fields() -> None:
     html = response.get_data(as_text=True)
     assert 'id="open_setup_guide"' in html
     assert 'id="setup_guide_modal"' in html
+    assert 'id="repo_mapping_modal"' in html
     assert 'id="guide_tabs"' in html
     assert 'id="run_automation"' in html
     assert 'id="codex_model"' in html
@@ -107,10 +123,13 @@ def test_index_page_renders_automation_fields() -> None:
     assert 'config-space-panel' in html
     assert 'id="workflow_batch_preview_card"' in html
     assert 'id="workflow_batch_preview_list"' in html
+    assert 'id="workflow_batch_actions"' in html
     assert 'id="batch_flow_board"' in html
     assert 'id="batch_flow_caption"' in html
-    assert 'id="github_token_help"' in html
     assert 'id="mapping_github_token"' in html
+    assert 'id="test_command" type="hidden"' in html
+    assert 'id="repo_mapping_edit_form"' in html
+    assert 'id="repo_mapping_edit_toggle_token"' in html
     assert 'data-config-flow-step="jira"' in html
     assert 'data-config-flow-step="repo"' in html
     assert 'data-config-panel="jira"' in html
@@ -137,13 +156,20 @@ def test_index_page_renders_automation_fields() -> None:
     assert 'id="submit_batch_run_answers"' in html
     assert 'src="/static/batch-workspace.js"' in html
     assert 'id="work_status_hint"' not in html
+    assert "Jira, GitHub, ?? ??? ??? ???? ??? ??? ?? ? Codex ?? ?? ??, diff, ?? ??? ? ???? ????." not in html
+    assert "??? Jira ??? ?? ?? 4? ?? ????. ??? ???? ?? ??? ????? ????." not in html
+    assert "? Jira ??? ???? GitHub Token? ??? ??? ??. ??? ?? ?? ???? ??? ??? ?? ??? ????." not in html
+    assert "? Jira ???? ?? ??? ??? ????. ? ?? ??? ???? ??? ?? ??." not in html
+    assert "??? ???? ???? ?? ??? ????." not in html
+    assert "??? ?? ??? ??" not in html
     assert "Jira 연결 정보를 먼저 입력한 뒤, 이슈 공간별 저장소를 이어서 연결한다." not in html
     assert "여러 이슈를 함께 선택하면 배치 실행으로 처리한다." not in html
     assert "공통 지시만 입력하면 선택한 각 이슈에 대해 브랜치와 커밋 메시지를 자동으로 생성한다." not in html
     assert "최근 배치와 이슈별 작업 상태를 여기에서 추적한다." not in html
     assert html.index('id="load_config"') < html.index('class="config-sticky-group"')
     assert html.index('id="load_backlog"') < html.index("<table>")
-    assert html.index('id="check_repo"') < html.index('class="grid workflow-grid"')
+    assert html.index('id="workflow_batch_preview_card"') < html.index('id="workflow_batch_actions"')
+    assert html.index('id="workflow_batch_actions"') < html.index('id="workflow_result"')
     assert html.index('id="work_status_section"') > html.index('id="workflow_result_actions"')
 
 
@@ -656,6 +682,7 @@ def test_save_config_stores_space_tokens_separately_and_hides_them(monkeypatch, 
     assert save_response.status_code == 200
     save_data = save_response.get_json()
     assert save_data is not None
+    assert save_data["jira_api_token_saved"] is True
     assert save_data["repo_mapping_token_spaces"] == ["DEMO"]
     assert save_data["github_token_saved"] is False
 
@@ -671,6 +698,7 @@ def test_save_config_stores_space_tokens_separately_and_hides_them(monkeypatch, 
     assert load_response.status_code == 200
     load_data = load_response.get_json()
     assert load_data is not None
+    assert load_data["jira_api_token_saved"] is True
     assert load_data["github_token"] == ""
     assert load_data["repo_mapping_token_spaces"] == ["DEMO"]
     assert "repo_mapping_tokens" not in load_data
@@ -710,6 +738,102 @@ def test_save_config_preserves_existing_space_token_when_blank_on_reload(monkeyp
     github_payload = store.load("github")
     assert github_payload is not None
     assert github_payload["repo_mapping_tokens"] == {"DEMO": "space-token"}
+
+
+def test_save_config_preserves_existing_jira_token_when_blank_on_reload(monkeypatch, tmp_path) -> None:
+    db_path = tmp_path / "app.db"
+    monkeypatch.setattr(main_module, "DB_PATH", db_path)
+    monkeypatch.setattr(main_module, "DATA_DIR", tmp_path)
+    monkeypatch.setenv("APP_ENC_KEY", main_module.Fernet.generate_key().decode("utf-8"))
+
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+
+    app = create_app()
+    client = app.test_client()
+
+    first_save = {
+        "jira_base_url": "https://example.atlassian.net",
+        "jira_email": "tester@example.com",
+        "jira_api_token": "jira-token",
+        "jira_jql": "project = DEMO",
+        "repo_mappings": f"DEMO|team|demo-repo|main|{repo_path}",
+        "repo_mapping_tokens": {"DEMO": "space-token"},
+    }
+    second_save = {
+        **first_save,
+        "jira_api_token": "",
+        "repo_mapping_tokens": {},
+        "repo_mapping_token_clears": [],
+    }
+
+    assert client.post("/api/config/save", json=first_save).status_code == 200
+    second_response = client.post("/api/config/save", json=second_save)
+    assert second_response.status_code == 200
+
+    second_data = second_response.get_json()
+    assert second_data is not None
+    assert second_data["jira_api_token_saved"] is True
+
+    store = main_module.CredentialStore(db_path, main_module._load_encryption_key())
+    jira_payload = store.load("jira")
+    assert jira_payload is not None
+    assert jira_payload["api_token"] == "jira-token"
+
+
+def test_validate_config_uses_saved_jira_token_when_blank_on_reload(monkeypatch, tmp_path) -> None:
+    db_path = tmp_path / "app.db"
+    monkeypatch.setattr(main_module, "DB_PATH", db_path)
+    monkeypatch.setattr(main_module, "DATA_DIR", tmp_path)
+    monkeypatch.setenv("APP_ENC_KEY", main_module.Fernet.generate_key().decode("utf-8"))
+
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+
+    store = main_module.CredentialStore(db_path, main_module._load_encryption_key())
+    store.save(
+        "jira",
+        {
+            "base_url": "https://example.atlassian.net",
+            "email": "tester@example.com",
+            "api_token": "jira-token",
+            "jql": "project = DEMO",
+        },
+    )
+    store.save(
+        "github",
+        {
+            "repo_owner": "",
+            "repo_name": "",
+            "base_branch": "",
+            "token": "",
+            "repo_mappings": f"DEMO|team|demo-repo|main|{repo_path}",
+            "repo_mapping_count": 1,
+            "repo_mapping_tokens": {"DEMO": "space-token"},
+            "local_repo_path": "",
+        },
+    )
+
+    app = create_app()
+    client = app.test_client()
+    response = client.post(
+        "/api/config/validate",
+        json={
+            "jira_base_url": "https://example.atlassian.net",
+            "jira_email": "tester@example.com",
+            "jira_api_token": "",
+            "jira_jql": "project = DEMO",
+            "repo_mappings": f"DEMO|team|demo-repo|main|{repo_path}",
+            "repo_mapping_tokens": {},
+            "repo_mapping_token_clears": [],
+        },
+    )
+
+    assert response.status_code == 200
+    data = response.get_json()
+    assert data is not None
+    assert data["valid"] is True
+    assert data["missing_fields"] == []
 
 
 def test_validate_config_ignores_saved_global_token_when_space_token_is_missing(monkeypatch, tmp_path) -> None:
