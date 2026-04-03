@@ -554,7 +554,11 @@ def test_validate_config_accepts_space_tokens_without_global_token(monkeypatch, 
     assert data["missing_fields"] == []
 
 
-def test_validate_config_reports_space_token_missing_when_no_global_token(tmp_path) -> None:
+def test_validate_config_reports_space_token_missing_when_no_global_token(monkeypatch, tmp_path) -> None:
+    db_path = tmp_path / "app.db"
+    monkeypatch.setattr(main_module, "DB_PATH", db_path)
+    monkeypatch.setattr(main_module, "DATA_DIR", tmp_path)
+    monkeypatch.setenv("APP_ENC_KEY", main_module.Fernet.generate_key().decode("utf-8"))
     app = create_app()
     client = app.test_client()
 
@@ -673,6 +677,104 @@ def test_save_config_preserves_existing_space_token_when_blank_on_reload(monkeyp
     github_payload = store.load("github")
     assert github_payload is not None
     assert github_payload["repo_mapping_tokens"] == {"DEMO": "space-token"}
+
+
+def test_validate_config_accepts_blank_global_token_when_existing_token_is_saved(monkeypatch, tmp_path) -> None:
+    db_path = tmp_path / "app.db"
+    monkeypatch.setattr(main_module, "DB_PATH", db_path)
+    monkeypatch.setattr(main_module, "DATA_DIR", tmp_path)
+    monkeypatch.setenv("APP_ENC_KEY", main_module.Fernet.generate_key().decode("utf-8"))
+
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+
+    store = main_module.CredentialStore(db_path, main_module._load_encryption_key())
+    store.save(
+        "github",
+        {
+            "repo_owner": "team",
+            "repo_name": "demo-repo",
+            "base_branch": "main",
+            "token": "saved-global-token",
+            "repo_mappings": f"DEMO|team|demo-repo|main|{repo_path}",
+            "repo_mapping_count": 1,
+            "repo_mapping_tokens": {},
+            "local_repo_path": str(repo_path),
+        },
+    )
+
+    app = create_app()
+    client = app.test_client()
+    response = client.post(
+        "/api/config/validate",
+        json={
+            "jira_base_url": "https://example.atlassian.net",
+            "jira_email": "tester@example.com",
+            "jira_api_token": "jira-token",
+            "jira_jql": "project = DEMO",
+            "github_owner": "team",
+            "github_repo": "demo-repo",
+            "github_base_branch": "main",
+            "github_token": "",
+            "repo_mappings": f"DEMO|team|demo-repo|main|{repo_path}",
+            "local_repo_path": str(repo_path),
+        },
+    )
+
+    assert response.status_code == 200
+    data = response.get_json()
+    assert data is not None
+    assert data["valid"] is True
+
+
+def test_save_config_preserves_existing_global_token_when_field_is_blank(monkeypatch, tmp_path) -> None:
+    db_path = tmp_path / "app.db"
+    monkeypatch.setattr(main_module, "DB_PATH", db_path)
+    monkeypatch.setattr(main_module, "DATA_DIR", tmp_path)
+    monkeypatch.setenv("APP_ENC_KEY", main_module.Fernet.generate_key().decode("utf-8"))
+
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+
+    store = main_module.CredentialStore(db_path, main_module._load_encryption_key())
+    store.save(
+        "github",
+        {
+            "repo_owner": "team",
+            "repo_name": "demo-repo",
+            "base_branch": "main",
+            "token": "saved-global-token",
+            "repo_mappings": f"DEMO|team|demo-repo|main|{repo_path}",
+            "repo_mapping_count": 1,
+            "repo_mapping_tokens": {},
+            "local_repo_path": str(repo_path),
+        },
+    )
+
+    app = create_app()
+    client = app.test_client()
+    response = client.post(
+        "/api/config/save",
+        json={
+            "jira_base_url": "https://example.atlassian.net",
+            "jira_email": "tester@example.com",
+            "jira_api_token": "jira-token",
+            "jira_jql": "project = DEMO",
+            "github_owner": "team",
+            "github_repo": "demo-repo",
+            "github_base_branch": "main",
+            "github_token": "",
+            "repo_mappings": f"DEMO|team|demo-repo|main|{repo_path}",
+            "repo_mapping_tokens": {},
+            "repo_mapping_token_clears": [],
+            "local_repo_path": str(repo_path),
+        },
+    )
+
+    assert response.status_code == 200
+    github_payload = store.load("github")
+    assert github_payload is not None
+    assert github_payload["token"] == "saved-global-token"
 
 
 def test_github_check_requires_issue_key_when_repo_mappings_exist(monkeypatch) -> None:

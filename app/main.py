@@ -1044,6 +1044,13 @@ def _normalize_space_key_list(raw_value: Any) -> set[str]:
     return normalized
 
 
+def _effective_secret_value(payload_value: Any, existing_value: Any) -> str:
+    next_value = str(payload_value or "").strip()
+    if next_value:
+        return next_value
+    return str(existing_value or "").strip()
+
+
 def _repo_mapping_missing_token_spaces(
     payload: dict[str, Any],
     existing_github_payload: dict[str, Any] | None = None,
@@ -1053,9 +1060,10 @@ def _repo_mapping_missing_token_spaces(
         return []
 
     existing_github_payload = existing_github_payload or {}
-    global_token = str(
-        payload.get("github_token", existing_github_payload.get("token", ""))
-    ).strip()
+    global_token = _effective_secret_value(
+        payload.get("github_token", ""),
+        existing_github_payload.get("token", ""),
+    )
     if global_token:
         return []
 
@@ -1092,7 +1100,10 @@ def _required_config_fields(
             missing.append("repo_mappings")
         return missing
 
-    github_token = str(payload.get("github_token", (existing_github_payload or {}).get("token", ""))).strip()
+    github_token = _effective_secret_value(
+        payload.get("github_token", ""),
+        (existing_github_payload or {}).get("token", ""),
+    )
     if not github_token:
         missing.append("github_token")
     if _has_legacy_repo_fields(payload):
@@ -3640,7 +3651,7 @@ def create_app() -> Flask:
             repo_owner=str(payload.get("github_owner", "")).strip(),
             repo_name=str(payload.get("github_repo", "")).strip(),
             base_branch=str(payload.get("github_base_branch", "")).strip(),
-            token=str(payload.get("github_token", existing_github.get("token", ""))).strip(),
+            token=_effective_secret_value(payload.get("github_token", ""), existing_github.get("token", "")),
         )
         local_repo_path = str(payload["local_repo_path"]).strip()
 
