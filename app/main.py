@@ -58,7 +58,7 @@ MAX_DIFF_CHARS = 60000
 MAX_OUTPUT_CHARS = 12000
 MAX_WORKFLOW_EVENTS = 160
 MAX_CLARIFICATION_QUESTIONS = 3
-SETUP_GUIDE_VERSION = 3
+SETUP_GUIDE_VERSION = 4
 VALID_REASONING_EFFORTS = ("low", "medium", "high", "xhigh")
 WORKFLOW_HEARTBEAT_SECONDS = 10
 WORKFLOW_STALE_SECONDS = 30
@@ -215,64 +215,72 @@ def _setup_guide_sections() -> list[dict[str, Any]]:
         },
         {
             "id": "github",
-            "title": "GitHub 설정 찾기",
-            "summary": "원격 저장소 식별 정보와 기본 브랜치, 접근 토큰을 Web UI 입력칸과 매칭합니다.",
-            "fields": ["github_owner", "github_repo", "github_base_branch", "github_token", "repo_mappings"],
+            "title": "GitHub 연결 준비",
+            "summary": "이 화면은 전역 기본 저장소를 쓰지 않고 Jira 공간 키별로 저장소, 기본 브랜치, 로컬 경로, 공간 전용 GitHub Token을 연결합니다.",
+            "fields": [
+                "repo_mappings",
+                "mapping_space_key",
+                "mapping_repo_owner",
+                "mapping_repo_name",
+                "mapping_base_branch",
+                "mapping_local_repo_path",
+                "mapping_github_token",
+            ],
             "steps": [
                 _guide_step(
                     "github-owner-repo",
-                    "Owner와 Repo 이름 확인",
-                    "GitHub REST API가 어떤 저장소를 조회할지 지정하는 기본 식별자입니다.",
+                    "공간에 연결할 owner와 repo 확인",
+                    "Jira 공간 키마다 어떤 GitHub 저장소를 사용할지 확인해 Repo Mapping 입력칸에 넣습니다.",
                     [
-                        "대상 저장소 메인 페이지를 엽니다.",
-                        "브라우저 주소가 https://github.com/<owner>/<repo> 형태인지 확인합니다.",
-                        "슬래시 앞 부분은 Owner, 뒤 부분은 Repo 입력칸에 각각 넣습니다.",
+                        "대상 저장소 메인 페이지를 열고 주소가 https://github.com/<owner>/<repo> 형태인지 확인합니다.",
+                        "2단계 공간별 저장소 연결에서 GitHub owner, GitHub repo 칸에 각각 입력합니다.",
+                        "공간이 여러 개면 공간 키마다 한 줄씩 따로 등록합니다.",
                     ],
-                    "조직 저장소면 조직명이 Owner이고, 개인 저장소면 계정명이 Owner입니다.",
+                    "현재 화면에는 전역 기본 저장소 입력칸이 없으므로, 모든 저장소 정보는 공간별 연결로만 관리합니다.",
                     "owner: octo-org / repo: jira-auto-agent",
-                    ["github_owner", "github_repo"],
+                    ["mapping_repo_owner", "mapping_repo_name"],
                     "https://github.com",
                 ),
                 _guide_step(
                     "github-base-branch",
-                    "기본 브랜치 확인",
-                    "이 앱이 기준으로 삼을 보호 브랜치 또는 메인 작업 브랜치입니다.",
+                    "공간 기본 브랜치 확인",
+                    "각 공간 연결이 어떤 브랜치를 기준으로 작업 브랜치를 만들지 정하는 값입니다.",
                     [
-                        "저장소 메인 화면에서 브랜치 드롭다운을 확인합니다.",
-                        "기본 선택 브랜치가 무엇인지 확인하거나 Settings > Branches에서 default branch를 봅니다.",
-                        "보통 main 또는 master지만 팀 규칙이 있으면 그 값을 그대로 입력합니다.",
+                        "저장소 메인 화면의 브랜치 드롭다운이나 Settings > Branches에서 default branch를 확인합니다.",
+                        "공간별 저장소 연결의 기본 브랜치 칸에 팀 규칙 그대로 입력합니다.",
+                        "같은 저장소를 여러 공간이 써도 브랜치 운영 규칙이 다르면 연결별로 따로 확인합니다.",
                     ],
-                    "기본 브랜치를 잘못 입력하면 GitHub 브랜치 확인 API는 404를 반환할 수 있습니다.",
+                    "기본 브랜치를 잘못 입력하면 브랜치 준비 단계나 GitHub 상태 확인에서 바로 실패할 수 있습니다.",
                     "main",
-                    ["github_base_branch"],
+                    ["mapping_base_branch"],
                     "https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-branches-in-your-repository/viewing-branches-in-your-repository",
                 ),
                 _guide_step(
                     "github-token",
-                    "GitHub Token 생성",
-                    "레포 존재 여부와 브랜치 상태를 인증된 사용자 권한으로 확인하기 위한 토큰입니다.",
+                    "공간 전용 GitHub Token 준비",
+                    "각 공간 연결이 사용할 GitHub Token을 입력하거나, 이미 저장된 토큰을 수정 모달에서 갱신합니다.",
                     [
-                        "GitHub 우측 상단 프로필 메뉴에서 Settings로 이동합니다.",
-                        "Developer settings > Personal access tokens로 이동합니다.",
-                        "가능하면 fine-grained token을 만들고 대상 저장소에 필요한 최소 권한만 부여한 뒤 생성 직후 복사합니다.",
+                        "GitHub Settings > Developer settings > Personal access tokens에서 대상 저장소에 접근 가능한 토큰을 발급합니다.",
+                        "새 연결을 추가할 때는 공간 전용 GitHub Token 칸에 바로 붙여 넣습니다.",
+                        "이미 저장된 연결은 목록의 편집 버튼을 눌러 토큰을 갱신하거나 해제할 수 있습니다.",
                     ],
-                    "조직 정책에 따라 classic token 또는 승인 절차가 필요할 수 있으니, 발급 후 바로 repo 접근이 되는지 확인해야 합니다.",
+                    "각 공간 연결에는 토큰이 필요합니다. 저장된 토큰을 해제하면 해당 공간은 다시 토큰을 입력하기 전까지 검증과 실행이 실패합니다.",
                     "github_pat_11AX...",
-                    ["github_token"],
+                    ["mapping_github_token"],
                     "https://docs.github.com/en/github/authenticating-to-github/keeping-your-account-and-data-secure/creating-a-personal-access-token",
                 ),
                 _guide_step(
                     "github-space-repo-mappings",
-                    "공간명과 저장소 연결",
-                    "Jira 이슈 키의 공간명과 GitHub 저장소, 기준 브랜치, 로컬 경로를 연결합니다.",
+                    "공간 키와 저장소 연결 등록",
+                    "Jira 이슈 키의 공간 부분과 GitHub 저장소, 기본 브랜치, 로컬 Git 경로를 한 묶음으로 저장합니다.",
                     [
                         "공간명은 이슈 키에서 첫 번째 하이픈 앞 부분입니다. 예: GCPPLDCAD-621 이면 공간명은 GCPPLDCAD 입니다.",
-                        "각 공간명마다 GitHub owner, repo, 기준 브랜치, 로컬 저장소 경로를 함께 등록합니다.",
-                        "로컬 경로는 이 PC에 있는 해당 저장소의 Git 루트 경로여야 합니다.",
+                        "공간 키, owner, repo, 기본 브랜치, 로컬 저장소 경로를 모두 입력한 뒤 연결 추가를 누릅니다.",
+                        "등록 뒤에는 목록의 편집 버튼으로 값을 수정하고, 저장된 토큰 상태도 함께 확인합니다.",
                     ],
-                    "공간별 연결을 등록하면 단일 기본 저장소 값보다 이 연결 정보가 우선 적용됩니다.",
+                    "로컬 저장소 경로는 이 PC의 Git 루트여야 하고 .git 디렉터리가 있어야 합니다. 연결이 하나라도 빠지면 해당 공간 이슈는 실행할 수 없습니다.",
                     "GCPPLDCAD|team-org|jira-auto-agent|main|C:\\make-project\\jira-auto-agent",
-                    ["repo_mappings"],
+                    ["mapping_space_key", "mapping_local_repo_path"],
                 ),
             ],
         },
@@ -300,7 +308,7 @@ def _setup_guide_sections() -> list[dict[str, Any]]:
         {
             "id": "automation",
             "title": "자동화 입력 준비",
-            "summary": "Codex 자동 작업과 자동 커밋에 필요한 브랜치, 모델, 지시 사항, 테스트 명령, 커밋 작성자 정보를 준비합니다.",
+            "summary": "Codex 자동 작업과 자동 커밋에 필요한 브랜치, 모델, 지시 사항, 수용 기준, 검증 방식, 커밋 작성자 정보를 준비합니다.",
             "fields": [
                 "branch_name",
                 "commit_message",
@@ -368,29 +376,29 @@ def _setup_guide_sections() -> list[dict[str, Any]]:
                 ),
                 _guide_step(
                     "automation-test-command",
-                    "로컬 테스트 명령 준비",
-                    "자동 커밋 전에 어떤 검증 명령이 통과해야 하는지 서버가 알 수 있어야 합니다.",
+                    "참고용 로컬 테스트 기준 확인",
+                    "현재 화면에서는 test_command 입력칸이 숨겨져 있지만, 저장된 값이 있으면 Codex 참고 정보와 결과 요약에 함께 남습니다.",
                     [
-                        "해당 저장소에서 평소 사용하는 최소 검증 명령을 적습니다.",
-                        "명령은 로컬 레포 루트에서 바로 실행되는 형태로 적습니다.",
-                        "여러 명령이 필요하면 && 또는 프로젝트 셸 규칙에 맞는 형태로 연결합니다.",
+                        "기존에 저장된 test_command가 있다면 현재 화면에 직접 보이지 않아도 계속 유지됩니다.",
+                        "현재 서버 빌드에서는 저장된 test_command 대신 변경 파일 문법 검사 위주로 검증합니다.",
+                        "자동 커밋 전에 별도 테스트가 더 필요하면 커밋 체크리스트에 수동 확인 항목을 적어 둡니다.",
                     ],
-                    "테스트 명령이 비어 있으면 자동 커밋 전 검증 기준이 없어집니다.",
+                    "숨겨진 입력칸이라 화면에서 바로 수정할 수는 없습니다. 새 테스트 기준이 꼭 필요하면 별도 설정 정리 작업으로 함께 갱신해야 합니다.",
                     "PYTHONPATH=. pytest -q",
-                    ["test_command"],
+                    ["allow_auto_commit", "commit_checklist"],
                 ),
                 _guide_step(
                     "automation-commit-mode",
                     "자동 커밋 방식 확인",
-                    "현재 자동 작업은 로컬 테스트를 서버에서 실행하지 않고, Codex 변경 결과를 바로 커밋할 수 있습니다.",
+                    "현재 자동 작업은 변경 파일 문법 검사를 통과한 뒤, 체크박스 상태에 따라 자동 커밋하거나 수동 검토 대기로 멈춥니다.",
                     [
-                        "참고용 로컬 테스트 명령은 Codex가 작업 범위를 이해하도록 돕는 용도로만 사용됩니다.",
-                        "실제 테스트 실행이 필요하면 자동 작업 후 별도로 로컬에서 직접 확인합니다.",
-                        "자동 커밋을 끄면 변경 내용만 남기고 수동 검토 후 직접 커밋할 수 있습니다.",
+                        "로컬 테스트 없이 자동 커밋 허용이 켜져 있으면 검증 뒤 서버가 바로 git commit 까지 진행합니다.",
+                        "이 체크를 끄면 변경 내용과 검증 결과만 남기고 ready_for_manual_commit 상태에서 멈춥니다.",
+                        "자동 커밋을 켜더라도 팀에서 꼭 확인할 항목은 커밋 체크리스트에 적어 두는 편이 안전합니다.",
                     ],
-                    "자동 커밋을 켜면 로컬 테스트 없이 커밋이 진행되므로, 필요하면 체크리스트에 별도 검증 항목을 적어 두는 것이 좋습니다.",
+                    "자동 커밋이 켜져 있으면 Git 작성자 정보가 비어 있을 때 추가 입력이 필요할 수 있습니다.",
                     "체크박스: 로컬 테스트 없이 자동 커밋 허용",
-                    ["test_command", "commit_checklist"],
+                    ["allow_auto_commit", "commit_checklist"],
                 ),
                 _guide_step(
                     "automation-commit-checklist",
@@ -1098,11 +1106,13 @@ def _repo_mapping_missing_token_spaces(
 def _required_config_fields(
     payload: dict[str, Any],
     existing_github_payload: dict[str, Any] | None = None,
+    existing_jira_payload: dict[str, Any] | None = None,
 ) -> list[str]:
+    existing_jira_payload = existing_jira_payload or {}
     required = {
         "jira_base_url": payload.get("jira_base_url"),
         "jira_email": payload.get("jira_email"),
-        "jira_api_token": payload.get("jira_api_token"),
+        "jira_api_token": _effective_secret_value(payload.get("jira_api_token"), existing_jira_payload.get("api_token")),
         "jira_jql": payload.get("jira_jql"),
     }
     missing = [name for name, value in required.items() if not str(value or "").strip()]
@@ -3575,6 +3585,7 @@ def create_app() -> Flask:
             "jira_email": jira.get("email", ""),
             "jira_jql": jira.get("jql", ""),
             "jira_api_token": "",
+            "jira_api_token_saved": bool(str(jira.get("api_token", "")).strip()),
             "github_owner": "",
             "github_repo": "",
             "github_base_branch": "",
@@ -3589,8 +3600,9 @@ def create_app() -> Flask:
     @app.post("/api/config/validate")
     def validate_config() -> Any:
         payload = request.get_json(silent=True) or {}
+        jira = store.load("jira") or {}
         github = store.load("github") or {}
-        missing = _required_config_fields(payload, github)
+        missing = _required_config_fields(payload, github, jira)
         missing_token_spaces = _repo_mapping_missing_token_spaces(payload, github)
         response: dict[str, Any] = {
             "valid": len(missing) == 0,
@@ -3604,8 +3616,9 @@ def create_app() -> Flask:
     @app.post("/api/config/save")
     def save_config() -> Any:
         payload = request.get_json(silent=True) or {}
+        existing_jira = store.load("jira") or {}
         existing_github = store.load("github") or {}
-        missing = _required_config_fields(payload, existing_github)
+        missing = _required_config_fields(payload, existing_github, existing_jira)
         if missing:
             response: dict[str, Any] = {"ok": False, "error": "required_fields_missing", "fields": missing}
             missing_token_spaces = _repo_mapping_missing_token_spaces(payload, existing_github)
@@ -3643,7 +3656,9 @@ def create_app() -> Flask:
             if existing_token:
                 final_repo_mapping_tokens[space_key] = existing_token
 
-        jira = _to_jira_config(payload)
+        jira_payload = dict(payload)
+        jira_payload["jira_api_token"] = _effective_secret_value(payload.get("jira_api_token"), existing_jira.get("api_token"))
+        jira = _to_jira_config(jira_payload)
         github = GithubConfig(
             repo_owner="",
             repo_name="",
@@ -3677,6 +3692,7 @@ def create_app() -> Flask:
             {
                 "ok": True,
                 "message": "설정을 암호화 저장했습니다.",
+                "jira_api_token_saved": bool(jira.api_token),
                 "repo_mapping_token_spaces": sorted(final_repo_mapping_tokens.keys()),
                 "github_token_saved": False,
             }

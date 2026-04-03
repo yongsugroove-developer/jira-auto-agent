@@ -14,7 +14,6 @@
   <main class="container">
     <section class="hero">
       <p class="eyebrow">Jira x GitHub PoC</p>
-      <p class="desc">Jira, GitHub, 로컬 저장소 정보를 연결하고 백로그 이슈를 고른 뒤 Codex 자동 작업 결과, diff, 커밋 상태를 한 화면에서 확인한다.</p>
     </section>
 
     <section class="card">
@@ -57,7 +56,6 @@
               <div class="config-panel__copy">
                 <p class="config-panel__eyebrow">Jira</p>
                 <h3>Jira 연결 정보</h3>
-                <p class="grid-note">지금은 Jira 영역만 먼저 열어 4개 값을 입력한다. 입력이 채워지면 다음 단계로 자연스럽게 이어진다.</p>
               </div>
               <span id="jira_config_status" class="config-panel__status">4개 입력 필요</span>
             </summary>
@@ -79,7 +77,6 @@
               <div class="config-panel__copy">
                 <p class="config-panel__eyebrow">Repo Mapping</p>
                 <h3>공간별 저장소 연결</h3>
-                <p id="github_token_help" class="grid-note">각 Jira 공간은 저장소와 GitHub Token을 개별로 가져야 한다. 이슈의 공간 키와 일치하는 연결이 없으면 즉시 오류로 처리한다.</p>
               </div>
               <span id="repo_mapping_status" class="config-panel__status">공간 연결 필요</span>
             </summary>
@@ -89,7 +86,6 @@
                   공간별 저장소 연결
                   <textarea id="repo_mappings" rows="1" hidden></textarea>
                   <div class="repo-mapping-builder">
-                    <p class="repo-mapping-help">각 Jira 공간마다 아래 연결을 반드시 추가한다. 한 번에 하나씩 입력하고 목록에 쌓아 간다.</p>
                     <div class="repo-mapping-inputs">
                       <input id="mapping_space_key" type="text" placeholder="예: GCPPLDCAD">
                       <input id="mapping_repo_owner" type="text" placeholder="GitHub owner">
@@ -141,7 +137,7 @@
       <section id="jira_selection_summary" class="selection-summary">
         <div class="selection-summary__copy">
           <strong id="selected_issue_count">선택한 이슈 0건</strong>
-          <p id="selected_issue_keys" class="grid-note">이슈를 선택하면 여기에서 배치 대상을 요약한다.</p>
+          <p id="selected_issue_keys" class="grid-note" hidden></p>
         </div>
         <div class="selection-summary__actions">
           <button id="clear_issue_selection" type="button" class="secondary-button">선택 해제</button>
@@ -195,12 +191,12 @@
         </label>
         <label class="wide">작업 지시 상세<textarea id="work_instruction" rows="4" placeholder="변경할 기능, 유지해야 할 제약, 수정 금지 범위를 구체적으로 적는다."></textarea></label>
         <label class="wide">수용 기준<textarea id="acceptance_criteria" rows="4" placeholder="완료 조건을 줄바꿈으로 정리한다."></textarea></label>
-        <label class="wide">로컬 테스트 명령<input id="test_command" type="text" placeholder="PYTHONPATH=. pytest -q"></label>
         <label class="wide">커밋 체크리스트<textarea id="commit_checklist" rows="3" placeholder="- README 수정 금지&#10;- 에러 코드 메시지 유지"></textarea></label>
         <label>Git Author Name<input id="git_author_name" type="text" placeholder="Codex Bot"></label>
         <label>Git Author Email<input id="git_author_email" type="email" placeholder="codex@example.com"></label>
       </div>
 
+      <input id="test_command" type="hidden" value="">
       <section id="workflow_batch_preview_card" class="detail-card batch-preview-panel">
         <div class="batch-preview-panel__header">
           <div>
@@ -217,6 +213,8 @@
       <div class="actions">
         <label class="checkbox-row"><input id="allow_auto_commit" type="checkbox" checked> 로컬 테스트 없이 자동 커밋 허용</label>
       </div>
+
+      <div id="workflow_batch_actions" class="actions workflow-batch-actions"></div>
 
       <pre id="workflow_result" class="result"></pre>
       <div id="workflow_result_actions" class="result-actions"></div>
@@ -371,6 +369,45 @@
         </aside>
 
         <section id="guide_detail" class="guide-detail" aria-live="polite"></section>
+      </div>
+    </section>
+  </div>
+
+  <div id="repo_mapping_modal" class="modal-shell" aria-hidden="true">
+    <div class="modal-backdrop" data-close-repo-mapping-modal="true"></div>
+    <section class="guide-modal repo-mapping-modal" role="dialog" aria-modal="true" aria-labelledby="repo_mapping_modal_title">
+      <div class="guide-modal__header">
+        <div>
+          <h2 id="repo_mapping_modal_title">공간 연결 수정</h2>
+          <p class="guide-modal__summary">저장된 공간 연결을 수정하고, 필요하면 공간 전용 GitHub Token도 함께 갱신하거나 해제한다.</p>
+        </div>
+        <button id="close_repo_mapping_modal" type="button" class="ghost-button">닫기</button>
+      </div>
+
+      <div class="repo-mapping-modal__body">
+        <form id="repo_mapping_edit_form" class="repo-mapping-modal__form">
+          <div class="repo-mapping-inputs repo-mapping-inputs--modal">
+            <input id="repo_mapping_edit_space_key" type="text" placeholder="예: GCPPLDCAD">
+            <input id="repo_mapping_edit_repo_owner" type="text" placeholder="GitHub owner">
+            <input id="repo_mapping_edit_repo_name" type="text" placeholder="GitHub repo">
+            <input id="repo_mapping_edit_base_branch" type="text" placeholder="기본 브랜치">
+            <input id="repo_mapping_edit_local_repo_path" type="text" placeholder="로컬 저장소 경로">
+            <input id="repo_mapping_edit_github_token" type="password" placeholder="새 GitHub Token 입력 시 갱신">
+          </div>
+
+          <section class="repo-mapping-modal__token-panel" aria-live="polite">
+            <div class="repo-mapping-modal__token-copy">
+              <strong>GitHub Token 상태</strong>
+              <p id="repo_mapping_edit_token_status" class="grid-note">저장된 토큰 상태를 표시한다.</p>
+            </div>
+            <button id="repo_mapping_edit_toggle_token" type="button" class="ghost-button">토큰 해제 예정</button>
+          </section>
+
+          <div class="actions repo-mapping-modal__actions">
+            <button id="save_repo_mapping_edit" type="submit" class="primary-button">변경 저장</button>
+            <button id="cancel_repo_mapping_edit" type="button" class="ghost-button">취소</button>
+          </div>
+        </form>
       </div>
     </section>
   </div>

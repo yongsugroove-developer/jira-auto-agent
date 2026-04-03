@@ -116,12 +116,18 @@
 
   function renderSelectionSummary() {
     const issues = selectedIssues();
+    const issueKeys = $("#selected_issue_keys");
     $("#selected_issue_count").text(`선택한 이슈 ${issues.length}건`);
-    $("#selected_issue_keys").text(
-      issues.length
-        ? issues.map((issue) => `${issue.issue_key} ${issue.issue_summary}`).join(" / ")
-        : "이슈를 선택하면 여기에서 배치 대상을 요약한다."
-    );
+    if (!issueKeys.length) {
+      return;
+    }
+    if (!issues.length) {
+      issueKeys.text("").attr("hidden", true);
+      return;
+    }
+    issueKeys
+      .text(issues.map((issue) => `${issue.issue_key} ${issue.issue_summary}`).join(" / "))
+      .attr("hidden", false);
   }
 
   function setBatchPreviewEmpty(message) {
