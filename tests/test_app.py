@@ -2412,3 +2412,40 @@ def test_batch_queue_runs_different_repo_paths_in_parallel(monkeypatch, tmp_path
     final_batch = _wait_for_batch_status(client, batch_id)
     assert final_batch["counts"]["completed"] == 2
     assert active["max"] >= 2
+
+
+def test_setup_guide_contains_expected_sections_and_steps() -> None:
+    app = create_app()
+    client = app.test_client()
+
+    response = client.get("/api/setup-guide")
+    assert response.status_code == 200
+
+    data = response.get_json()
+    assert data is not None
+    assert data["version"] == 6
+
+    sections = data["sections"]
+    assert [section["id"] for section in sections] == ["jira", "github", "local_repo", "automation"]
+    sections_by_id = {section["id"]: section for section in sections}
+
+    step_ids = {step["id"] for section in sections for step in section["steps"]}
+    assert "jira-api-token" in step_ids
+    assert "github-base-branch" in step_ids
+    assert "gitlab-base-url" in step_ids
+    assert "local-repo-path" in step_ids
+    assert "automation-codex-model" in step_ids
+    assert "automation-test-command" in step_ids
+    assert "automation-git-author" in step_ids
+
+    github_steps = {step["id"]: step for step in sections_by_id["github"]["steps"]}
+    assert "전역 기본 저장소를 쓰지 않고" in sections_by_id["github"]["summary"]
+    assert github_steps["github-owner-repo"]["target_fields"] == ["mapping_provider", "mapping_repo_owner", "mapping_repo_name"]
+    assert github_steps["gitlab-base-url"]["target_fields"] == ["gitlab_base_url", "mapping_repo_ref"]
+    assert github_steps["github-token"]["target_fields"] == ["mapping_scm_token"]
+    assert github_steps["github-space-repo-mappings"]["target_fields"] == ["mapping_space_key", "mapping_local_repo_path"]
+
+    automation_steps = {step["id"]: step for step in sections_by_id["automation"]["steps"]}
+    assert "hidden input으로 유지" in automation_steps["automation-test-command"]["purpose"]
+    assert automation_steps["automation-test-command"]["target_fields"] == ["allow_auto_commit", "commit_checklist"]
+    assert automation_steps["automation-commit-mode"]["target_fields"] == ["allow_auto_commit", "allow_auto_push"]

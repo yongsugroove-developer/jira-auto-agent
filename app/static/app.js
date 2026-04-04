@@ -3239,6 +3239,5 @@ $(document).ready(function () {
       });
   });
 
-  $("#workflow_batch_preview_card .grid-note").text("저장된 저장소 설정과 선택한 이슈 기준으로 각 작업 브랜치, 커밋 메시지, 큐 그룹을 미리 확인한다.");
   $("#allow_auto_push").closest("label").contents().last()[0].textContent = " 커밋 후 원격 저장소까지 push";
 });
