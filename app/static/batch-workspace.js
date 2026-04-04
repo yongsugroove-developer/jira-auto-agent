@@ -71,6 +71,15 @@
   function primarySelectedIssue() {
     const issues = selectedIssues();
     if (issues.length) {
+      const expandedIssueKey = typeof jiraState !== "undefined"
+        ? String(jiraState.expandedIssueKey || "").trim()
+        : "";
+      if (expandedIssueKey) {
+        const expandedIssue = issues.find((issue) => issue.issue_key === expandedIssueKey);
+        if (expandedIssue) {
+          return expandedIssue;
+        }
+      }
       return issues[0];
     }
 
@@ -205,26 +214,19 @@
 
   function renderIssueTable(data) {
     const issues = (data && data.issues) || [];
-    const rows = issues.map((issue, index) => {
-      const checked = index === 0 ? 'checked="checked"' : "";
-      return `
-        <tr>
-          <td>${escapeHtml(issue.key || "")}</td>
-          <td>${escapeHtml(issue.summary || "")}</td>
-          <td>${escapeHtml(issue.status || "")}</td>
-          <td>
-            <input
-              type="checkbox"
-              name="selected_issues"
-              ${checked}
-              data-key="${escapeHtml(issue.key || "")}"
-              data-summary="${escapeHtml(issue.summary || "")}"
-            >
-          </td>
-        </tr>
-      `;
+    const rows = issues.map((issue) => {
+      if (typeof renderIssueAccordionItem === "function") {
+        return renderIssueAccordionItem(issue, {
+          inputType: "checkbox",
+          inputName: "selected_issues",
+        });
+      }
+      return "";
     }).join("");
-    $("#issue_table").html(rows);
+    $("#issue_table").html(rows || '<p class="batch-preview-empty">조회된 이슈가 없습니다.</p>');
+    if (typeof syncIssueAccordionState === "function") {
+      syncIssueAccordionState();
+    }
     syncPrimaryIssueFields();
     renderSelectionSummary();
     const issue = primarySelectedIssue();
@@ -711,9 +713,9 @@
           </${editable ? "label" : "article"}>
         `;
       }).join("");
-      $("#batch_run_clarification_questions").html(questionItems);
+      $("#batch_run_clarification_questions").html(questionItems).prop("hidden", false);
     } else {
-      $("#batch_run_clarification_questions").html(`<p class="batch-preview-empty">${escapeHtml(hasAnswers ? "추가 질문은 없으며, 아래 제출 답변이 현재 배치에 반영되어 있다." : "추가 질문이 없다.")}</p>`);
+      $("#batch_run_clarification_questions").empty().prop("hidden", true);
     }
 
     if (hasAnswers) {
@@ -723,9 +725,9 @@
           <p>${escapeHtml(answer)}</p>
         </article>
       `).join("");
-      $("#batch_run_clarification_answers").html(answerItems);
+      $("#batch_run_clarification_answers").html(answerItems).prop("hidden", false);
     } else {
-      $("#batch_run_clarification_answers").empty();
+      $("#batch_run_clarification_answers").empty().prop("hidden", true);
     }
 
     $("#batch_run_clarification_actions").prop("hidden", !editable);
@@ -1010,6 +1012,13 @@
     loadRecentBatches("", true);
 
     $(document).on("change", "input[name='selected_issues']", function () {
+      if (typeof jiraState !== "undefined") {
+        jiraState.expandedIssueKey = String($(this).data("key") || "").trim();
+        jiraState.issueAccordionCollapsed = false;
+      }
+      if (typeof syncIssueAccordionState === "function") {
+        syncIssueAccordionState();
+      }
       syncPrimaryIssueFields();
       renderSelectionSummary();
       const issue = primarySelectedIssue();

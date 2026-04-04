@@ -82,33 +82,115 @@
             </summary>
             <div class="config-space-panel__body config-panel__body">
               <div class="config-panel__body-inner">
-                <div class="grid">
-                  <label>GitLab Base URL<input id="gitlab_base_url" type="text" placeholder="https://git.withhite.com"></label>
-                </div>
                 <label class="wide repo-mapping-panel-host">
                   공간별 저장소 연결
                   <textarea id="repo_mappings" rows="1" hidden></textarea>
-                  <p id="scm_token_help" class="grid-note">공간 연결마다 GitHub PAT 또는 GitLab Project Access Token을 저장한다.</p>
-                  <div class="repo-mapping-builder">
-                    <div class="repo-mapping-inputs">
-                      <input id="mapping_space_key" type="text" placeholder="예: GCPPLDCAD">
-                      <select id="mapping_provider">
-                        <option value="github">GitHub</option>
-                        <option value="gitlab">GitLab</option>
-                      </select>
-                      <input id="mapping_repo_owner" type="text" placeholder="GitHub owner">
-                      <input id="mapping_repo_name" type="text" placeholder="GitHub repo">
-                      <input id="mapping_repo_ref" type="text" placeholder="GitLab project path" hidden>
-                      <input id="mapping_base_branch" type="text" placeholder="기본 브랜치">
-                      <input id="mapping_local_repo_path" type="text" placeholder="로컬 저장소 경로">
-                      <input id="mapping_scm_token" type="password" placeholder="공간 전용 SCM Token">
-                      <input id="mapping_github_token" type="hidden">
-                    </div>
+                  <p id="scm_token_help" class="grid-note">공간 연결마다 공간 전용 GitHub Token 또는 GitLab Project Access Token을 저장한다.</p>
+                  <div id="repo_mapping_builder" class="repo-mapping-builder">
+                    <section class="repo-mapping-group">
+                      <div class="repo-mapping-group__header">
+                        <strong>1. 공간 키</strong>
+                        <p>Jira 이슈 키 앞부분에 맞는 공간 키를 입력한다.</p>
+                      </div>
+                      <div class="repo-mapping-group__body">
+                        <label class="repo-mapping-field repo-mapping-field--full">
+                          <span>공간 키</span>
+                          <input id="mapping_space_key" type="text" placeholder="예: GCPPLDCAD">
+                        </label>
+                      </div>
+                    </section>
+
+                    <section class="repo-mapping-group">
+                      <div class="repo-mapping-group__header">
+                        <strong>2. 저장소 선택</strong>
+                        <p>SCM Provider만 먼저 선택한다.</p>
+                      </div>
+                      <div class="repo-mapping-group__body">
+                        <label class="repo-mapping-field">
+                          <span>SCM Provider</span>
+                          <select id="mapping_provider">
+                            <option value="github">GitHub</option>
+                            <option value="gitlab">GitLab</option>
+                          </select>
+                        </label>
+                      </div>
+                    </section>
+
+                    <details id="repo_mapping_settings_panel" class="repo-mapping-group repo-mapping-group--details">
+                      <summary class="repo-mapping-group__summary">
+                        <div class="repo-mapping-group__summary-copy">
+                          <strong>3. 저장소 설정</strong>
+                          <p id="repo_mapping_settings_summary">선택한 Provider에 맞는 저장소 설정 항목을 연다.</p>
+                        </div>
+                      </summary>
+                      <div class="repo-mapping-inputs repo-mapping-inputs--settings">
+                        <section class="repo-mapping-provider-panel" data-provider-panel="github">
+                          <div class="repo-mapping-provider-panel__header">
+                            <strong>GitHub 저장소 정보</strong>
+                            <p>GitHub 저장소 owner와 repository 이름을 입력한다.</p>
+                          </div>
+                          <div class="repo-mapping-inputs repo-mapping-inputs--provider">
+                            <label class="repo-mapping-field">
+                              <span>GitHub Owner</span>
+                              <input id="mapping_repo_owner" type="text" placeholder="예: my-team">
+                            </label>
+                            <label class="repo-mapping-field">
+                              <span>GitHub Repository</span>
+                              <input id="mapping_repo_name" type="text" placeholder="예: jira-auto-agent">
+                            </label>
+                          </div>
+                        </section>
+                        <section class="repo-mapping-provider-panel" data-provider-panel="gitlab" hidden>
+                          <div class="repo-mapping-provider-panel__header">
+                            <strong>GitLab 저장소 정보</strong>
+                            <p>GitLab Base URL을 먼저 확인한 뒤 Project Path를 입력한다.</p>
+                          </div>
+                          <div class="repo-mapping-inputs repo-mapping-inputs--provider">
+                            <label class="repo-mapping-field repo-mapping-field--full">
+                              <span>GitLab Base URL</span>
+                              <input id="gitlab_base_url" type="text" placeholder="예: https://git.withhite.com">
+                            </label>
+                            <label class="repo-mapping-field repo-mapping-field--full">
+                              <span>GitLab Project Path</span>
+                              <input id="mapping_repo_ref" type="text" placeholder="예: group/subgroup/project-name">
+                            </label>
+                          </div>
+                        </section>
+                        <section class="repo-mapping-provider-panel repo-mapping-provider-panel--common">
+                          <div class="repo-mapping-provider-panel__header">
+                            <strong>공통 설정</strong>
+                            <p>브랜치, 로컬 경로, 공간 전용 토큰을 입력한다.</p>
+                          </div>
+                          <div class="repo-mapping-inputs repo-mapping-inputs--provider">
+                            <label class="repo-mapping-field">
+                              <span>기본 브랜치</span>
+                              <input id="mapping_base_branch" type="text" placeholder="예: main">
+                            </label>
+                            <div class="repo-mapping-field repo-mapping-field--full">
+                              <span>로컬 저장소 경로</span>
+                              <div class="repo-mapping-path-input">
+                                <input id="mapping_local_repo_path" type="text" placeholder="예: C:\git\jira-auto-agent">
+                                <button id="browse_mapping_local_repo_path" type="button" class="ghost-button">찾아보기</button>
+                              </div>
+                            </div>
+                            <label class="repo-mapping-field repo-mapping-field--full">
+                              <span>공간 전용 SCM Token</span>
+                              <input id="mapping_scm_token" type="password" placeholder="공간 전용 SCM Token">
+                            </label>
+                          </div>
+                        </section>
+                        <input id="mapping_github_token" type="hidden">
+                      </div>
+                    </details>
+
                     <div class="actions">
                       <button id="add_repo_mapping" type="button" class="secondary-button">연결 추가</button>
                     </div>
                     <div id="repo_mapping_list" class="repo-mapping-list">
-                      <p class="repo-mapping-empty">아직 추가된 공간 연결이 없다.</p>
+                      <div class="repo-mapping-empty-state">
+                        <strong>아직 추가한 공간 연결이 없습니다.</strong>
+                        <p>공간 키와 저장소 설정을 입력한 뒤 연결 추가를 누른다.</p>
+                      </div>
                     </div>
                   </div>
                 </label>
@@ -132,17 +214,11 @@
         </div>
       </div>
 
-      <table>
-        <thead>
-          <tr>
-            <th>Issue Key</th>
-            <th>Summary</th>
-            <th>Status</th>
-            <th>선택</th>
-          </tr>
-        </thead>
-        <tbody id="issue_table"></tbody>
-      </table>
+      <div id="jira_backlog_table_shell" class="jira-backlog-shell">
+        <div id="issue_table" class="jira-backlog-list">
+          <p class="batch-preview-empty">백로그 조회를 실행하면 이슈 목록을 표시한다.</p>
+        </div>
+      </div>
 
       <section id="jira_selection_summary" class="selection-summary">
         <div class="selection-summary__copy">
@@ -154,19 +230,6 @@
         </div>
       </section>
 
-      <div class="detail-grid jira-detail-grid">
-        <section class="detail-card">
-          <h3>선택 이슈 상세</h3>
-          <div id="jira_issue_meta" class="issue-meta"></div>
-          <div class="issue-meta issue-meta-spacer" aria-hidden="true"></div>
-          <pre id="jira_issue_description" class="result result-medium">이슈를 선택하면 상세 설명을 표시한다.</pre>
-        </section>
-        <section class="detail-card">
-          <h3>최근 코멘트</h3>
-          <div id="jira_issue_comments_meta" class="issue-meta issue-meta-spacer" aria-hidden="true"></div>
-          <pre id="jira_issue_comments" class="result result-medium">이슈를 선택하면 최근 코멘트를 표시한다.</pre>
-        </section>
-      </div>
     </section>
 
     <section class="card">
@@ -199,26 +262,14 @@
             {% endfor %}
           </select>
         </label>
-        <label class="wide">작업 지시 상세<textarea id="work_instruction" rows="4" placeholder="변경할 기능, 유지해야 할 제약, 수정 금지 범위를 구체적으로 적는다."></textarea></label>
-        <label class="wide">수용 기준<textarea id="acceptance_criteria" rows="4" placeholder="완료 조건을 줄바꿈으로 정리한다."></textarea></label>
+        <label class="wide">작업 지시 상세<textarea id="work_instruction" rows="4" placeholder="예) 승인 버튼 클릭 시 /api/approve를 호출하고, 기존 테이블 구조와 DOM id는 유지한다."></textarea></label>
+        <label class="wide">수용 기준<textarea id="acceptance_criteria" rows="4" placeholder="예) 승인 버튼 클릭 시 API가 1회 호출된다.&#10;예) 성공 시 완료 메시지가 표시된다.&#10;예) 기존 배치 실행 흐름은 깨지지 않는다."></textarea></label>
         <label class="wide">커밋 체크리스트<textarea id="commit_checklist" rows="3" placeholder="- README 수정 금지&#10;- 에러 코드 메시지 유지"></textarea></label>
         <label>Git Author Name<input id="git_author_name" type="text" placeholder="Codex Bot"></label>
         <label>Git Author Email<input id="git_author_email" type="email" placeholder="codex@example.com"></label>
       </div>
 
       <input id="test_command" type="hidden" value="">
-      <section id="workflow_batch_preview_card" class="detail-card batch-preview-panel">
-        <div class="batch-preview-panel__header">
-          <div>
-            <h3>배치 실행 미리보기</h3>
-            <p class="grid-note">저장된 GitHub 설정과 선택한 이슈 기준으로 각 작업 브랜치, 커밋 메시지, 큐 그룹을 미리 확인한다.</p>
-          </div>
-          <strong id="workflow_batch_preview_count" class="field-pill">0건</strong>
-        </div>
-        <div id="workflow_batch_preview_list" class="batch-preview-list">
-          <p class="batch-preview-empty">이슈를 선택하면 미리보기를 표시한다.</p>
-        </div>
-      </section>
 
       <div class="actions">
         <label class="checkbox-row"><input id="allow_auto_commit" type="checkbox" checked> 로컬 테스트 없이 자동 커밋 허용</label>
@@ -397,24 +448,102 @@
 
       <div class="repo-mapping-modal__body">
         <form id="repo_mapping_edit_form" class="repo-mapping-modal__form">
-          <div class="repo-mapping-inputs repo-mapping-inputs--modal">
-            <input id="repo_mapping_edit_space_key" type="text" placeholder="예: GCPPLDCAD">
-            <select id="repo_mapping_edit_provider">
-              <option value="github">GitHub</option>
-              <option value="gitlab">GitLab</option>
-            </select>
-            <input id="repo_mapping_edit_repo_owner" type="text" placeholder="GitHub owner">
-            <input id="repo_mapping_edit_repo_name" type="text" placeholder="GitHub repo">
-            <input id="repo_mapping_edit_repo_ref" type="text" placeholder="GitLab project path" hidden>
-            <input id="repo_mapping_edit_base_branch" type="text" placeholder="기본 브랜치">
-            <input id="repo_mapping_edit_local_repo_path" type="text" placeholder="로컬 저장소 경로">
-            <input id="repo_mapping_edit_scm_token" type="password" placeholder="새 SCM Token 입력 시 갱신">
-            <input id="repo_mapping_edit_github_token" type="hidden">
-          </div>
+          <section class="repo-mapping-group">
+            <div class="repo-mapping-group__header">
+              <strong>1. 공간 키</strong>
+              <p>수정할 Jira 공간 키를 확인한다.</p>
+            </div>
+            <div class="repo-mapping-group__body">
+              <label class="repo-mapping-field repo-mapping-field--full">
+                <span>공간 키</span>
+                <input id="repo_mapping_edit_space_key" type="text" placeholder="예: GCPPLDCAD">
+              </label>
+            </div>
+          </section>
+
+          <section class="repo-mapping-group">
+            <div class="repo-mapping-group__header">
+              <strong>2. 저장소 선택</strong>
+              <p>SCM Provider만 먼저 선택한다.</p>
+            </div>
+            <div class="repo-mapping-group__body">
+              <label class="repo-mapping-field">
+                <span>SCM Provider</span>
+                <select id="repo_mapping_edit_provider">
+                  <option value="github">GitHub</option>
+                  <option value="gitlab">GitLab</option>
+                </select>
+              </label>
+            </div>
+          </section>
+
+          <details id="repo_mapping_edit_settings_panel" class="repo-mapping-group repo-mapping-group--details" open>
+            <summary class="repo-mapping-group__summary">
+              <div class="repo-mapping-group__summary-copy">
+                <strong>3. 저장소 설정</strong>
+                <p id="repo_mapping_edit_settings_summary">선택한 Provider에 맞는 저장소 설정 항목을 연다.</p>
+              </div>
+            </summary>
+            <div class="repo-mapping-inputs repo-mapping-inputs--modal repo-mapping-inputs--settings">
+              <section class="repo-mapping-provider-panel" data-provider-panel="github">
+                <div class="repo-mapping-provider-panel__header">
+                  <strong>GitHub 저장소 정보</strong>
+                  <p>GitHub 저장소 owner와 repository 이름을 수정한다.</p>
+                </div>
+                <div class="repo-mapping-inputs repo-mapping-inputs--provider">
+                  <label class="repo-mapping-field">
+                    <span>GitHub Owner</span>
+                    <input id="repo_mapping_edit_repo_owner" type="text" placeholder="예: my-team">
+                  </label>
+                  <label class="repo-mapping-field">
+                    <span>GitHub Repository</span>
+                    <input id="repo_mapping_edit_repo_name" type="text" placeholder="예: jira-auto-agent">
+                  </label>
+                </div>
+              </section>
+              <section class="repo-mapping-provider-panel" data-provider-panel="gitlab" hidden>
+                <div class="repo-mapping-provider-panel__header">
+                  <strong>GitLab 저장소 정보</strong>
+                  <p>GitLab Base URL은 기본 설정에서 관리하고, 여기서는 Project Path를 수정한다.</p>
+                </div>
+                <div class="repo-mapping-inputs repo-mapping-inputs--provider">
+                  <p class="grid-note repo-mapping-inline-note">GitLab Base URL은 기본 설정 패널에서 저장한다.</p>
+                  <label class="repo-mapping-field repo-mapping-field--full">
+                    <span>GitLab Project Path</span>
+                    <input id="repo_mapping_edit_repo_ref" type="text" placeholder="예: group/subgroup/project-name">
+                  </label>
+                </div>
+              </section>
+              <section class="repo-mapping-provider-panel repo-mapping-provider-panel--common">
+                <div class="repo-mapping-provider-panel__header">
+                  <strong>공통 설정</strong>
+                  <p>브랜치, 로컬 경로, 공간 전용 토큰을 수정한다.</p>
+                </div>
+                <div class="repo-mapping-inputs repo-mapping-inputs--provider">
+                  <label class="repo-mapping-field">
+                    <span>기본 브랜치</span>
+                    <input id="repo_mapping_edit_base_branch" type="text" placeholder="예: main">
+                  </label>
+                  <div class="repo-mapping-field repo-mapping-field--full">
+                    <span>로컬 저장소 경로</span>
+                    <div class="repo-mapping-path-input">
+                      <input id="repo_mapping_edit_local_repo_path" type="text" placeholder="예: C:\git\jira-auto-agent">
+                      <button id="browse_repo_mapping_edit_local_repo_path" type="button" class="ghost-button">찾아보기</button>
+                    </div>
+                  </div>
+                  <label class="repo-mapping-field repo-mapping-field--full">
+                    <span>공간 전용 SCM Token</span>
+                    <input id="repo_mapping_edit_scm_token" type="password" placeholder="새 SCM Token 입력 시 갱신">
+                  </label>
+                </div>
+              </section>
+              <input id="repo_mapping_edit_github_token" type="hidden">
+            </div>
+          </details>
 
           <section class="repo-mapping-modal__token-panel" aria-live="polite">
             <div class="repo-mapping-modal__token-copy">
-              <strong>GitHub Token 상태</strong>
+              <strong>SCM Token 상태</strong>
               <p id="repo_mapping_edit_token_status" class="grid-note">저장된 토큰 상태를 표시한다.</p>
             </div>
             <button id="repo_mapping_edit_toggle_token" type="button" class="ghost-button">토큰 해제 예정</button>

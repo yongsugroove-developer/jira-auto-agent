@@ -54,6 +54,7 @@ DEFAULT_TOKEN_BUDGET = 40000
 CODEX_TIMEOUT_SECONDS = 20 * 60
 CLARIFICATION_TIMEOUT_SECONDS = 8 * 60
 TEST_TIMEOUT_SECONDS = 10 * 60
+JIRA_SEARCH_PAGE_SIZE = 100
 MAX_DIFF_CHARS = 60000
 MAX_OUTPUT_CHARS = 12000
 MAX_WORKFLOW_EVENTS = 160
@@ -1235,6 +1236,40 @@ def _mapping_requires_gitlab_base_url(mappings: list[dict[str, str]]) -> bool:
     return any(mapping.get("provider") == "gitlab" for mapping in mappings)
 
 
+def _directory_picker_initial_dir(initial_path: str) -> str:
+    candidate = Path(str(initial_path or "")).expanduser()
+    if candidate.is_file():
+        candidate = candidate.parent
+    elif not candidate.is_dir():
+        candidate = candidate.parent if candidate.parent.is_dir() else BASE_DIR
+    return str(candidate)
+
+
+def _open_directory_picker(initial_path: str = "") -> str:
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+    except Exception as exc:  # pragma: no cover - platform/runtime dependent
+        raise RuntimeError("directory_picker_unavailable") from exc
+
+    root = tk.Tk()
+    root.withdraw()
+    try:
+        root.attributes("-topmost", True)
+    except Exception:
+        pass
+
+    try:
+        selected_path = filedialog.askdirectory(initialdir=_directory_picker_initial_dir(initial_path), mustexist=True)
+    finally:
+        try:
+            root.destroy()
+        except Exception:
+            pass
+
+    return str(selected_path or "").strip()
+
+
 def _migrate_legacy_scm_payload(raw_value: dict[str, Any]) -> dict[str, Any]:
     repo_mappings, _ = _parse_repo_mappings(raw_value.get("repo_mappings", ""))
     repo_mapping_tokens = _normalize_repo_mapping_token_map(raw_value.get("repo_mapping_tokens", {}))
@@ -1552,6 +1587,61 @@ def _resolve_repo_context(scm_payload: dict[str, Any], issue_key: Any) -> RepoCo
 def _jira_headers(config: JiraConfig) -> dict[str, str]:
     token = base64.b64encode(f"{config.email}:{config.api_token}".encode("utf-8")).decode("utf-8")
     return {"Accept": "application/json", "Authorization": f"Basic {token}"}
+
+
+def _fetch_all_jira_backlog_issues(config: JiraConfig) -> tuple[list[dict[str, Any]], requests.Response | None]:
+    issues: list[dict[str, Any]] = []
+    next_page_token = ""
+    seen_tokens: set[str] = set()
+
+    while True:
+        request_payload: dict[str, Any] = {
+            "jql": config.jql,
+            "maxResults": JIRA_SEARCH_PAGE_SIZE,
+            "fields": ["summary", "status"],
+        }
+        if next_page_token:
+            request_payload["nextPageToken"] = next_page_token
+
+        response = _request_with_logging(
+            "POST",
+            f"{config.base_url}/rest/api/3/search/jql",
+            headers=_jira_headers(config),
+            json=request_payload,
+            timeout=DEFAULT_TIMEOUT,
+        )
+        if response.status_code >= 400:
+            return [], response
+
+        data = response.json()
+        page_items = data.get("issues", [])
+        issues.extend(page_items)
+
+        if not page_items:
+            break
+
+        next_token = str(data.get("nextPageToken", "") or "").strip()
+        if next_token:
+            if next_token in seen_tokens:
+                break
+            seen_tokens.add(next_token)
+            next_page_token = next_token
+            continue
+
+        total_raw = data.get("total")
+        try:
+            total = int(total_raw) if total_raw is not None else None
+        except (TypeError, ValueError):
+            total = None
+
+        if bool(data.get("isLast", False)):
+            break
+        if total is not None and len(issues) >= total:
+            break
+        if len(page_items) < JIRA_SEARCH_PAGE_SIZE:
+            break
+
+    return issues, None
 
 
 def _scm_headers(config: ScmRepoConfig) -> dict[str, str]:
@@ -3907,6 +3997,49 @@ def create_app() -> Flask:
         }
         return jsonify(saved_config)
 
+    @app.post("/api/local-repo-path/pick")
+    def pick_local_repo_path() -> Any:
+        payload = request.get_json(silent=True) or {}
+        initial_path = str(payload.get("initial_path", "")).strip()
+        try:
+            selected_path = _open_directory_picker(initial_path)
+        except RuntimeError:
+            return (
+                jsonify(
+                    {
+                        "ok": False,
+                        "error": "directory_picker_unavailable",
+                        "message": "디렉터리 선택기를 열 수 없다.",
+                    }
+                ),
+                500,
+            )
+
+        if not selected_path:
+            return jsonify(
+                {
+                    "ok": False,
+                    "error": "directory_selection_cancelled",
+                    "message": "디렉터리 선택이 취소되었다.",
+                }
+            )
+
+        resolved_path = Path(selected_path).expanduser()
+        if not resolved_path.is_dir():
+            return (
+                jsonify(
+                    {
+                        "ok": False,
+                        "error": "directory_path_invalid",
+                        "fields": ["local_repo_path"],
+                        "message": "디렉터리만 선택할 수 있다.",
+                    }
+                ),
+                400,
+            )
+
+        return jsonify({"ok": True, "path": str(resolved_path.resolve())})
+
     @app.post("/api/config/validate")
     def validate_config() -> Any:
         payload = request.get_json(silent=True) or {}
@@ -4020,26 +4153,19 @@ def create_app() -> Flask:
             return jsonify({"error": "jira_config_not_found"}), 400
 
         config = JiraConfig(**jira_payload)
-        response = _request_with_logging(
-            "POST",
-            f"{config.base_url}/rest/api/3/search/jql",
-            headers=_jira_headers(config),
-            json={"jql": config.jql, "maxResults": 20, "fields": ["summary", "status"]},
-            timeout=DEFAULT_TIMEOUT,
-        )
-        if response.status_code >= 400:
+        raw_issues, response = _fetch_all_jira_backlog_issues(config)
+        if response is not None:
             return jsonify({"error": "jira_request_failed", "status": response.status_code, "body": response.text}), 502
 
-        data = response.json()
         issues = [
             {
                 "key": issue.get("key", ""),
                 "summary": issue.get("fields", {}).get("summary", ""),
                 "status": issue.get("fields", {}).get("status", {}).get("name", ""),
             }
-            for issue in data.get("issues", [])
+            for issue in raw_issues
         ]
-        return jsonify({"issues": issues, "source": "jira"})
+        return jsonify({"issues": issues, "source": "jira", "count": len(issues)})
 
     @app.post("/api/jira/issue-detail")
     def jira_issue_detail() -> Any:

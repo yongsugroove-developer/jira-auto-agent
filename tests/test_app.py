@@ -121,15 +121,26 @@ def test_index_page_renders_automation_fields() -> None:
     assert 'id="backlog_result"' not in html
     assert "<h1>" not in html
     assert 'config-space-panel' in html
-    assert 'id="workflow_batch_preview_card"' in html
-    assert 'id="workflow_batch_preview_list"' in html
+    assert 'id="workflow_batch_preview_card"' not in html
+    assert 'id="workflow_batch_preview_list"' not in html
+    assert 'id="workflow_batch_preview_count"' not in html
     assert 'id="workflow_batch_actions"' in html
     assert 'id="batch_flow_board"' in html
     assert 'id="batch_flow_caption"' in html
+    assert 'id="jira_backlog_table_shell"' in html
+    assert 'class="jira-backlog-list"' in html
     assert 'id="mapping_github_token"' in html
+    assert 'id="browse_mapping_local_repo_path"' in html
+    assert 'id="repo_mapping_settings_panel"' in html
+    assert 'id="repo_mapping_settings_summary"' in html
     assert 'id="test_command" type="hidden"' in html
     assert 'id="repo_mapping_edit_form"' in html
     assert 'id="repo_mapping_edit_toggle_token"' in html
+    assert 'id="browse_repo_mapping_edit_local_repo_path"' in html
+    assert 'id="repo_mapping_edit_settings_panel"' in html
+    assert 'id="repo_mapping_edit_settings_summary"' in html
+    assert 'data-provider-panel="gitlab"' in html
+    assert 'data-provider-panel="github"' in html
     assert 'data-config-flow-step="jira"' in html
     assert 'data-config-flow-step="repo"' in html
     assert 'data-config-panel="jira"' in html
@@ -139,8 +150,9 @@ def test_index_page_renders_automation_fields() -> None:
     assert 'id="github_base_branch"' not in html
     assert 'id="github_token"' not in html
     assert 'id="local_repo_path"' not in html
-    assert 'id="jira_issue_description"' in html
-    assert 'id="jira_issue_comments"' in html
+    assert 'data-jira-accordion-trigger' not in html
+    assert 'id="jira_issue_description"' not in html
+    assert 'id="jira_issue_comments"' not in html
     assert 'id="work_status_section"' in html
     assert 'id="batch_list"' not in html
     assert 'id="batch_run_tabs"' in html
@@ -156,6 +168,9 @@ def test_index_page_renders_automation_fields() -> None:
     assert 'id="submit_batch_run_answers"' in html
     assert 'src="/static/batch-workspace.js"' in html
     assert 'id="work_status_hint"' not in html
+    assert "예) 승인 버튼 클릭 시 /api/approve를 호출하고, 기존 테이블 구조와 DOM id는 유지한다." in html
+    assert "예) 승인 버튼 클릭 시 API가 1회 호출된다." in html
+    assert 'class="repo-mapping-empty-state"' in html
     assert "Jira, GitHub, ?? ??? ??? ???? ??? ??? ?? ? Codex ?? ?? ??, diff, ?? ??? ? ???? ????." not in html
     assert "??? Jira ??? ?? ?? 4? ?? ????. ??? ???? ?? ??? ????? ????." not in html
     assert "? Jira ??? ???? GitHub Token? ??? ??? ??. ??? ?? ?? ???? ??? ??? ?? ??? ????." not in html
@@ -167,10 +182,12 @@ def test_index_page_renders_automation_fields() -> None:
     assert "공통 지시만 입력하면 선택한 각 이슈에 대해 브랜치와 커밋 메시지를 자동으로 생성한다." not in html
     assert "최근 배치와 이슈별 작업 상태를 여기에서 추적한다." not in html
     assert html.index('id="load_config"') < html.index('class="config-sticky-group"')
-    assert html.index('id="load_backlog"') < html.index("<table>")
-    assert html.index('id="workflow_batch_preview_card"') < html.index('id="workflow_batch_actions"')
+    assert html.index('id="load_backlog"') < html.index('id="issue_table"')
+    assert html.index('id="jira_backlog_table_shell"') < html.index('id="jira_selection_summary"')
     assert html.index('id="workflow_batch_actions"') < html.index('id="workflow_result"')
     assert html.index('id="work_status_section"') > html.index('id="workflow_result_actions"')
+    assert html.index('id="mapping_provider"') < html.index('id="repo_mapping_settings_panel"')
+    assert html.index('id="gitlab_base_url"') < html.index('id="mapping_repo_ref"')
 
 
 def test_maybe_start_agentation_server_skips_when_existing_server_is_healthy(monkeypatch) -> None:
@@ -297,6 +314,25 @@ def test_windows_packaging_scripts_exist_with_phase1_defaults() -> None:
     assert 'CODEX_CLI_PATH' in check_env
     assert 'AGENTATION_ENABLED = "0"' in run_dev
     assert 'phase-1-freeze' in freeze
+
+
+def test_jira_backlog_script_uses_inline_meta_without_click_helper_copy() -> None:
+    script = Path("app/static/app.js").read_text(encoding="utf-8")
+    batch_script = Path("app/static/batch-workspace.js").read_text(encoding="utf-8")
+
+    assert 'data-jira-issue-meta-inline' in script
+    assert 'data-jira-issue-meta-body' in script
+    assert 'issueAccordionCollapsed' in script
+    assert 'label class="jira-backlog-item__selector" aria-label="선택"' in script
+    assert 'label class="jira-backlog-item__selector" aria-label="선택"' in script
+    assert '<div class="jira-backlog-item__trigger"' in script
+    assert '<button type="button" class="jira-backlog-item__trigger"' not in script
+    assert '이슈를 선택하면 상세 설명을 표시한다.' in script
+    assert '최근 코멘트가 없습니다.' in script
+    assert '클릭하면 이슈 상세와 최근 코멘트를 펼친다.' not in script
+    assert 'data-jira-issue-meta></div>' not in script
+    assert 'checked: idx === 0' not in script
+    assert 'checked: index === 0' not in batch_script
 
 
 def test_mock_jira_issue_detail_returns_description_and_comments() -> None:
@@ -750,6 +786,124 @@ def test_save_config_stores_space_tokens_separately_and_hides_them(monkeypatch, 
     assert load_data["gitlab_base_url"] == ""
     assert load_data["repo_mapping_token_spaces"] == ["DEMO"]
     assert "repo_mapping_tokens" not in load_data
+
+
+def test_jira_backlog_fetches_all_pages(monkeypatch) -> None:
+    requested_payloads: list[dict[str, object]] = []
+
+    class FakeResponse:
+        def __init__(self, issues: list[dict[str, object]], total: int, next_page_token: str = "") -> None:
+            self.status_code = 200
+            self.text = ""
+            self._issues = issues
+            self._total = total
+            self._next_page_token = next_page_token
+
+        def json(self) -> dict[str, object]:
+            data: dict[str, object] = {
+                "issues": self._issues,
+                "total": self._total,
+                "maxResults": 100,
+            }
+            if self._next_page_token:
+                data["nextPageToken"] = self._next_page_token
+            else:
+                data["isLast"] = True
+            return data
+
+    def fake_load(self, provider: str):  # noqa: ANN001
+        if provider == "jira":
+            return {
+                "base_url": "https://example.atlassian.net",
+                "email": "tester@example.com",
+                "api_token": "jira-token",
+                "jql": "project = DEMO",
+            }
+        return None
+
+    def fake_request(method: str, url: str, **kwargs):  # noqa: ANN001
+        assert method == "POST"
+        assert url == "https://example.atlassian.net/rest/api/3/search/jql"
+        payload = dict(kwargs.get("json", {}))
+        requested_payloads.append(payload)
+        next_page_token = str(payload.get("nextPageToken", "") or "")
+        if not next_page_token:
+            issues = [
+                {"key": f"DEMO-{index + 1}", "fields": {"summary": f"Task {index + 1}", "status": {"name": "To Do"}}}
+                for index in range(100)
+            ]
+            return FakeResponse(issues, 105, next_page_token="page-2")
+        issues = [
+            {"key": f"DEMO-{index + 101}", "fields": {"summary": f"Task {index + 101}", "status": {"name": "To Do"}}}
+            for index in range(5)
+        ]
+        return FakeResponse(issues, 105)
+
+    monkeypatch.setattr(main_module.CredentialStore, "load", fake_load)
+    monkeypatch.setattr(main_module, "_request_with_logging", fake_request)
+
+    app = create_app()
+    client = app.test_client()
+
+    response = client.post("/api/jira/backlog", json={})
+
+    assert response.status_code == 200
+    data = response.get_json()
+    assert data is not None
+    assert data["source"] == "jira"
+    assert data["count"] == 105
+    assert len(data["issues"]) == 105
+    assert data["issues"][0]["key"] == "DEMO-1"
+    assert data["issues"][-1]["key"] == "DEMO-105"
+    assert "nextPageToken" not in requested_payloads[0]
+    assert requested_payloads[1]["nextPageToken"] == "page-2"
+    assert all(payload["maxResults"] == 100 for payload in requested_payloads)
+
+
+def test_pick_local_repo_path_returns_selected_directory(monkeypatch, tmp_path) -> None:
+    db_path = tmp_path / "app.db"
+    monkeypatch.setattr(main_module, "DB_PATH", db_path)
+    monkeypatch.setattr(main_module, "DATA_DIR", tmp_path)
+    monkeypatch.setenv("APP_ENC_KEY", main_module.Fernet.generate_key().decode("utf-8"))
+
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+    monkeypatch.setattr(main_module, "_open_directory_picker", lambda initial_path="": str(repo_path))
+
+    app = create_app()
+    client = app.test_client()
+
+    response = client.post("/api/local-repo-path/pick", json={"initial_path": str(tmp_path)})
+
+    assert response.status_code == 200
+    data = response.get_json()
+    assert data is not None
+    assert data["ok"] is True
+    assert data["path"] == str(repo_path.resolve())
+
+
+def test_pick_local_repo_path_rejects_non_directory(monkeypatch, tmp_path) -> None:
+    db_path = tmp_path / "app.db"
+    monkeypatch.setattr(main_module, "DB_PATH", db_path)
+    monkeypatch.setattr(main_module, "DATA_DIR", tmp_path)
+    monkeypatch.setenv("APP_ENC_KEY", main_module.Fernet.generate_key().decode("utf-8"))
+
+    file_path = tmp_path / "repo.txt"
+    file_path.write_text("demo", encoding="utf-8")
+    monkeypatch.setattr(main_module, "_open_directory_picker", lambda initial_path="": str(file_path))
+
+    app = create_app()
+    client = app.test_client()
+
+    response = client.post("/api/local-repo-path/pick", json={"initial_path": str(tmp_path)})
+
+    assert response.status_code == 400
+    data = response.get_json()
+    assert data is not None
+    assert data["ok"] is False
+    assert data["error"] == "directory_path_invalid"
+    assert data["fields"] == ["local_repo_path"]
+    assert "디렉터리만 선택" in data["message"]
 
 
 def test_save_config_preserves_existing_space_token_when_blank_on_reload(monkeypatch, tmp_path) -> None:

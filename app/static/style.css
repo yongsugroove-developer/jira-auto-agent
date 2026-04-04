@@ -286,6 +286,171 @@ table {
   background: rgba(255, 255, 255, 0.78);
 }
 
+.table-scroll-shell {
+  margin-top: 12px;
+  max-height: 420px;
+  overflow: auto;
+  border: 1px solid rgba(229, 229, 229, 0.96);
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.78);
+}
+
+.table-scroll-shell table {
+  margin-top: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.table-scroll-shell thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: rgba(245, 246, 249, 0.98);
+  backdrop-filter: blur(8px);
+}
+
+.jira-backlog-shell {
+  margin-top: 12px;
+  max-height: 1120px;
+  overflow: auto;
+  border: 1px solid #e5e5e5;
+  border-radius: 10px;
+  background: #fff;
+}
+
+.jira-backlog-list {
+  display: grid;
+  gap: 16px;
+  padding: 14px;
+}
+
+.jira-backlog-item {
+  display: grid;
+  gap: 16px;
+  padding: 14px 16px;
+  text-align: left;
+  border: 1px solid #e5e5e5;
+  border-radius: 10px;
+  background: #fff;
+  transition: border-color 0.18s ease;
+}
+
+.jira-backlog-item.is-selected {
+  border-color: #2a73f5;
+  box-shadow: none;
+  background: #fff;
+}
+
+.jira-backlog-item__row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 16px;
+  align-items: start;
+}
+
+.jira-backlog-item__trigger {
+  display: grid;
+  gap: 12px;
+  width: 100%;
+  padding: 0;
+  text-align: left;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+}
+
+.jira-backlog-item__heading {
+  display: grid;
+  gap: 10px;
+  justify-items: start;
+}
+
+.jira-backlog-item__title {
+  display: grid;
+  gap: 4px;
+}
+
+.jira-backlog-item__title strong {
+  font-size: 15px;
+}
+
+.jira-backlog-item__title span {
+  color: var(--muted);
+  line-height: 1.6;
+}
+
+.jira-backlog-item__meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  justify-content: flex-start;
+}
+
+.jira-backlog-item__body {
+  display: grid;
+  gap: 16px;
+}
+
+.jira-backlog-item__meta-body {
+  margin-top: 0;
+}
+
+.jira-backlog-item__selector {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  min-width: 24px;
+  height: 24px;
+  padding: 0;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.jira-backlog-item__selector::before {
+  content: "";
+  display: block;
+  width: 20px;
+  height: 20px;
+  border: 1px solid #bebebe;
+  border-radius: 4px;
+  background: #fff;
+  box-sizing: border-box;
+}
+
+.jira-backlog-item__selector.is-checked::before {
+  border-color: #2a73f5;
+  background: #2a73f5;
+}
+
+.jira-backlog-item__body[hidden] {
+  display: none;
+}
+
+.jira-backlog-item__detail-grid {
+  display: grid;
+  gap: 16px;
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.jira-backlog-item__detail-card {
+  display: grid;
+  gap: 16px;
+  padding: 16px;
+  text-align: left;
+  border: 1px solid #e5e5e5;
+  border-radius: 10px;
+  background: #fff;
+}
+
+.jira-backlog-item__detail-card h3 {
+  margin: 0;
+}
+
+.jira-backlog-item__detail-card .result {
+  margin-top: 0;
+}
+
 th,
 td {
   border-bottom: 1px solid rgba(229, 229, 229, 0.96);
@@ -1401,7 +1566,7 @@ tbody tr:hover {
 
 .repo-mapping-builder {
   display: grid;
-  gap: 14px;
+  gap: 16px;
   padding: 18px;
   border: 1px solid rgba(229, 229, 229, 0.96);
   border-radius: 20px;
@@ -1412,6 +1577,89 @@ tbody tr:hover {
   margin-top: 0;
 }
 
+.repo-mapping-group {
+  display: grid;
+  gap: 14px;
+  padding: 16px;
+  border: 1px solid rgba(229, 229, 229, 0.96);
+  border-radius: 18px;
+  background: rgba(245, 246, 249, 0.72);
+}
+
+.repo-mapping-group__header {
+  display: grid;
+  gap: 6px;
+}
+
+.repo-mapping-group__header strong {
+  font-size: 14px;
+}
+
+.repo-mapping-group__header p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.repo-mapping-group--details {
+  gap: 0;
+  padding: 0;
+  overflow: hidden;
+}
+
+.repo-mapping-group__summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 16px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.repo-mapping-group__summary::-webkit-details-marker {
+  display: none;
+}
+
+.repo-mapping-group__summary::after {
+  content: "";
+  width: 10px;
+  height: 10px;
+  border-right: 2px solid rgba(78, 78, 78, 0.8);
+  border-bottom: 2px solid rgba(78, 78, 78, 0.8);
+  transform: rotate(45deg);
+  transition: transform 0.18s ease;
+  flex-shrink: 0;
+  margin-top: -4px;
+}
+
+.repo-mapping-group--details[open] .repo-mapping-group__summary::after {
+  transform: rotate(225deg);
+  margin-top: 2px;
+}
+
+.repo-mapping-group__summary-copy {
+  display: grid;
+  gap: 6px;
+}
+
+.repo-mapping-group__summary-copy strong {
+  font-size: 14px;
+}
+
+.repo-mapping-group__summary-copy p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.repo-mapping-group__body {
+  display: grid;
+  gap: 12px;
+}
+
 .repo-mapping-help,
 .grid-note {
   margin: 0;
@@ -1420,21 +1668,88 @@ tbody tr:hover {
   line-height: 1.6;
 }
 
-.repo-mapping-section-title {
-  grid-column: 1 / -1;
-  font-size: 13px;
-  font-weight: 700;
-  color: var(--accent-strong);
-}
-
 .repo-mapping-inputs {
   display: grid;
   gap: 12px;
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
-#mapping_space_key {
+.repo-mapping-inputs--settings {
+  padding: 0 16px 16px;
+}
+
+.repo-mapping-provider-panel {
+  display: grid;
+  gap: 12px;
+  padding: 16px;
+  border: 1px solid rgba(229, 229, 229, 0.96);
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.9);
+}
+
+.repo-mapping-provider-panel[hidden],
+.repo-mapping-field[hidden],
+.repo-mapping-inline-note[hidden] {
+  display: none !important;
+}
+
+.repo-mapping-provider-panel--common {
+  background: rgba(245, 246, 249, 0.82);
+}
+
+.repo-mapping-provider-panel__header {
+  display: grid;
+  gap: 6px;
+}
+
+.repo-mapping-provider-panel__header strong {
+  font-size: 13px;
+}
+
+.repo-mapping-provider-panel__header p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.repo-mapping-inputs--provider {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.repo-mapping-field {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.repo-mapping-field span {
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.repo-mapping-field--full,
+.repo-mapping-inline-note,
+.repo-mapping-inputs--provider .repo-mapping-inline-note,
+.repo-mapping-inputs--modal #repo_mapping_edit_github_token,
+.repo-mapping-inputs #mapping_github_token {
   grid-column: 1 / -1;
+}
+
+.repo-mapping-path-input {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+
+.repo-mapping-path-input input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.repo-mapping-path-input .ghost-button {
+  flex-shrink: 0;
 }
 
 .repo-mapping-list {
@@ -1487,6 +1802,27 @@ tbody tr:hover {
   font-size: 13px;
 }
 
+.repo-mapping-empty-state {
+  display: grid;
+  gap: 8px;
+  padding: 18px;
+  border: 1px dashed rgba(42, 115, 245, 0.28);
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.92);
+  box-shadow: inset 0 0 0 1px rgba(42, 115, 245, 0.06);
+}
+
+.repo-mapping-empty-state strong {
+  font-size: 14px;
+}
+
+.repo-mapping-empty-state p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
 .repo-mapping-modal {
   width: min(760px, 100%);
 }
@@ -1500,12 +1836,6 @@ tbody tr:hover {
 .repo-mapping-modal__form {
   display: grid;
   gap: 16px;
-}
-
-.repo-mapping-inputs--modal #repo_mapping_edit_space_key,
-.repo-mapping-inputs--modal #repo_mapping_edit_local_repo_path,
-.repo-mapping-inputs--modal #repo_mapping_edit_github_token {
-  grid-column: 1 / -1;
 }
 
 .repo-mapping-modal__token-panel {
@@ -2052,6 +2382,11 @@ tbody tr:hover {
     flex-direction: column;
     align-items: flex-start;
   }
+
+  .jira-backlog-item__row,
+  .jira-backlog-item__detail-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 
 @media (max-width: 640px) {
@@ -2065,6 +2400,15 @@ tbody tr:hover {
   .guide-layout {
     padding-left: 16px;
     padding-right: 16px;
+  }
+
+  .repo-mapping-inputs {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .repo-mapping-path-input {
+    flex-direction: column;
+    align-items: stretch;
   }
 
   .guide-modal {

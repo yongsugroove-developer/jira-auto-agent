@@ -232,5 +232,6 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\freeze-phase1.ps1
 
 - [운영 가이드](docs/operator-guide.md)
 - [1차 작업 프리징 기준](docs/phase-1-freeze.md)
+- [TODO](docs/todo.md)
 - [Agent 작업 흐름 메모](docs/agent-workflow.md)
 - [PoC 계획 문서](docs/jira-github-commit-automation-plan.md)

@@ -39,6 +39,8 @@ const jiraState = {
   selectedIssueDetail: null,
   issueDetailRequest: null,
   pendingIssueKey: null,
+  expandedIssueKey: null,
+  issueAccordionCollapsed: false,
 };
 
 const workflowState = {
@@ -1101,33 +1103,152 @@ function renderWorkflowClarification(data) {
   renderWorkflowClarificationSync(data);
 }
 
+function issueMetaValues(source, options) {
+  const settings = options || {};
+  const issue = source || {};
+  return [
+    settings.includeKey ? (issue.issue_key || issue.key || "") : "",
+    issue.status ? `상태 ${issue.status}` : "",
+    issue.issue_type ? `유형 ${issue.issue_type}` : "",
+    issue.priority ? `우선순위 ${issue.priority}` : "",
+    issue.assignee ? `담당 ${issue.assignee}` : "",
+    ...(Array.isArray(issue.labels) ? issue.labels.map((label) => `라벨 ${label}`) : []),
+  ].filter(Boolean);
+}
+
+function renderIssueMetaPills(source, options) {
+  return issueMetaValues(source, options)
+    .map((value) => `<span class="field-pill">${escapeHtml(value)}</span>`)
+    .join("");
+}
+
+function renderIssueStatusPill(source) {
+  return renderIssueMetaPills({ status: source && source.status ? source.status : "" });
+}
+
+function renderIssueBodyMetaPills(source) {
+  const detail = source || {};
+  const values = [
+    detail.issue_type ? `?좏삎 ${detail.issue_type}` : "",
+    detail.priority ? `?곗꽑?쒖쐞 ${detail.priority}` : "",
+    detail.assignee ? `?대떦 ${detail.assignee}` : "",
+    ...(Array.isArray(detail.labels) ? detail.labels.map((label) => `?쇰꺼 ${label}`) : []),
+  ].filter(Boolean);
+  return values.map((value) => `<span class="field-pill">${escapeHtml(value)}</span>`).join("");
+}
+
+function resetIssueMetaInline(item) {
+  const status = String(item.attr("data-issue-status") || "").trim();
+  const html = renderIssueStatusPill({ status });
+  item.find("[data-jira-issue-meta-inline]").html(html).prop("hidden", !html);
+}
+
+function renderIssueAccordionItem(issue, options) {
+  const settings = options || {};
+  const checked = settings.checked ? 'checked="checked"' : "";
+  const inputName = settings.inputName || "selected_issue";
+  const inputType = settings.inputType || "radio";
+  const safeKey = escapeHtml(issue.issue_key || issue.key || "");
+  const safeSummary = escapeHtml(issue.issue_summary || issue.summary || "");
+  const safeStatus = escapeHtml(issue.status || "");
+  const metaHtml = renderIssueStatusPill({ status: issue.status || "" });
+  return `
+    <article class="jira-backlog-item ${settings.checked ? "is-selected" : ""}" data-issue-key="${safeKey}" data-issue-status="${safeStatus}">
+      <div class="jira-backlog-item__row">
+        <div class="jira-backlog-item__trigger" data-jira-accordion-trigger="${safeKey}" aria-expanded="${settings.checked ? "true" : "false"}">
+          <div class="jira-backlog-item__heading">
+            <div class="jira-backlog-item__title">
+              <strong>${safeKey}</strong>
+              <span>${safeSummary}</span>
+            </div>
+            <div class="jira-backlog-item__meta" data-jira-issue-meta-inline ${metaHtml ? "" : "hidden"}>${metaHtml}</div>
+          </div>
+        </div>
+        <label class="jira-backlog-item__selector">
+          <input
+            type="${inputType}"
+            name="${inputName}"
+            ${checked}
+            data-key="${safeKey}"
+            data-summary="${safeSummary}"
+            aria-label="선택"
+          >
+          <span aria-hidden="true"></span>
+        </label>
+      </div>
+      <div class="jira-backlog-item__body" data-jira-accordion-body ${settings.checked ? "" : "hidden"}>
+        <div class="jira-backlog-item__meta jira-backlog-item__meta-body" data-jira-issue-meta-body hidden></div>
+        <div class="jira-backlog-item__detail-grid">
+          <section class="jira-backlog-item__detail-card">
+            <h3>선택 이슈 상세</h3>
+            <pre class="result result-medium" data-jira-issue-description>이슈를 선택하면 상세 설명을 표시한다.</pre>
+          </section>
+          <section class="jira-backlog-item__detail-card">
+            <h3>최근 코멘트</h3>
+            <pre class="result result-medium" data-jira-issue-comments>이슈를 선택하면 최근 코멘트를 표시한다.</pre>
+          </section>
+        </div>
+      </div>
+    </article>
+  `;
+}
+
+function issueAccordionItems() {
+  return $("#issue_table .jira-backlog-item");
+}
+
+function issueAccordionItem(issueKey) {
+  const key = String(issueKey || "").trim();
+  return issueAccordionItems().filter(function () {
+    return String($(this).attr("data-issue-key") || "").trim() === key;
+  }).first();
+}
+
+function syncIssueAccordionState() {
+  const checkedInputs = $("input[name='selected_issue']:checked, input[name='selected_issues']:checked");
+  const selectedInput = checkedInputs.first();
+  const selectedKey = String(selectedInput.data("key") || "").trim();
+  if (!selectedKey) {
+    jiraState.expandedIssueKey = null;
+    jiraState.issueAccordionCollapsed = false;
+  } else if (jiraState.issueAccordionCollapsed) {
+    const selectedKeys = checkedInputs.map(function () {
+      return String($(this).data("key") || "").trim();
+    }).get();
+    if (!selectedKeys.includes(jiraState.expandedIssueKey)) {
+      jiraState.expandedIssueKey = selectedKey;
+      jiraState.issueAccordionCollapsed = false;
+    }
+  } else if (!jiraState.expandedIssueKey || jiraState.expandedIssueKey === "") {
+    jiraState.expandedIssueKey = selectedKey;
+  } else {
+    const selectedKeys = checkedInputs.map(function () {
+      return String($(this).data("key") || "").trim();
+    }).get();
+    if (!selectedKeys.includes(jiraState.expandedIssueKey)) {
+      jiraState.expandedIssueKey = selectedKey;
+    }
+  }
+
+  issueAccordionItems().each(function () {
+    const item = $(this);
+    const key = String(item.attr("data-issue-key") || "").trim();
+    const checked = item.find("input[name='selected_issue'], input[name='selected_issues']").is(":checked");
+    const expanded = checked && !jiraState.issueAccordionCollapsed && jiraState.expandedIssueKey === key;
+    item.toggleClass("is-selected", checked);
+    item.find(".jira-backlog-item__selector").toggleClass("is-checked", checked);
+    item.find("[data-jira-accordion-trigger]").attr("aria-expanded", expanded ? "true" : "false");
+    item.find("[data-jira-accordion-body]").prop("hidden", !expanded);
+  });
+}
+
 function setupIssueTable(data) {
   const rows = (data.issues || [])
-    .map((issue, idx) => {
-      const checked = idx === 0 ? 'checked="checked"' : "";
-      const safeKey = escapeHtml(issue.key || "");
-      const safeSummary = escapeHtml(issue.summary || "");
-      const safeStatus = escapeHtml(issue.status || "");
-      return `
-        <tr>
-          <td>${safeKey}</td>
-          <td>${safeSummary}</td>
-          <td>${safeStatus}</td>
-          <td>
-            <input
-              type="radio"
-              name="selected_issue"
-              ${checked}
-              data-key="${safeKey}"
-              data-summary="${safeSummary}"
-            >
-          </td>
-        </tr>
-      `;
-    })
+    .map((issue) => renderIssueAccordionItem(issue))
     .join("");
 
-  $("#issue_table").html(rows);
+  $("#issue_table").html(rows || '<p class="batch-preview-empty">조회된 이슈가 없습니다.</p>');
+  syncIssueAccordionState();
   const issue = selectedIssue();
   if (issue) {
     fillWorkflow(issue);
@@ -1140,28 +1261,32 @@ function setupIssueTable(data) {
 function resetIssueDetail(message) {
   jiraState.selectedIssueDetail = null;
   jiraState.pendingIssueKey = null;
-  $("#jira_issue_meta").empty();
-  $("#jira_issue_description").text(message || "이슈를 선택하면 상세 설명이 표시됩니다.");
-  $("#jira_issue_comments").text(message || "이슈를 선택하면 최근 코멘트가 표시됩니다.");
+  jiraState.expandedIssueKey = null;
+  jiraState.issueAccordionCollapsed = false;
+  issueAccordionItems().each(function () {
+    const item = $(this);
+    resetIssueMetaInline(item);
+    item.find("[data-jira-issue-meta-body]").empty().prop("hidden", true);
+    item.find("[data-jira-issue-description]").text(message || "이슈를 선택하면 상세 설명을 표시한다.");
+    item.find("[data-jira-issue-comments]").text(message || "이슈를 선택하면 최근 코멘트를 표시한다.");
+  });
+  syncIssueAccordionState();
 }
 
 function renderIssueDetail(detail) {
-  const metaItems = [
-    detail.issue_key || "",
-    detail.status ? `상태 ${detail.status}` : "",
-    detail.issue_type ? `유형 ${detail.issue_type}` : "",
-    detail.priority ? `우선순위 ${detail.priority}` : "",
-    detail.assignee ? `담당 ${detail.assignee}` : "",
-  ].filter(Boolean);
-
-  const labels = detail.labels || [];
-  $("#jira_issue_meta").html(
-    metaItems.concat(labels.map((label) => `라벨 ${label}`))
-      .map((item) => `<span class="field-pill">${escapeHtml(item)}</span>`)
-      .join("")
-  );
-  $("#jira_issue_description").text(detail.description || "Jira 설명이 비어 있습니다.");
-  $("#jira_issue_comments").text(detail.comments_text || "최근 코멘트가 없습니다.");
+  const item = issueAccordionItem(detail.issue_key);
+  if (!item.length) {
+    return;
+  }
+  item.attr("data-issue-status", String(detail.status || "").trim());
+  item.find("[data-jira-issue-meta-inline]").html(renderIssueStatusPill(detail)).prop("hidden", false);
+  const bodyMetaHtml = renderIssueBodyMetaPills(detail);
+  item.find("[data-jira-issue-meta-body]").html(bodyMetaHtml).prop("hidden", !bodyMetaHtml);
+  item.find("[data-jira-issue-description]").text(detail.description || "Jira 설명이 비어 있습니다.");
+  item.find("[data-jira-issue-comments]").text(detail.comments_text || "최근 코멘트가 없습니다.");
+  jiraState.expandedIssueKey = String(detail.issue_key || "").trim();
+  jiraState.issueAccordionCollapsed = false;
+  syncIssueAccordionState();
 }
 
 function loadIssueDetail(issueKey) {
@@ -1175,10 +1300,15 @@ function loadIssueDetail(issueKey) {
     jiraState.issueDetailRequest.abort();
   }
 
+  jiraState.expandedIssueKey = key;
+  jiraState.issueAccordionCollapsed = false;
+  syncIssueAccordionState();
   jiraState.pendingIssueKey = key;
-  $("#jira_issue_meta").empty();
-  $("#jira_issue_description").text(`${key} 상세를 불러오는 중입니다...`);
-  $("#jira_issue_comments").text(`${key} 코멘트를 불러오는 중입니다...`);
+  const item = issueAccordionItem(key);
+  resetIssueMetaInline(item);
+  item.find("[data-jira-issue-meta-body]").empty().prop("hidden", true);
+  item.find("[data-jira-issue-description]").text(`${key} 상세를 불러오는 중입니다...`);
+  item.find("[data-jira-issue-comments]").text(`${key} 코멘트를 불러오는 중입니다...`);
 
   jiraState.issueDetailRequest = $.ajax({
     url: "/api/jira/issue-detail",
@@ -1205,9 +1335,11 @@ function loadIssueDetail(issueKey) {
         return;
       }
       jiraState.selectedIssueDetail = null;
-      $("#jira_issue_meta").empty();
-      $("#jira_issue_description").text("이슈 상세를 불러오지 못했습니다.");
-      $("#jira_issue_comments").text((xhr.responseJSON && xhr.responseJSON.error) || xhr.responseText || "오류");
+      const targetItem = issueAccordionItem(key);
+      resetIssueMetaInline(targetItem);
+      targetItem.find("[data-jira-issue-meta-body]").empty().prop("hidden", true);
+      targetItem.find("[data-jira-issue-description]").text("이슈 상세를 불러오지 못했습니다.");
+      targetItem.find("[data-jira-issue-comments]").text((xhr.responseJSON && xhr.responseJSON.error) || xhr.responseText || "오류");
     })
     .always(() => {
       if (jiraState.pendingIssueKey === key) {
@@ -1215,6 +1347,97 @@ function loadIssueDetail(issueKey) {
       }
       jiraState.issueDetailRequest = null;
     });
+}
+
+function renderIssueBodyMetaPills(source) {
+  const detail = source || {};
+  const values = [
+    detail.issue_type ? `유형 ${detail.issue_type}` : "",
+    detail.priority ? `우선순위 ${detail.priority}` : "",
+    detail.assignee ? `담당 ${detail.assignee}` : "",
+    ...(Array.isArray(detail.labels) ? detail.labels.map((label) => `라벨 ${label}`) : []),
+  ].filter(Boolean);
+  return values.map((value) => `<span class="field-pill">${escapeHtml(value)}</span>`).join("");
+}
+
+function renderIssueAccordionItem(issue, options) {
+  const settings = options || {};
+  const checked = settings.checked ? 'checked="checked"' : "";
+  const inputName = settings.inputName || "selected_issue";
+  const inputType = settings.inputType || "radio";
+  const safeKey = escapeHtml(issue.issue_key || issue.key || "");
+  const safeSummary = escapeHtml(issue.issue_summary || issue.summary || "");
+  const safeStatus = escapeHtml(issue.status || "");
+  const metaHtml = renderIssueStatusPill({ status: issue.status || "" });
+  return `
+    <article class="jira-backlog-item ${settings.checked ? "is-selected" : ""}" data-issue-key="${safeKey}" data-issue-status="${safeStatus}">
+      <div class="jira-backlog-item__row">
+        <div class="jira-backlog-item__trigger" data-jira-accordion-trigger="${safeKey}" aria-expanded="${settings.checked ? "true" : "false"}">
+          <div class="jira-backlog-item__heading">
+            <div class="jira-backlog-item__title">
+              <strong>${safeKey}</strong>
+              <span>${safeSummary}</span>
+            </div>
+            <div class="jira-backlog-item__meta" data-jira-issue-meta-inline ${metaHtml ? "" : "hidden"}>${metaHtml}</div>
+          </div>
+        </div>
+        <label class="jira-backlog-item__selector" aria-label="선택">
+          <input
+            type="${inputType}"
+            name="${inputName}"
+            ${checked}
+            data-key="${safeKey}"
+            data-summary="${safeSummary}"
+            aria-label="선택"
+          >
+        </label>
+      </div>
+      <div class="jira-backlog-item__body" data-jira-accordion-body ${settings.checked ? "" : "hidden"}>
+        <div class="jira-backlog-item__meta jira-backlog-item__meta-body" data-jira-issue-meta-body hidden></div>
+        <div class="jira-backlog-item__detail-grid">
+          <section class="jira-backlog-item__detail-card">
+            <h3>선택 이슈 상세</h3>
+            <pre class="result result-medium" data-jira-issue-description>이슈를 선택하면 상세 설명을 표시한다.</pre>
+          </section>
+          <section class="jira-backlog-item__detail-card">
+            <h3>최근 코멘트</h3>
+            <pre class="result result-medium" data-jira-issue-comments>이슈를 선택하면 최근 코멘트를 표시한다.</pre>
+          </section>
+        </div>
+      </div>
+    </article>
+  `;
+}
+
+function resetIssueDetail(message) {
+  jiraState.selectedIssueDetail = null;
+  jiraState.pendingIssueKey = null;
+  jiraState.expandedIssueKey = null;
+  jiraState.issueAccordionCollapsed = false;
+  issueAccordionItems().each(function () {
+    const item = $(this);
+    resetIssueMetaInline(item);
+    item.find("[data-jira-issue-meta-body]").empty().prop("hidden", true);
+    item.find("[data-jira-issue-description]").text(message || "이슈를 선택하면 상세 설명을 표시한다.");
+    item.find("[data-jira-issue-comments]").text(message || "이슈를 선택하면 최근 코멘트를 표시한다.");
+  });
+  syncIssueAccordionState();
+}
+
+function renderIssueDetail(detail) {
+  const item = issueAccordionItem(detail.issue_key);
+  if (!item.length) {
+    return;
+  }
+  item.attr("data-issue-status", String(detail.status || "").trim());
+  item.find("[data-jira-issue-meta-inline]").html(renderIssueStatusPill(detail)).prop("hidden", false);
+  const bodyMetaHtml = renderIssueBodyMetaPills(detail);
+  item.find("[data-jira-issue-meta-body]").html(bodyMetaHtml).prop("hidden", !bodyMetaHtml);
+  item.find("[data-jira-issue-description]").text(detail.description || "Jira 설명이 비어 있습니다.");
+  item.find("[data-jira-issue-comments]").text(detail.comments_text || "최근 코멘트가 없습니다.");
+  jiraState.expandedIssueKey = String(detail.issue_key || "").trim();
+  jiraState.issueAccordionCollapsed = false;
+  syncIssueAccordionState();
 }
 
 function setSummaryCard(title, value, detail) {
@@ -1887,11 +2110,37 @@ $(document).ready(function () {
   });
 
   $(document).on("change", "input[name='selected_issue']", function () {
+    jiraState.expandedIssueKey = String($(this).data("key") || "").trim();
+    jiraState.issueAccordionCollapsed = false;
+    syncIssueAccordionState();
     const issue = selectedIssue();
     if (issue) {
       fillWorkflow(issue);
       loadIssueDetail(issue.issue_key);
     }
+  });
+
+  $(document).on("click", "[data-jira-accordion-trigger]", function () {
+    const item = $(this).closest(".jira-backlog-item");
+    const input = item.find("input[name='selected_issue'], input[name='selected_issues']").first();
+    if (!input.length) {
+      return;
+    }
+    if (!input.is(":checked")) {
+      input.prop("checked", true).trigger("change");
+      return;
+    }
+    const key = String(input.data("key") || "").trim();
+    if (jiraState.expandedIssueKey === key && !jiraState.issueAccordionCollapsed) {
+      jiraState.expandedIssueKey = key;
+      jiraState.issueAccordionCollapsed = true;
+      syncIssueAccordionState();
+      return;
+    }
+    jiraState.expandedIssueKey = key;
+    jiraState.issueAccordionCollapsed = false;
+    syncIssueAccordionState();
+    loadIssueDetail(jiraState.expandedIssueKey);
   });
 
   $("#add_repo_mapping").on("click", function () {
@@ -2248,7 +2497,8 @@ $(document).off("click", "[data-repo-mapping-toggle-token]").on("click", "[data-
 
     if (target.clear_saved_token) {
       target.clear_saved_token = false;
-    } else if (target.github_token) {
+    } else if (target.scm_token || target.github_token) {
+      target.scm_token = "";
       target.github_token = "";
     } else if (target.has_saved_token) {
       target.clear_saved_token = true;
@@ -2350,23 +2600,81 @@ function normalizeRepoMappingItem(item) {
   };
 }
 
-function updateRepoMappingProviderUI() {
+function repoMappingSettingsSummary(provider) {
+  return provider === "gitlab"
+    ? "GitLab Base URL을 확인하고 Project Path, 브랜치와 로컬 경로를 입력한다."
+    : "GitHub Owner, Repository, 브랜치와 로컬 경로를 입력한다.";
+}
+
+function toggleRepoMappingProviderPanels(containerSelector, provider) {
+  const normalizedProvider = normalizeScmProvider(provider);
+  const container = $(containerSelector);
+  container.find("[data-provider-panel]").each(function () {
+    const expectedProvider = String($(this).attr("data-provider-panel") || "").trim().toLowerCase();
+    if (expectedProvider === "common") {
+      $(this).prop("hidden", false);
+      return;
+    }
+    $(this).prop("hidden", expectedProvider !== normalizedProvider);
+  });
+}
+
+function updateRepoMappingProviderUI(options) {
+  const settings = options || {};
   const provider = normalizeScmProvider($("#mapping_provider").val());
-  const isGitLab = provider === "gitlab";
-  $("#mapping_repo_owner, #mapping_repo_name").prop("hidden", isGitLab);
-  $("#mapping_repo_ref").prop("hidden", !isGitLab);
   $("#mapping_provider").val(provider);
-  $("#mapping_scm_token").attr("placeholder", isGitLab ? "공간 전용 GitLab Project Access Token" : "공간 전용 GitHub Token");
+  toggleRepoMappingProviderPanels("#repo_mapping_settings_panel", provider);
+  $("#repo_mapping_settings_summary").text(repoMappingSettingsSummary(provider));
+  if (settings.openSettings) {
+    $("#repo_mapping_settings_panel").prop("open", true);
+  }
+  $("#mapping_scm_token").attr(
+    "placeholder",
+    provider === "gitlab" ? "공간 전용 GitLab Project Access Token" : "공간 전용 GitHub Token",
+  );
   setGithubTokenHelp(currentRepoMappings().some((item) => item.has_saved_token && !item.clear_saved_token));
 }
 
 function updateRepoMappingEditProviderUI() {
   const provider = normalizeScmProvider($("#repo_mapping_edit_provider").val());
-  const isGitLab = provider === "gitlab";
-  $("#repo_mapping_edit_repo_owner, #repo_mapping_edit_repo_name").prop("hidden", isGitLab);
-  $("#repo_mapping_edit_repo_ref").prop("hidden", !isGitLab);
   $("#repo_mapping_edit_provider").val(provider);
-  $("#repo_mapping_edit_scm_token").attr("placeholder", isGitLab ? "새 GitLab Project Access Token 입력 시 갱신" : "새 GitHub Token 입력 시 갱신");
+  toggleRepoMappingProviderPanels("#repo_mapping_edit_settings_panel", provider);
+  $("#repo_mapping_edit_settings_summary").text(repoMappingSettingsSummary(provider));
+  $("#repo_mapping_edit_scm_token").attr(
+    "placeholder",
+    provider === "gitlab" ? "새 GitLab Project Access Token 입력 시 갱신" : "새 GitHub Token 입력 시 갱신",
+  );
+}
+
+function pickLocalRepoPath(button, inputSelector) {
+  const targetInput = $(inputSelector);
+  withButtonBusy(button, (done) => {
+    $.ajax({
+      url: "/api/local-repo-path/pick",
+      method: "POST",
+      contentType: "application/json",
+      data: JSON.stringify({ initial_path: targetInput.val().trim() }),
+    })
+      .done((data) => {
+        if (!data || data.error === "directory_selection_cancelled") {
+          done();
+          return;
+        }
+        if (data.ok && data.path) {
+          targetInput.val(data.path).trigger("input").trigger("change");
+          clearResultActions("#config_result_actions");
+          setResult("#config_result", { ok: true, message: "로컬 저장소 경로를 선택했다." });
+        } else {
+          setResult("#config_result", data);
+        }
+        done();
+      })
+      .fail((xhr) => {
+        clearResultActions("#config_result_actions");
+        setResult("#config_result", xhr.responseJSON || { ok: false, error: xhr.responseText });
+        done();
+      });
+  });
 }
 
 parseRepoMappingsText = function (text) {
@@ -2445,7 +2753,9 @@ renderRepoMappings = function (items) {
       </div>
     `)
     .join("");
-  $("#repo_mapping_list").html(rows || '<p class="repo-mapping-empty">아직 추가한 공간 연결이 없습니다.</p>');
+  $("#repo_mapping_list").html(
+    rows || '<div class="repo-mapping-empty-state"><strong>아직 추가한 공간 연결이 없습니다.</strong><p>공간 키와 저장소 설정을 입력한 뒤 연결 추가를 누른다.</p></div>',
+  );
   syncRepoMappingsField();
   updateConfigFlowState();
   setGithubTokenHelp(repoMappingState.items.some((item) => item.has_saved_token && !item.clear_saved_token));
@@ -2604,7 +2914,7 @@ setGithubTokenHelp = function (saved) {
   const provider = normalizeScmProvider($("#mapping_provider").val());
   const providerLabel = provider === "gitlab" ? "GitLab Project Access Token" : "GitHub Token";
   const helpText = saved
-    ? `저장된 공간 전용 ${providerLabel}이 있다. 새 값을 비우면 기존 토큰은 유지된다.`
+    ? `저장된 공간 전용 ${providerLabel}이 있다. 새 값을 비우면 기존 저장 토큰을 유지한다.`
     : `공간 연결마다 ${providerLabel}을 저장한다. GitLab은 write_repository scope가 필요하다.`;
   $("#scm_token_help").text(helpText);
 };
@@ -2792,10 +3102,29 @@ $(document).ready(function () {
   WORKFLOW_PHASE_LABELS.push_end = "원격 Push 완료";
   WORKFLOW_PHASE_LABELS.push_failed = "원격 Push 실패";
 
-  $("#mapping_provider").off("change").on("change", updateRepoMappingProviderUI);
-  $("#repo_mapping_edit_provider").off("change").on("change", updateRepoMappingEditProviderUI);
+  $(".repo-mapping-section-title").remove();
+
+  $("#mapping_provider").off("change").on("change", function () {
+    updateRepoMappingProviderUI({ openSettings: true });
+  });
+  $("#repo_mapping_edit_provider").off("change").on("change", function () {
+    updateRepoMappingEditProviderUI();
+    $("#repo_mapping_edit_settings_panel").prop("open", true);
+    if (repoMappingState.editingDraft) {
+      syncRepoMappingEditDraftFromForm();
+      updateRepoMappingModalTokenControls();
+    }
+  });
   updateRepoMappingProviderUI();
   updateRepoMappingEditProviderUI();
+
+  $("#browse_mapping_local_repo_path").off("click").on("click", function () {
+    pickLocalRepoPath($(this), "#mapping_local_repo_path");
+  });
+
+  $("#browse_repo_mapping_edit_local_repo_path").off("click").on("click", function () {
+    pickLocalRepoPath($(this), "#repo_mapping_edit_local_repo_path");
+  });
 
   $("#add_repo_mapping").off("click").on("click", function () {
     const nextItem = readRepoMappingInputs();
@@ -2846,6 +3175,68 @@ $(document).ready(function () {
           done();
         });
     });
+  });
+
+  $("#repo_mapping_edit_form").off("submit").on("submit", function (event) {
+    event.preventDefault();
+    saveRepoMappingModal();
+  });
+
+  $("#repo_mapping_edit_scm_token").off("input").on("input", function () {
+    if (!repoMappingState.editingDraft) {
+      return;
+    }
+    syncRepoMappingEditDraftFromForm();
+    updateRepoMappingModalTokenControls();
+  });
+
+  $("#repo_mapping_edit_toggle_token").off("click").on("click", function () {
+    const draft = syncRepoMappingEditDraftFromForm();
+    if (!draft) {
+      return;
+    }
+
+    if (draft.scm_token || draft.github_token) {
+      draft.scm_token = "";
+      draft.github_token = "";
+      $("#repo_mapping_edit_scm_token").val("");
+    } else if (draft.clear_saved_token) {
+      draft.clear_saved_token = false;
+    } else if (draft.has_saved_token) {
+      draft.clear_saved_token = true;
+    }
+
+    repoMappingState.editingDraft = { ...draft };
+    updateRepoMappingModalTokenControls();
+  });
+
+  $("#save_config").off("click").on("click", function () {
+    $.ajax({
+      url: "/api/config/save",
+      method: "POST",
+      contentType: "application/json",
+      data: JSON.stringify(collectConfig()),
+    })
+      .done((data) => {
+        const savedTokenSpaces = new Set((data.repo_mapping_token_spaces || []).map((item) => String(item || "").trim().toUpperCase()));
+        const refreshedItems = currentRepoMappings().map((item) => ({
+          ...item,
+          scm_token: "",
+          github_token: "",
+          has_saved_token: savedTokenSpaces.has(item.space_key),
+          clear_saved_token: false,
+        }));
+        renderRepoMappings(refreshedItems);
+        $("#jira_api_token").val("");
+        setSavedSecretState("#jira_api_token", Boolean(data.jira_api_token_saved), "현재 저장한 토큰이 있다.", "Jira API Token");
+        setGithubTokenHelp(savedTokenSpaces.size > 0);
+        clearResultActions("#config_result_actions");
+        setResult("#config_result", data);
+      })
+      .fail((xhr) => {
+        clearResultActions("#config_result_actions");
+        setResult("#config_result", xhr.responseJSON || { ok: false, error: xhr.responseText });
+      });
   });
 
   $("#workflow_batch_preview_card .grid-note").text("저장된 저장소 설정과 선택한 이슈 기준으로 각 작업 브랜치, 커밋 메시지, 큐 그룹을 미리 확인한다.");
