@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 import requests
 from cryptography.fernet import Fernet, InvalidToken
@@ -58,10 +58,12 @@ MAX_DIFF_CHARS = 60000
 MAX_OUTPUT_CHARS = 12000
 MAX_WORKFLOW_EVENTS = 160
 MAX_CLARIFICATION_QUESTIONS = 3
-SETUP_GUIDE_VERSION = 4
+SETUP_GUIDE_VERSION = 5
 VALID_REASONING_EFFORTS = ("low", "medium", "high", "xhigh")
+VALID_SCM_PROVIDERS = ("github", "gitlab")
 WORKFLOW_HEARTBEAT_SECONDS = 10
 WORKFLOW_STALE_SECONDS = 30
+PUSH_TIMEOUT_SECONDS = 5 * 60
 WORKFLOW_RUNS_DIR = DATA_DIR / "workflow-runs"
 WORKFLOW_BATCHES_DIR = DATA_DIR / "workflow-batches"
 MAX_RECENT_BATCHES = 12
@@ -76,13 +78,24 @@ REPO_LOCAL_CODEX_DIR = REPO_LOCAL_TOOLS_DIR / "codex"
 REPO_LOCAL_CODEX_JS = REPO_LOCAL_CODEX_DIR / "node_modules" / "@openai" / "codex" / "bin" / "codex.js"
 REPO_LOCAL_CODEX_CMD = REPO_LOCAL_CODEX_DIR / "node_modules" / ".bin" / "codex.cmd"
 REPO_LOCAL_CODEX_BIN = REPO_LOCAL_CODEX_DIR / "node_modules" / ".bin" / "codex"
+SCM_STORE_KEY = "scm"
+LEGACY_GITHUB_STORE_KEY = "github"
+DEFAULT_GITHUB_WEB_BASE_URL = "https://github.com"
+DEFAULT_GITHUB_API_BASE_URL = "https://api.github.com"
+GITLAB_TOKEN_USERNAME = "oauth2"
+GITHUB_TOKEN_USERNAME = "x-access-token"
 FIELD_LABEL_OVERRIDES = {
+    "gitlab_base_url": "GitLab Base URL",
     "repo_mappings": "공간별 저장소 연결",
     "local_repo_path": "기본 로컬 레포 경로",
     "work_instruction": "작업 지시 상세",
     "acceptance_criteria": "수용 기준",
     "test_command": "참고용 로컬 테스트 명령",
     "commit_checklist": "커밋 체크리스트",
+    "mapping_provider": "SCM Provider",
+    "mapping_repo_ref": "Repository Path",
+    "mapping_scm_token": "SCM Token",
+    "allow_auto_push": "Remote push after commit",
 }
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -104,7 +117,7 @@ class ManagedAgentationRuntime:
 class PendingWorkflowJob:
     run_id: str
     repo_path: Path
-    github_config: GithubConfig
+    scm_config: ScmRepoConfig
     payload: dict[str, Any]
 
 FIELD_GUIDES: dict[str, dict[str, str]] = {
@@ -112,6 +125,7 @@ FIELD_GUIDES: dict[str, dict[str, str]] = {
     "jira_email": {"label": "Jira Email", "guide_section": "jira", "guide_step_id": "jira-email"},
     "jira_api_token": {"label": "Jira API Token", "guide_section": "jira", "guide_step_id": "jira-api-token"},
     "jira_jql": {"label": "JQL", "guide_section": "jira", "guide_step_id": "jira-jql"},
+    "gitlab_base_url": {"label": "GitLab Base URL", "guide_section": "github", "guide_step_id": "gitlab-base-url"},
     "github_owner": {"label": "GitHub Owner", "guide_section": "github", "guide_step_id": "github-owner-repo"},
     "github_repo": {"label": "GitHub Repo", "guide_section": "github", "guide_step_id": "github-owner-repo"},
     "github_base_branch": {"label": "Base Branch", "guide_section": "github", "guide_step_id": "github-base-branch"},
@@ -128,6 +142,10 @@ FIELD_GUIDES: dict[str, dict[str, str]] = {
     "commit_checklist": {"label": "커밋 체크리스트", "guide_section": "automation", "guide_step_id": "automation-commit-checklist"},
     "git_author_name": {"label": "Git Author Name", "guide_section": "automation", "guide_step_id": "automation-git-author"},
     "git_author_email": {"label": "Git Author Email", "guide_section": "automation", "guide_step_id": "automation-git-author"},
+    "mapping_provider": {"label": "SCM Provider", "guide_section": "github", "guide_step_id": "github-space-repo-mappings"},
+    "mapping_repo_ref": {"label": "Repository Path", "guide_section": "github", "guide_step_id": "gitlab-project-path"},
+    "mapping_scm_token": {"label": "SCM Token", "guide_section": "github", "guide_step_id": "github-token"},
+    "allow_auto_push": {"label": "Remote push after commit", "guide_section": "automation", "guide_step_id": "automation-commit-mode"},
 }
 
 def _guide_step(
@@ -618,6 +636,8 @@ def _workflow_run_snapshot(run: dict[str, Any]) -> dict[str, Any]:
         "clarification_status": run.get("clarification_status", "not_requested"),
         "clarification": run.get("clarification"),
         "request_payload": run.get("request_payload"),
+        "resolved_repo_provider": run.get("resolved_repo_provider", ""),
+        "resolved_repo_ref": run.get("resolved_repo_ref", ""),
         "resolved_repo_owner": run.get("resolved_repo_owner", ""),
         "resolved_repo_name": run.get("resolved_repo_name", ""),
         "resolved_base_branch": run.get("resolved_base_branch", ""),
@@ -668,6 +688,8 @@ def _workflow_batch_run_ref(run: dict[str, Any]) -> dict[str, Any]:
         "queue_position": run.get("queue_position", 0),
         "local_repo_path": run.get("local_repo_path", ""),
         "resolved_space_key": run.get("resolved_space_key", ""),
+        "resolved_repo_provider": run.get("resolved_repo_provider", ""),
+        "resolved_repo_ref": run.get("resolved_repo_ref", ""),
         "clarification_status": run.get("clarification_status", "not_requested"),
         "updated_at": run.get("updated_at") or run.get("finished_at") or run.get("started_at") or run.get("created_at"),
     }
@@ -748,11 +770,13 @@ def _new_workflow_batch(issues: list[dict[str, str]]) -> dict[str, Any]:
 
 
 def _batch_status_counts(runs: list[dict[str, Any]]) -> dict[str, int]:
-    counts = {"queued": 0, "running": 0, "needs_input": 0, "completed": 0, "failed": 0, "total": len(runs)}
+    counts = {"queued": 0, "running": 0, "needs_input": 0, "completed": 0, "failed": 0, "partially_completed": 0, "total": len(runs)}
     for run in runs:
         status = str(run.get("status", "")).strip()
         if status == "completed":
             counts["completed"] += 1
+        elif status == "partially_completed":
+            counts["partially_completed"] += 1
         elif status == "failed":
             counts["failed"] += 1
         elif status == "needs_input":
@@ -782,7 +806,7 @@ def _batch_status_message(status: str, counts: dict[str, int]) -> str:
 
 
 def _batch_suggested_active_run_id(runs: list[dict[str, Any]]) -> str | None:
-    priority = {"running": 0, "needs_input": 1, "failed": 2, "queued": 3, "completed": 4}
+    priority = {"running": 0, "needs_input": 1, "partially_completed": 2, "failed": 3, "queued": 4, "completed": 5}
     ordered = sorted(
         runs,
         key=lambda run: (
@@ -806,6 +830,8 @@ def _batch_aggregate_status(runs: list[dict[str, Any]]) -> tuple[str, dict[str, 
         return "needs_input", counts
     if counts["completed"] == total:
         return "completed", counts
+    if counts["partially_completed"] == total:
+        return "partially_completed", counts
     if counts["failed"] == total:
         return "failed", counts
     return "partially_completed", counts
@@ -882,6 +908,8 @@ def _new_workflow_run(
     local_repo_path: str = "",
     queue_key: str = "",
     request_payload: dict[str, Any] | None = None,
+    resolved_repo_provider: str = "",
+    resolved_repo_ref: str = "",
     resolved_repo_owner: str = "",
     resolved_repo_name: str = "",
     resolved_base_branch: str = "",
@@ -901,6 +929,8 @@ def _new_workflow_run(
         "clarification_status": "not_requested",
         "clarification": None,
         "request_payload": dict(request_payload or {}),
+        "resolved_repo_provider": resolved_repo_provider,
+        "resolved_repo_ref": resolved_repo_ref,
         "resolved_repo_owner": resolved_repo_owner,
         "resolved_repo_name": resolved_repo_name,
         "resolved_base_branch": resolved_base_branch,
@@ -974,17 +1004,44 @@ class JiraConfig:
 
 
 @dataclass
-class GithubConfig:
-    repo_owner: str
-    repo_name: str
+class ScmRepoConfig:
+    provider: str
+    repo_ref: str
     base_branch: str
     token: str
+    base_url: str = ""
+
+    @property
+    def repo_owner(self) -> str:
+        if self.provider != "github":
+            return self.repo_ref.split("/", 1)[0].strip() if "/" in self.repo_ref else ""
+        return self.repo_ref.split("/", 1)[0].strip() if "/" in self.repo_ref else ""
+
+    @property
+    def repo_name(self) -> str:
+        return self.repo_ref.rsplit("/", 1)[-1].strip()
+
+    @property
+    def web_base_url(self) -> str:
+        if self.provider == "gitlab":
+            return self.base_url.rstrip("/")
+        return DEFAULT_GITHUB_WEB_BASE_URL
+
+    @property
+    def api_base_url(self) -> str:
+        if self.provider == "gitlab":
+            return self.base_url.rstrip("/")
+        return DEFAULT_GITHUB_API_BASE_URL
+
+    @property
+    def remote_path(self) -> str:
+        return self.repo_ref.strip().strip("/")
 
 
 @dataclass
 class RepoContext:
     space_key: str
-    github: GithubConfig
+    scm: ScmRepoConfig
     local_repo_path: Path
 
 
@@ -1053,6 +1110,10 @@ def _load_encryption_key() -> bytes:
     return key
 
 
+def _normalize_space_key(value: Any) -> str:
+    return str(value or "").strip().upper()
+
+
 def _normalize_repo_mapping_token_map(raw_value: Any) -> dict[str, str]:
     if not isinstance(raw_value, dict):
         return {}
@@ -1076,6 +1137,16 @@ def _normalize_space_key_list(raw_value: Any) -> set[str]:
     return normalized
 
 
+def _normalize_scm_provider(value: Any) -> str:
+    provider = str(value or "").strip().lower()
+    return provider if provider in VALID_SCM_PROVIDERS else ""
+
+
+def _normalize_base_url(value: Any) -> str:
+    text = str(value or "").strip().rstrip("/")
+    return text
+
+
 def _effective_secret_value(payload_value: Any, existing_value: Any) -> str:
     next_value = str(payload_value or "").strip()
     if next_value:
@@ -1083,23 +1154,136 @@ def _effective_secret_value(payload_value: Any, existing_value: Any) -> str:
     return str(existing_value or "").strip()
 
 
+def _issue_space_key(issue_key: Any) -> str:
+    normalized_issue_key = str(issue_key or "").strip().upper()
+    if not normalized_issue_key:
+        return ""
+    return normalized_issue_key.split("-", 1)[0].strip()
+
+
+def _parse_repo_mappings(raw_value: Any) -> tuple[list[dict[str, str]], list[str]]:
+    mappings: list[dict[str, str]] = []
+    errors: list[str] = []
+    raw_text = str(raw_value or "").strip()
+    if not raw_text:
+        return mappings, errors
+
+    for line_number, raw_line in enumerate(raw_text.splitlines(), start=1):
+        line = raw_line.strip()
+        if not line:
+            continue
+        parts = [part.strip() for part in line.split("|")]
+        if len(parts) not in (5, 6):
+            errors.append(f"line {line_number}")
+            continue
+
+        if _normalize_scm_provider(parts[1]):
+            if any(not part for part in parts[:5]):
+                errors.append(f"line {line_number}")
+                continue
+            provider = _normalize_scm_provider(parts[1])
+            repo_ref = parts[2].strip().strip("/")
+            if not provider or not repo_ref:
+                errors.append(f"line {line_number}")
+                continue
+            mappings.append(
+                {
+                    "space_key": _normalize_space_key(parts[0]),
+                    "provider": provider,
+                    "repo_ref": repo_ref,
+                    "base_branch": parts[3],
+                    "local_repo_path": parts[4],
+                    "scm_token": parts[5] if len(parts) == 6 else "",
+                }
+            )
+            continue
+
+        if any(not part for part in parts[:5]):
+            errors.append(f"line {line_number}")
+            continue
+        mappings.append(
+            {
+                "space_key": _normalize_space_key(parts[0]),
+                "provider": "github",
+                "repo_ref": f"{parts[1].strip()}/{parts[2].strip()}".strip("/"),
+                "base_branch": parts[3],
+                "local_repo_path": parts[4],
+                "scm_token": parts[5] if len(parts) == 6 else "",
+            }
+        )
+    return mappings, errors
+
+
+def _serialize_repo_mappings(mappings: list[dict[str, str]]) -> str:
+    lines: list[str] = []
+    for mapping in mappings:
+        line = "|".join(
+            [
+                _normalize_space_key(mapping.get("space_key", "")),
+                _normalize_scm_provider(mapping.get("provider", "")),
+                str(mapping.get("repo_ref", "")).strip().strip("/"),
+                str(mapping.get("base_branch", "")).strip(),
+                str(mapping.get("local_repo_path", "")).strip(),
+            ]
+        )
+        if "||" not in line and line.strip("|"):
+            lines.append(line)
+    return "\n".join(lines)
+
+
+def _mapping_requires_gitlab_base_url(mappings: list[dict[str, str]]) -> bool:
+    return any(mapping.get("provider") == "gitlab" for mapping in mappings)
+
+
+def _migrate_legacy_scm_payload(raw_value: dict[str, Any]) -> dict[str, Any]:
+    repo_mappings, _ = _parse_repo_mappings(raw_value.get("repo_mappings", ""))
+    repo_mapping_tokens = _normalize_repo_mapping_token_map(raw_value.get("repo_mapping_tokens", {}))
+    for mapping in repo_mappings:
+        space_key = _normalize_space_key(mapping.get("space_key", ""))
+        inline_token = str(mapping.get("scm_token", "")).strip()
+        if space_key and inline_token and not repo_mapping_tokens.get(space_key):
+            repo_mapping_tokens[space_key] = inline_token
+    return {
+        "gitlab_base_url": _normalize_base_url(raw_value.get("gitlab_base_url", "")),
+        "repo_mappings": _serialize_repo_mappings(repo_mappings),
+        "repo_mapping_count": len(repo_mappings),
+        "repo_mapping_tokens": repo_mapping_tokens,
+    }
+
+
+def _normalize_scm_payload(raw_value: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not raw_value:
+        return None
+    return _migrate_legacy_scm_payload(raw_value)
+
+
+def _load_scm_payload(store: CredentialStore) -> dict[str, Any] | None:
+    payload = _normalize_scm_payload(store.load(SCM_STORE_KEY))
+    if payload is not None:
+        return payload
+    legacy_payload = _normalize_scm_payload(store.load(LEGACY_GITHUB_STORE_KEY))
+    if legacy_payload is not None:
+        return legacy_payload
+    return None
+
+
 def _repo_mapping_missing_token_spaces(
     payload: dict[str, Any],
-    existing_github_payload: dict[str, Any] | None = None,
+    existing_scm_payload: dict[str, Any] | None = None,
 ) -> list[str]:
     repo_mappings, repo_mapping_errors = _parse_repo_mappings(payload.get("repo_mappings", ""))
     if repo_mapping_errors or not repo_mappings:
         return []
 
-    existing_github_payload = existing_github_payload or {}
-    stored_mapping_tokens = _normalize_repo_mapping_token_map(existing_github_payload.get("repo_mapping_tokens", {}))
+    existing_scm_payload = existing_scm_payload or {}
+    stored_mapping_tokens = _normalize_repo_mapping_token_map(existing_scm_payload.get("repo_mapping_tokens", {}))
     incoming_mapping_tokens = _normalize_repo_mapping_token_map(payload.get("repo_mapping_tokens", {}))
     cleared_spaces = _normalize_space_key_list(payload.get("repo_mapping_token_clears", []))
 
     missing_spaces: list[str] = []
     for mapping in repo_mappings:
         space_key = mapping["space_key"]
-        inline_token = str(mapping.get("github_token", "")).strip()
+        inline_token = str(mapping.get("scm_token", "")).strip()
         effective_token = ""
         if space_key not in cleared_spaces:
             effective_token = incoming_mapping_tokens.get(space_key, "") or inline_token or stored_mapping_tokens.get(space_key, "")
@@ -1110,7 +1294,7 @@ def _repo_mapping_missing_token_spaces(
 
 def _required_config_fields(
     payload: dict[str, Any],
-    existing_github_payload: dict[str, Any] | None = None,
+    existing_scm_payload: dict[str, Any] | None = None,
     existing_jira_payload: dict[str, Any] | None = None,
 ) -> list[str]:
     existing_jira_payload = existing_jira_payload or {}
@@ -1121,10 +1305,17 @@ def _required_config_fields(
         "jira_jql": payload.get("jira_jql"),
     }
     missing = [name for name, value in required.items() if not str(value or "").strip()]
-    repo_mappings = str(payload.get("repo_mappings", "")).strip()
-    if not repo_mappings:
+    repo_mappings, repo_mapping_errors = _parse_repo_mappings(payload.get("repo_mappings", ""))
+    if repo_mapping_errors or not repo_mappings:
         return [*missing, "repo_mappings"]
-    if _repo_mapping_missing_token_spaces(payload, existing_github_payload):
+    if _mapping_requires_gitlab_base_url(repo_mappings):
+        effective_gitlab_base_url = _effective_secret_value(
+            payload.get("gitlab_base_url"),
+            (existing_scm_payload or {}).get("gitlab_base_url", ""),
+        )
+        if not effective_gitlab_base_url:
+            missing.append("gitlab_base_url")
+    if _repo_mapping_missing_token_spaces(payload, existing_scm_payload):
         missing.append("repo_mappings")
     return missing
 
@@ -1320,89 +1511,13 @@ def _to_jira_config(payload: dict[str, Any]) -> JiraConfig:
     )
 
 
-def _to_github_config(payload: dict[str, Any]) -> GithubConfig:
-    return GithubConfig(
-        repo_owner=str(payload["github_owner"]).strip(),
-        repo_name=str(payload["github_repo"]).strip(),
-        base_branch=str(payload["github_base_branch"]).strip(),
-        token=str(payload["github_token"]).strip(),
-    )
-
-
-def _normalize_space_key(value: Any) -> str:
-    return str(value or "").strip().upper()
-
-
-def _issue_space_key(issue_key: Any) -> str:
-    normalized_issue_key = str(issue_key or "").strip().upper()
-    if not normalized_issue_key:
-        return ""
-    return normalized_issue_key.split("-", 1)[0].strip()
-
-
-def _parse_repo_mappings(raw_value: Any) -> tuple[list[dict[str, str]], list[str]]:
-    mappings: list[dict[str, str]] = []
-    errors: list[str] = []
-    raw_text = str(raw_value or "").strip()
-    if not raw_text:
-        return mappings, errors
-
-    for line_number, raw_line in enumerate(raw_text.splitlines(), start=1):
-        line = raw_line.strip()
-        if not line:
-            continue
-        parts = [part.strip() for part in line.split("|")]
-        if len(parts) not in (5, 6) or any(not part for part in parts[:5]):
-            errors.append(f"line {line_number}")
-            continue
-        mappings.append(
-            {
-                "space_key": _normalize_space_key(parts[0]),
-                "repo_owner": parts[1],
-                "repo_name": parts[2],
-                "base_branch": parts[3],
-                "local_repo_path": parts[4],
-                "github_token": parts[5] if len(parts) == 6 else "",
-            }
-        )
-    return mappings, errors
-
-
-def _serialize_repo_mappings(mappings: list[dict[str, str]]) -> str:
-    lines: list[str] = []
-    for mapping in mappings:
-        line = "|".join(
-            [
-                _normalize_space_key(mapping.get("space_key", "")),
-                str(mapping.get("repo_owner", "")).strip(),
-                str(mapping.get("repo_name", "")).strip(),
-                str(mapping.get("base_branch", "")).strip(),
-                str(mapping.get("local_repo_path", "")).strip(),
-            ]
-        )
-        if "||" not in line and line.strip("|"):
-            lines.append(line)
-    return "\n".join(lines)
-
-
-def _has_legacy_repo_fields(payload: dict[str, Any]) -> bool:
-    return all(
-        [
-            str(payload.get("github_owner", payload.get("repo_owner", ""))).strip(),
-            str(payload.get("github_repo", payload.get("repo_name", ""))).strip(),
-            str(payload.get("github_base_branch", payload.get("base_branch", ""))).strip(),
-            str(payload.get("local_repo_path", "")).strip(),
-        ]
-    )
-
-
-def _resolve_repo_context(github_payload: dict[str, Any], issue_key: Any) -> RepoContext:
-    mappings, errors = _parse_repo_mappings(github_payload.get("repo_mappings", ""))
+def _resolve_repo_context(scm_payload: dict[str, Any], issue_key: Any) -> RepoContext:
+    mappings, errors = _parse_repo_mappings(scm_payload.get("repo_mappings", ""))
     if errors:
         raise ValueError(f"invalid_repo_mappings:{','.join(errors)}")
 
     space_key = _issue_space_key(issue_key)
-    repo_mapping_tokens = _normalize_repo_mapping_token_map(github_payload.get("repo_mapping_tokens", {}))
+    repo_mapping_tokens = _normalize_repo_mapping_token_map(scm_payload.get("repo_mapping_tokens", {}))
     if not mappings:
         raise KeyError("repo_mapping_not_configured")
 
@@ -1411,16 +1526,23 @@ def _resolve_repo_context(github_payload: dict[str, Any], issue_key: Any) -> Rep
     for mapping in mappings:
         if mapping["space_key"] != space_key:
             continue
-        resolved_token = str(mapping.get("github_token", "")).strip() or repo_mapping_tokens.get(space_key, "")
+        resolved_token = str(mapping.get("scm_token", "")).strip() or repo_mapping_tokens.get(space_key, "")
         if not resolved_token:
             raise KeyError(f"repo_mapping_token_missing:{space_key}")
+        provider = _normalize_scm_provider(mapping.get("provider", ""))
+        base_url = ""
+        if provider == "gitlab":
+            base_url = _normalize_base_url(scm_payload.get("gitlab_base_url", ""))
+            if not base_url:
+                raise KeyError("gitlab_base_url_required")
         return RepoContext(
             space_key=space_key,
-            github=GithubConfig(
-                repo_owner=mapping["repo_owner"],
-                repo_name=mapping["repo_name"],
-                base_branch=mapping["base_branch"],
+            scm=ScmRepoConfig(
+                provider=provider,
+                repo_ref=str(mapping.get("repo_ref", "")).strip().strip("/"),
+                base_branch=str(mapping.get("base_branch", "")).strip(),
                 token=resolved_token,
+                base_url=base_url,
             ),
             local_repo_path=Path(mapping["local_repo_path"]).expanduser(),
         )
@@ -1432,12 +1554,40 @@ def _jira_headers(config: JiraConfig) -> dict[str, str]:
     return {"Accept": "application/json", "Authorization": f"Basic {token}"}
 
 
-def _github_headers(config: GithubConfig) -> dict[str, str]:
+def _scm_headers(config: ScmRepoConfig) -> dict[str, str]:
+    if config.provider == "gitlab":
+        return {"PRIVATE-TOKEN": config.token}
     return {
         "Accept": "application/vnd.github+json",
         "Authorization": f"Bearer {config.token}",
         "X-GitHub-Api-Version": "2022-11-28",
     }
+
+
+def _repo_context_requested_fields(error_code: str) -> list[str]:
+    if error_code.startswith("repo_mapping") or error_code == "gitlab_base_url_required":
+        return ["repo_mappings"] if error_code != "gitlab_base_url_required" else ["gitlab_base_url", "repo_mappings"]
+    return ["issue_key"]
+
+
+def _scm_repo_check_urls(config: ScmRepoConfig) -> tuple[str, str]:
+    if config.provider == "gitlab":
+        project_ref = quote(config.repo_ref, safe="")
+        branch_ref = quote(config.base_branch, safe="")
+        repo_url = f"{config.api_base_url}/api/v4/projects/{project_ref}"
+        branch_url = f"{repo_url}/repository/branches/{branch_ref}"
+        return repo_url, branch_url
+    repo_url = f"{config.api_base_url}/repos/{config.repo_owner}/{config.repo_name}"
+    branch_url = f"{repo_url}/branches/{config.base_branch}"
+    return repo_url, branch_url
+
+
+def _scm_repo_status(config: ScmRepoConfig) -> tuple[requests.Response, requests.Response]:
+    repo_url, branch_url = _scm_repo_check_urls(config)
+    headers = _scm_headers(config)
+    repo_response = _request_with_logging("GET", repo_url, headers=headers, timeout=DEFAULT_TIMEOUT)
+    branch_response = _request_with_logging("GET", branch_url, headers=headers, timeout=DEFAULT_TIMEOUT)
+    return repo_response, branch_response
 
 
 def _join_non_empty(parts: list[str], separator: str = "\n") -> str:
@@ -2937,9 +3087,98 @@ def _commit_changes(repo_path: Path, commit_message: str, identity: dict[str, st
     }
 
 
-def _load_repo_context(github_payload: dict[str, Any], issue_key: Any) -> tuple[GithubConfig, Path, str]:
-    context = _resolve_repo_context(github_payload, issue_key)
-    return context.github, context.local_repo_path, context.space_key
+def _git_remote_url(repo_path: Path, remote_name: str = "origin") -> str:
+    return _git_optional_output(repo_path, "remote", "get-url", remote_name)
+
+
+def _normalize_remote_parts(remote_url: str) -> tuple[str, str]:
+    normalized_url = str(remote_url or "").strip()
+    if not normalized_url:
+        return "", ""
+
+    parsed = urlparse(normalized_url)
+    if parsed.scheme and parsed.netloc:
+        host = str(parsed.hostname or "").strip().lower()
+        path = str(parsed.path or "").strip().lstrip("/")
+        return host, path.removesuffix(".git")
+
+    scp_like = re.match(r"^(?:.+@)?([^:]+):(.+)$", normalized_url)
+    if not scp_like:
+        return "", ""
+    return scp_like.group(1).strip().lower(), scp_like.group(2).strip().lstrip("/").removesuffix(".git")
+
+
+def _expected_remote_parts(config: ScmRepoConfig) -> tuple[str, str]:
+    parsed = urlparse(config.web_base_url)
+    return str(parsed.hostname or "").strip().lower(), config.remote_path
+
+
+def _expected_push_url(config: ScmRepoConfig) -> str:
+    return f"{config.web_base_url}/{config.remote_path}.git"
+
+
+def _validate_origin_matches_repo(repo_path: Path, config: ScmRepoConfig) -> tuple[bool, str]:
+    origin_url = _git_remote_url(repo_path, "origin")
+    if not origin_url:
+        return False, "origin_remote_not_found"
+
+    origin_host, origin_path = _normalize_remote_parts(origin_url)
+    expected_host, expected_path = _expected_remote_parts(config)
+    if not origin_host or not origin_path:
+        return False, "origin_remote_parse_failed"
+    if origin_host != expected_host or origin_path != expected_path:
+        return False, "origin_remote_mismatch"
+    return True, origin_url
+
+
+def _push_basic_auth_header(config: ScmRepoConfig) -> str:
+    username = GITLAB_TOKEN_USERNAME if config.provider == "gitlab" else GITHUB_TOKEN_USERNAME
+    token = base64.b64encode(f"{username}:{config.token}".encode("utf-8")).decode("ascii")
+    return f"AUTHORIZATION: Basic {token}"
+
+
+def _push_changes(repo_path: Path, config: ScmRepoConfig, branch_name: str) -> dict[str, Any]:
+    origin_matches, details = _validate_origin_matches_repo(repo_path, config)
+    if not origin_matches:
+        return {"ok": False, "error": details, "output": details, "output_truncated": False, "remote_branch": branch_name}
+
+    command = [
+        "git",
+        "-c",
+        "credential.helper=",
+        "-c",
+        "core.askPass=",
+        "-c",
+        f"http.extraheader={_push_basic_auth_header(config)}",
+        "push",
+        "--porcelain",
+        _expected_push_url(config),
+        f"HEAD:refs/heads/{branch_name}",
+    ]
+    result = subprocess.run(
+        command,
+        cwd=repo_path,
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=PUSH_TIMEOUT_SECONDS,
+    )
+    output = _combined_output(result.stdout, result.stderr)
+    output, output_truncated = _truncate_text(output, MAX_OUTPUT_CHARS)
+    return {
+        "ok": result.returncode == 0,
+        "error": "" if result.returncode == 0 else "push_command_failed",
+        "output": output,
+        "output_truncated": output_truncated,
+        "remote_branch": branch_name,
+    }
+
+
+def _load_repo_context(scm_payload: dict[str, Any], issue_key: Any) -> tuple[ScmRepoConfig, Path, str]:
+    context = _resolve_repo_context(scm_payload, issue_key)
+    return context.scm, context.local_repo_path, context.space_key
 
 
 def _safe_fetch_issue_detail(jira_payload: dict[str, Any] | None, issue_key: str, issue_summary: str) -> dict[str, Any]:
@@ -2980,7 +3219,7 @@ def _batch_issue_workflow_payload(
     issue: dict[str, str],
     issue_detail: dict[str, Any],
     resolved_space_key: str,
-    github_config: GithubConfig,
+    scm_config: ScmRepoConfig,
 ) -> dict[str, Any]:
     issue_key = str(issue["issue_key"]).strip().upper()
     issue_summary = str(issue["issue_summary"]).strip()
@@ -3000,13 +3239,15 @@ def _batch_issue_workflow_payload(
         "clarification_questions": [],
         "clarification_answers": {},
         "resolved_space_key": resolved_space_key,
-        "resolved_repo_owner": github_config.repo_owner,
-        "resolved_repo_name": github_config.repo_name,
-        "resolved_base_branch": github_config.base_branch,
+        "resolved_repo_provider": scm_config.provider,
+        "resolved_repo_ref": scm_config.repo_ref,
+        "resolved_repo_owner": scm_config.repo_owner,
+        "resolved_repo_name": scm_config.repo_name,
+        "resolved_base_branch": scm_config.base_branch,
     }
 
 
-def _execute_coding_workflow(repo_path: Path, github_config: GithubConfig, payload: dict[str, Any], reporter: Any = None) -> dict[str, Any]:
+def _execute_coding_workflow(repo_path: Path, scm_config: ScmRepoConfig, payload: dict[str, Any], reporter: Any = None) -> dict[str, Any]:
     _safe_ensure_project_memory(repo_path)
     dirty_entries = _repo_dirty_entries(repo_path)
     if dirty_entries:
@@ -3023,18 +3264,18 @@ def _execute_coding_workflow(repo_path: Path, github_config: GithubConfig, paylo
         str(payload.get("issue_key", "")).strip().upper(),
         str(payload.get("issue_summary", "")).strip(),
     )
-    if branch_name == github_config.base_branch:
+    if branch_name == scm_config.base_branch:
         return {
             "ok": False,
             "status": "invalid_branch_name",
             "message": "작업 브랜치는 기본 브랜치와 달라야 합니다.",
             "branch_name": branch_name,
-            "base_branch": github_config.base_branch,
+            "base_branch": scm_config.base_branch,
         }
 
     if reporter:
         reporter("branch_prepare", f"작업 브랜치 준비: {branch_name}")
-    branch_info = _prepare_branch(repo_path, github_config.base_branch, branch_name)
+    branch_info = _prepare_branch(repo_path, scm_config.base_branch, branch_name)
     if reporter:
         reporter("branch_ready", f"Branch ready: {branch_info['active_branch']}")
     start_sha = branch_info["head_sha"]
@@ -3054,13 +3295,18 @@ def _execute_coding_workflow(repo_path: Path, github_config: GithubConfig, paylo
         "issue_key": str(payload.get("issue_key", "")).strip().upper(),
         "issue_summary": str(payload.get("issue_summary", "")).strip(),
         "branch_name": branch_name,
-        "base_branch": github_config.base_branch,
+        "base_branch": scm_config.base_branch,
         "starting_branch": branch_info["starting_branch"],
         "current_branch": branch_info["active_branch"],
         "start_sha": start_sha,
         "end_sha": _git_output(repo_path, "rev-parse", "HEAD"),
         "commit_message": str(payload.get("commit_message", "")).strip(),
         "auto_commit": bool(payload.get("allow_auto_commit", True)),
+        "allow_auto_push": bool(payload.get("allow_auto_push", True)),
+        "remote_provider": scm_config.provider,
+        "remote_repo_ref": scm_config.repo_ref,
+        "remote_branch": branch_name,
+        "push_succeeded": False,
         "requested_model": codex_result["requested_model"],
         "requested_reasoning_effort": codex_result["requested_reasoning_effort"],
         "resolved_model": codex_result["resolved_model"],
@@ -3097,6 +3343,8 @@ def _execute_coding_workflow(repo_path: Path, github_config: GithubConfig, paylo
         "commit_sha": None,
         "commit_output": "",
         "commit_output_truncated": False,
+        "push_output": "",
+        "push_output_truncated": False,
         "git_author_name": "",
         "git_author_email": "",
     }
@@ -3175,14 +3423,35 @@ def _execute_coding_workflow(repo_path: Path, github_config: GithubConfig, paylo
         response["message"] = "테스트는 통과했지만 git commit 단계에서 실패했습니다."
         return response
 
-    response["ok"] = True
-    response["status"] = "committed"
-    response["message"] = "Codex 자동 작업, 테스트, 커밋까지 완료했습니다."
     response["commit_sha"] = commit_result["sha"]
     response["end_sha"] = commit_result["sha"]
     response["processed_files"] = commit_result["files"]
     response["diff"] = commit_result["diff"]
     response["diff_truncated"] = commit_result["diff_truncated"]
+    if not bool(payload.get("allow_auto_push", True)):
+        response["ok"] = True
+        response["status"] = "committed"
+        response["message"] = "Codex 자동 작업, 테스트, 커밋까지 완료했습니다."
+        return response
+
+    if reporter:
+        reporter("push_start", f"원격 push 시작: {branch_name}")
+    push_result = _push_changes(repo_path, scm_config, branch_name)
+    response["push_output"] = push_result["output"]
+    response["push_output_truncated"] = push_result["output_truncated"]
+    response["remote_branch"] = push_result["remote_branch"]
+    if reporter:
+        reporter("push_end" if push_result["ok"] else "push_failed", f"원격 push {'완료' if push_result['ok'] else '실패'}: {branch_name}")
+    if not push_result["ok"]:
+        response["status"] = "push_failed"
+        response["message"] = "로컬 커밋까지는 완료했지만 원격 push 단계에서 실패했습니다."
+        response["push_succeeded"] = False
+        return response
+
+    response["ok"] = True
+    response["status"] = "pushed"
+    response["message"] = "Codex 자동 작업, 테스트, 커밋, 원격 push까지 완료했습니다."
+    response["push_succeeded"] = True
     return response
 
 
@@ -3444,14 +3713,16 @@ def create_app() -> Flask:
                 ),
             )
             try:
-                result = _execute_coding_workflow(repo_path, job.github_config, job.payload, reporter=reporter)
-                final_status = "completed" if result.get("ok") else "failed"
+                result = _execute_coding_workflow(repo_path, job.scm_config, job.payload, reporter=reporter)
                 result_status = str(result.get("status", "")).strip()
+                final_status = "completed" if result.get("ok") else ("partially_completed" if result_status == "push_failed" else "failed")
                 normalized_messages = {
                     "syntax_failed": "문법 검사에서 실패하여 자동 커밋을 중단했습니다.",
                     "validated": "Codex 변경과 문법 검사가 완료되었습니다.",
                     "ready_for_manual_commit": "Codex 변경과 문법 검사가 완료되었습니다. 자동 커밋은 비활성화되어 있습니다.",
                     "committed": "Codex 자동 작업과 문법 검사, 커밋이 완료되었습니다.",
+                    "pushed": "Codex 자동 작업과 문법 검사, 커밋, 원격 push까지 완료되었습니다.",
+                    "push_failed": "로컬 커밋까지는 완료했지만 원격 push 단계에서 실패했습니다.",
                     "codex_timeout": "Codex 실행이 제한 시간을 초과했습니다. 마지막 진행 단계와 실행 로그를 확인하세요.",
                 }
                 result_message = normalized_messages.get(result_status, str(result.get("message", "")))
@@ -3498,7 +3769,7 @@ def create_app() -> Flask:
         issues: list[dict[str, str]],
         common_payload: dict[str, Any],
         jira_payload: dict[str, Any] | None,
-        github_payload: dict[str, Any],
+        scm_payload: dict[str, Any],
     ) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
         candidates: list[dict[str, Any]] = []
         identity_missing = False
@@ -3506,10 +3777,10 @@ def create_app() -> Flask:
             issue_key = str(issue["issue_key"]).strip().upper()
             issue_summary = str(issue["issue_summary"]).strip()
             try:
-                github_config, repo_path, resolved_space_key = _load_repo_context(github_payload, issue_key)
+                scm_config, repo_path, resolved_space_key = _load_repo_context(scm_payload, issue_key)
             except KeyError as exc:
                 error_code = str(exc.args[0])
-                requested_fields = ["repo_mappings"] if error_code.startswith("repo_mapping") else ["issue_key"]
+                requested_fields = _repo_context_requested_fields(error_code)
                 return [], {
                     "ok": False,
                     "error": error_code,
@@ -3530,7 +3801,7 @@ def create_app() -> Flask:
 
             _safe_ensure_project_memory(repo_path)
             issue_detail = _safe_fetch_issue_detail(jira_payload, issue_key, issue_summary)
-            run_payload = _batch_issue_workflow_payload(common_payload, issue, issue_detail, resolved_space_key, github_config)
+            run_payload = _batch_issue_workflow_payload(common_payload, issue, issue_detail, resolved_space_key, scm_config)
             queue_key = _normalize_queue_key(repo_path)
 
             if bool(common_payload.get("allow_auto_commit", True)):
@@ -3543,7 +3814,7 @@ def create_app() -> Flask:
                     "issue": issue,
                     "issue_detail": issue_detail,
                     "repo_path": repo_path,
-                    "github_config": github_config,
+                    "scm_config": scm_config,
                     "resolved_space_key": resolved_space_key,
                     "run_payload": run_payload,
                     "queue_key": queue_key,
@@ -3559,13 +3830,13 @@ def create_app() -> Flask:
             }
         return candidates, None
 
-    def _build_batch_preview_items(issues: list[dict[str, str]], github_payload: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
+    def _build_batch_preview_items(issues: list[dict[str, str]], scm_payload: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
         preview_items: list[dict[str, Any]] = []
         for issue in issues:
             issue_key = str(issue["issue_key"]).strip().upper()
             issue_summary = str(issue["issue_summary"]).strip()
             try:
-                github_config, repo_path, resolved_space_key = _load_repo_context(github_payload, issue_key)
+                scm_config, repo_path, resolved_space_key = _load_repo_context(scm_payload, issue_key)
             except (KeyError, ValueError) as exc:
                 return [], {
                     "ok": False,
@@ -3587,9 +3858,11 @@ def create_app() -> Flask:
                     "issue_summary": issue_summary,
                     "tab_label": _batch_tab_label(issue_key, issue_summary),
                     "resolved_space_key": resolved_space_key,
-                    "repo_owner": github_config.repo_owner,
-                    "repo_name": github_config.repo_name,
-                    "base_branch": github_config.base_branch,
+                    "repo_provider": scm_config.provider,
+                    "repo_ref": scm_config.repo_ref,
+                    "repo_owner": scm_config.repo_owner,
+                    "repo_name": scm_config.repo_name,
+                    "base_branch": scm_config.base_branch,
                     "local_repo_path": str(repo_path),
                     "queue_key": queue_key,
                     "branch_name": _suggest_branch_name(issue_key, issue_summary),
@@ -3620,22 +3893,17 @@ def create_app() -> Flask:
     @app.get("/api/config")
     def get_config() -> Any:
         jira = store.load("jira") or {}
-        github = store.load("github") or {}
-        repo_mapping_tokens = _normalize_repo_mapping_token_map(github.get("repo_mapping_tokens", {}))
+        scm = _load_scm_payload(store) or {}
+        repo_mapping_tokens = _normalize_repo_mapping_token_map(scm.get("repo_mapping_tokens", {}))
         saved_config = {
             "jira_base_url": jira.get("base_url", ""),
             "jira_email": jira.get("email", ""),
             "jira_jql": jira.get("jql", ""),
             "jira_api_token": "",
             "jira_api_token_saved": bool(str(jira.get("api_token", "")).strip()),
-            "github_owner": "",
-            "github_repo": "",
-            "github_base_branch": "",
-            "github_token": "",
-            "github_token_saved": False,
-            "repo_mappings": github.get("repo_mappings", ""),
+            "gitlab_base_url": scm.get("gitlab_base_url", ""),
+            "repo_mappings": scm.get("repo_mappings", ""),
             "repo_mapping_token_spaces": sorted(repo_mapping_tokens.keys()),
-            "local_repo_path": "",
         }
         return jsonify(saved_config)
 
@@ -3643,9 +3911,9 @@ def create_app() -> Flask:
     def validate_config() -> Any:
         payload = request.get_json(silent=True) or {}
         jira = store.load("jira") or {}
-        github = store.load("github") or {}
-        missing = _required_config_fields(payload, github, jira)
-        missing_token_spaces = _repo_mapping_missing_token_spaces(payload, github)
+        scm = _load_scm_payload(store) or {}
+        missing = _required_config_fields(payload, scm, jira)
+        missing_token_spaces = _repo_mapping_missing_token_spaces(payload, scm)
         response: dict[str, Any] = {
             "valid": len(missing) == 0,
             "missing_fields": missing,
@@ -3659,11 +3927,11 @@ def create_app() -> Flask:
     def save_config() -> Any:
         payload = request.get_json(silent=True) or {}
         existing_jira = store.load("jira") or {}
-        existing_github = store.load("github") or {}
-        missing = _required_config_fields(payload, existing_github, existing_jira)
+        existing_scm = _load_scm_payload(store) or {}
+        missing = _required_config_fields(payload, existing_scm, existing_jira)
         if missing:
             response: dict[str, Any] = {"ok": False, "error": "required_fields_missing", "fields": missing}
-            missing_token_spaces = _repo_mapping_missing_token_spaces(payload, existing_github)
+            missing_token_spaces = _repo_mapping_missing_token_spaces(payload, existing_scm)
             if missing_token_spaces:
                 response["repo_mapping_token_missing_spaces"] = missing_token_spaces
             return jsonify(response), 400
@@ -3682,7 +3950,7 @@ def create_app() -> Flask:
                 400,
             )
 
-        existing_mapping_tokens = _normalize_repo_mapping_token_map(existing_github.get("repo_mapping_tokens", {}))
+        existing_mapping_tokens = _normalize_repo_mapping_token_map(existing_scm.get("repo_mapping_tokens", {}))
         incoming_mapping_tokens = _normalize_repo_mapping_token_map(payload.get("repo_mapping_tokens", {}))
         cleared_mapping_token_spaces = _normalize_space_key_list(payload.get("repo_mapping_token_clears", []))
         final_repo_mapping_tokens: dict[str, str] = {}
@@ -3690,7 +3958,7 @@ def create_app() -> Flask:
             space_key = mapping["space_key"]
             if space_key in cleared_mapping_token_spaces:
                 continue
-            token = incoming_mapping_tokens.get(space_key, "") or str(mapping.get("github_token", "")).strip()
+            token = incoming_mapping_tokens.get(space_key, "") or str(mapping.get("scm_token", "")).strip()
             if token:
                 final_repo_mapping_tokens[space_key] = token
                 continue
@@ -3701,12 +3969,7 @@ def create_app() -> Flask:
         jira_payload = dict(payload)
         jira_payload["jira_api_token"] = _effective_secret_value(payload.get("jira_api_token"), existing_jira.get("api_token"))
         jira = _to_jira_config(jira_payload)
-        github = GithubConfig(
-            repo_owner="",
-            repo_name="",
-            base_branch="",
-            token="",
-        )
+        gitlab_base_url = _normalize_base_url(payload.get("gitlab_base_url", existing_scm.get("gitlab_base_url", "")))
 
         store.save(
             "jira",
@@ -3718,16 +3981,12 @@ def create_app() -> Flask:
             },
         )
         store.save(
-            "github",
+            SCM_STORE_KEY,
             {
-                "repo_owner": github.repo_owner,
-                "repo_name": github.repo_name,
-                "base_branch": github.base_branch,
-                "token": github.token,
+                "gitlab_base_url": gitlab_base_url,
                 "repo_mappings": _serialize_repo_mappings(repo_mappings),
                 "repo_mapping_count": len(repo_mappings),
                 "repo_mapping_tokens": final_repo_mapping_tokens,
-                "local_repo_path": "",
             },
         )
         return jsonify(
@@ -3736,7 +3995,7 @@ def create_app() -> Flask:
                 "message": "설정을 암호화 저장했습니다.",
                 "jira_api_token_saved": bool(jira.api_token),
                 "repo_mapping_token_spaces": sorted(final_repo_mapping_tokens.keys()),
-                "github_token_saved": False,
+                "gitlab_base_url": gitlab_base_url,
             }
         )
 
@@ -3806,19 +4065,16 @@ def create_app() -> Flask:
             return jsonify(detail), 502
         return jsonify(detail)
 
-    @app.post("/api/github/check")
-    def github_check() -> Any:
-        payload = request.get_json(silent=True) or {}
-        github_payload = store.load("github")
-        if not github_payload:
-            return jsonify({"error": "github_config_not_found"}), 400
+    def _repo_check_response(issue_key: str) -> Any:
+        scm_payload = _load_scm_payload(store)
+        if not scm_payload:
+            return jsonify({"error": "scm_config_not_found"}), 400
 
-        issue_key = str(payload.get("issue_key", "")).strip().upper()
         try:
-            config, local_repo_path, resolved_space_key = _load_repo_context(github_payload, issue_key)
+            config, local_repo_path, resolved_space_key = _load_repo_context(scm_payload, issue_key)
         except KeyError as exc:
             error_code = str(exc.args[0])
-            requested_fields = ["repo_mappings"] if error_code.startswith("repo_mapping") else ["issue_key"]
+            requested_fields = _repo_context_requested_fields(error_code)
             return (
                 jsonify(
                     {
@@ -3831,21 +4087,11 @@ def create_app() -> Flask:
             )
         except ValueError as exc:
             return jsonify({"error": str(exc), "fields": ["repo_mappings"]}), 400
+
         if local_repo_path.exists():
             _safe_ensure_project_memory(local_repo_path)
-        repo_response = _request_with_logging(
-            "GET",
-            f"https://api.github.com/repos/{config.repo_owner}/{config.repo_name}",
-            headers=_github_headers(config),
-            timeout=DEFAULT_TIMEOUT,
-        )
-        branch_response = _request_with_logging(
-            "GET",
-            f"https://api.github.com/repos/{config.repo_owner}/{config.repo_name}/branches/{config.base_branch}",
-            headers=_github_headers(config),
-            timeout=DEFAULT_TIMEOUT,
-        )
 
+        repo_response, branch_response = _scm_repo_status(config)
         local_repo_exists = local_repo_path.exists() and (local_repo_path / ".git").exists()
         dirty_entries = _repo_dirty_entries(local_repo_path) if local_repo_exists else []
         git_identity, missing_identity = (
@@ -3863,6 +4109,8 @@ def create_app() -> Flask:
 
         return jsonify(
             {
+                "provider": config.provider,
+                "repo_ref": config.repo_ref,
                 "repo_check": repo_response.status_code,
                 "branch_check": branch_response.status_code,
                 "local_repo_exists": local_repo_exists,
@@ -3883,6 +4131,18 @@ def create_app() -> Flask:
                 "git_identity_missing_fields": missing_identity,
             }
         )
+
+    @app.post("/api/repo/check")
+    def repo_check() -> Any:
+        payload = request.get_json(silent=True) or {}
+        issue_key = str(payload.get("issue_key", "")).strip().upper()
+        return _repo_check_response(issue_key)
+
+    @app.post("/api/github/check")
+    def github_check() -> Any:
+        payload = request.get_json(silent=True) or {}
+        issue_key = str(payload.get("issue_key", "")).strip().upper()
+        return _repo_check_response(issue_key)
 
     @app.post("/api/workflow/prepare")
     def prepare_workflow() -> Any:
@@ -3914,10 +4174,10 @@ def create_app() -> Flask:
         issues = _normalize_batch_issues(payload.get("issues"))
         if not issues:
             return jsonify({"ok": False, "error": "batch_issues_required", "fields": ["issues"]}), 400
-        github_payload = store.load("github")
-        if not github_payload:
-            return jsonify({"ok": False, "error": "github_config_not_found"}), 400
-        preview_items, error = _build_batch_preview_items(issues, github_payload)
+        scm_payload = _load_scm_payload(store)
+        if not scm_payload:
+            return jsonify({"ok": False, "error": "scm_config_not_found"}), 400
+        preview_items, error = _build_batch_preview_items(issues, scm_payload)
         if error:
             return jsonify(error), 400
         return jsonify(
@@ -3981,9 +4241,9 @@ def create_app() -> Flask:
             )
 
         jira_payload = store.load("jira")
-        github_payload = store.load("github")
-        if not github_payload:
-            return jsonify({"ok": False, "error": "github_config_not_found"}), 400
+        scm_payload = _load_scm_payload(store)
+        if not scm_payload:
+            return jsonify({"ok": False, "error": "scm_config_not_found"}), 400
 
         try:
             _find_codex_launcher()
@@ -4000,9 +4260,10 @@ def create_app() -> Flask:
             "git_author_name": str(payload.get("git_author_name", "")).strip(),
             "git_author_email": str(payload.get("git_author_email", "")).strip(),
             "allow_auto_commit": bool(payload.get("allow_auto_commit", True)),
+            "allow_auto_push": bool(payload.get("allow_auto_push", True)),
         }
 
-        candidates, error = _resolve_batch_candidates(issues, common_payload, jira_payload, github_payload)
+        candidates, error = _resolve_batch_candidates(issues, common_payload, jira_payload, scm_payload)
         if error is not None:
             return jsonify(error), 400
 
@@ -4011,7 +4272,7 @@ def create_app() -> Flask:
             issue = candidate["issue"]
             run_payload = dict(candidate["run_payload"])
             repo_path = Path(candidate["repo_path"])
-            github_config = candidate["github_config"]
+            scm_config = candidate["scm_config"]
             run = _new_workflow_run(
                 batch_id=batch["batch_id"],
                 issue_key=issue["issue_key"],
@@ -4020,9 +4281,11 @@ def create_app() -> Flask:
                 local_repo_path=str(repo_path),
                 queue_key=str(candidate["queue_key"]),
                 request_payload=run_payload,
-                resolved_repo_owner=github_config.repo_owner,
-                resolved_repo_name=github_config.repo_name,
-                resolved_base_branch=github_config.base_branch,
+                resolved_repo_provider=scm_config.provider,
+                resolved_repo_ref=scm_config.repo_ref,
+                resolved_repo_owner=scm_config.repo_owner,
+                resolved_repo_name=scm_config.repo_name,
+                resolved_base_branch=scm_config.base_branch,
             )
             run["jira_comment_sync"] = {
                 "questions": {"status": "skipped", "reason": "not_requested"},
@@ -4109,7 +4372,7 @@ def create_app() -> Flask:
                 PendingWorkflowJob(
                     run_id=run["run_id"],
                     repo_path=repo_path,
-                    github_config=github_config,
+                    scm_config=scm_config,
                     payload=run_payload,
                 )
             )
@@ -4205,12 +4468,27 @@ def create_app() -> Flask:
             batch_snapshot = get_batch(batch_id)
             return jsonify({"ok": True, "status": "needs_input", "run": updated_run, "batch": batch_snapshot})
 
-        github_config = GithubConfig(
-            repo_owner=str(run.get("resolved_repo_owner", "")).strip(),
-            repo_name=str(run.get("resolved_repo_name", "")).strip(),
-            base_branch=str(run.get("resolved_base_branch", "")).strip(),
-            token="",
-        )
+        scm_payload = _load_scm_payload(store)
+        if not scm_payload:
+            return jsonify({"ok": False, "error": "scm_config_not_found"}), 400
+        try:
+            scm_config, _, _ = _load_repo_context(scm_payload, run.get("issue_key", ""))
+        except KeyError as exc:
+            error_code = str(exc.args[0])
+            requested_fields = _repo_context_requested_fields(error_code)
+            return (
+                jsonify(
+                    {
+                        "ok": False,
+                        "error": error_code,
+                        "fields": requested_fields,
+                        "requested_information": _build_requested_information(requested_fields),
+                    }
+                ),
+                400,
+            )
+        except ValueError as exc:
+            return jsonify({"ok": False, "error": str(exc), "fields": ["repo_mappings"]}), 400
         updated_run = update_run(
             run_id,
             lambda target_run, sync_data=jira_comment_sync, next_answers=answers, clarification_payload=clarification: (
@@ -4236,7 +4514,7 @@ def create_app() -> Flask:
             PendingWorkflowJob(
                 run_id=run_id,
                 repo_path=repo_path,
-                github_config=github_config,
+                scm_config=scm_config,
                 payload=request_payload,
             )
         )
@@ -4285,15 +4563,15 @@ def create_app() -> Flask:
             )
 
         jira_payload = store.load("jira")
-        github_payload = store.load("github")
-        if not github_payload:
-            return jsonify({"ok": False, "error": "github_config_not_found"}), 400
+        scm_payload = _load_scm_payload(store)
+        if not scm_payload:
+            return jsonify({"ok": False, "error": "scm_config_not_found"}), 400
 
         try:
-            github_config, repo_path, resolved_space_key = _load_repo_context(github_payload, payload.get("issue_key", ""))
+            scm_config, repo_path, resolved_space_key = _load_repo_context(scm_payload, payload.get("issue_key", ""))
         except KeyError as exc:
             error_code = str(exc.args[0])
-            requested_fields = ["repo_mappings"] if error_code.startswith("repo_mapping") else ["issue_key"]
+            requested_fields = _repo_context_requested_fields(error_code)
             return (
                 jsonify(
                     {
@@ -4328,9 +4606,11 @@ def create_app() -> Flask:
                 {
                     **payload,
                     "resolved_space_key": resolved_space_key,
-                    "resolved_repo_owner": github_config.repo_owner,
-                    "resolved_repo_name": github_config.repo_name,
-                    "resolved_base_branch": github_config.base_branch,
+                    "resolved_repo_provider": scm_config.provider,
+                    "resolved_repo_ref": scm_config.repo_ref,
+                    "resolved_repo_owner": scm_config.repo_owner,
+                    "resolved_repo_name": scm_config.repo_name,
+                    "resolved_base_branch": scm_config.base_branch,
                 },
             )
         except FileNotFoundError as exc:
@@ -4370,9 +4650,11 @@ def create_app() -> Flask:
                 "requested_information": clarification["requested_information"],
                 "jira_comment_sync": jira_comment_sync,
                 "resolved_space_key": resolved_space_key,
-                "resolved_repo_owner": github_config.repo_owner,
-                "resolved_repo_name": github_config.repo_name,
-                "resolved_base_branch": github_config.base_branch,
+                "resolved_repo_provider": scm_config.provider,
+                "resolved_repo_ref": scm_config.repo_ref,
+                "resolved_repo_owner": scm_config.repo_owner,
+                "resolved_repo_name": scm_config.repo_name,
+                "resolved_base_branch": scm_config.base_branch,
             }
         )
 
@@ -4417,15 +4699,15 @@ def create_app() -> Flask:
             )
 
         jira_payload = store.load("jira")
-        github_payload = store.load("github")
-        if not github_payload:
-            return jsonify({"ok": False, "error": "github_config_not_found"}), 400
+        scm_payload = _load_scm_payload(store)
+        if not scm_payload:
+            return jsonify({"ok": False, "error": "scm_config_not_found"}), 400
 
         try:
-            github_config, repo_path, resolved_space_key = _load_repo_context(github_payload, payload.get("issue_key", ""))
+            scm_config, repo_path, resolved_space_key = _load_repo_context(scm_payload, payload.get("issue_key", ""))
         except KeyError as exc:
             error_code = str(exc.args[0])
-            requested_fields = ["repo_mappings"] if error_code.startswith("repo_mapping") else ["issue_key"]
+            requested_fields = _repo_context_requested_fields(error_code)
             return (
                 jsonify(
                     {
@@ -4482,9 +4764,11 @@ def create_app() -> Flask:
         run_payload = {
             **payload,
             "resolved_space_key": resolved_space_key,
-            "resolved_repo_owner": github_config.repo_owner,
-            "resolved_repo_name": github_config.repo_name,
-            "resolved_base_branch": github_config.base_branch,
+            "resolved_repo_provider": scm_config.provider,
+            "resolved_repo_ref": scm_config.repo_ref,
+            "resolved_repo_owner": scm_config.repo_owner,
+            "resolved_repo_name": scm_config.repo_name,
+            "resolved_base_branch": scm_config.base_branch,
             "git_author_name": identity["name"],
             "git_author_email": identity["email"],
         }
@@ -4495,9 +4779,11 @@ def create_app() -> Flask:
             local_repo_path=str(repo_path),
             queue_key=_normalize_queue_key(repo_path),
             request_payload=run_payload,
-            resolved_repo_owner=github_config.repo_owner,
-            resolved_repo_name=github_config.repo_name,
-            resolved_base_branch=github_config.base_branch,
+            resolved_repo_provider=scm_config.provider,
+            resolved_repo_ref=scm_config.repo_ref,
+            resolved_repo_owner=scm_config.repo_owner,
+            resolved_repo_name=scm_config.repo_name,
+            resolved_base_branch=scm_config.base_branch,
         )
         run["jira_comment_sync"] = jira_comment_sync
         _append_workflow_event(run, "queued", "실행 요청을 접수했습니다.")
@@ -4506,7 +4792,7 @@ def create_app() -> Flask:
             PendingWorkflowJob(
                 run_id=run["run_id"],
                 repo_path=repo_path,
-                github_config=github_config,
+                scm_config=scm_config,
                 payload=run_payload,
             )
         )

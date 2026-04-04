@@ -50,7 +50,7 @@ def test_setup_guide_contains_expected_sections_and_steps() -> None:
 
     data = response.get_json()
     assert data is not None
-    assert data["version"] == 4
+    assert data["version"] == 5
 
     sections = data["sections"]
     assert [section["id"] for section in sections] == ["jira", "github", "local_repo", "automation"]
@@ -733,25 +733,23 @@ def test_save_config_stores_space_tokens_separately_and_hides_them(monkeypatch, 
     assert save_data is not None
     assert save_data["jira_api_token_saved"] is True
     assert save_data["repo_mapping_token_spaces"] == ["DEMO"]
-    assert save_data["github_token_saved"] is False
+    assert save_data["gitlab_base_url"] == ""
 
     store = main_module.CredentialStore(db_path, main_module._load_encryption_key())
-    github_payload = store.load("github")
-    assert github_payload is not None
-    assert github_payload["repo_mapping_tokens"] == {"DEMO": "space-token"}
-    assert github_payload["repo_mappings"] == f"DEMO|team|demo-repo|main|{repo_path}"
-    assert github_payload["token"] == ""
-    assert github_payload["local_repo_path"] == ""
+    scm_payload = store.load(main_module.SCM_STORE_KEY)
+    assert scm_payload is not None
+    assert scm_payload["repo_mapping_tokens"] == {"DEMO": "space-token"}
+    assert scm_payload["repo_mappings"] == f"DEMO|github|team/demo-repo|main|{repo_path}"
+    assert scm_payload["gitlab_base_url"] == ""
 
     load_response = client.get("/api/config")
     assert load_response.status_code == 200
     load_data = load_response.get_json()
     assert load_data is not None
     assert load_data["jira_api_token_saved"] is True
-    assert load_data["github_token"] == ""
+    assert load_data["gitlab_base_url"] == ""
     assert load_data["repo_mapping_token_spaces"] == ["DEMO"]
     assert "repo_mapping_tokens" not in load_data
-    assert load_data["local_repo_path"] == ""
 
 
 def test_save_config_preserves_existing_space_token_when_blank_on_reload(monkeypatch, tmp_path) -> None:
@@ -784,9 +782,9 @@ def test_save_config_preserves_existing_space_token_when_blank_on_reload(monkeyp
     assert client.post("/api/config/save", json=second_save).status_code == 200
 
     store = main_module.CredentialStore(db_path, main_module._load_encryption_key())
-    github_payload = store.load("github")
-    assert github_payload is not None
-    assert github_payload["repo_mapping_tokens"] == {"DEMO": "space-token"}
+    scm_payload = store.load(main_module.SCM_STORE_KEY)
+    assert scm_payload is not None
+    assert scm_payload["repo_mapping_tokens"] == {"DEMO": "space-token"}
 
 
 def test_save_config_preserves_existing_jira_token_when_blank_on_reload(monkeypatch, tmp_path) -> None:
@@ -970,10 +968,10 @@ def test_save_config_clears_legacy_global_token_when_only_space_mapping_is_saved
     )
 
     assert response.status_code == 200
-    github_payload = store.load("github")
-    assert github_payload is not None
-    assert github_payload["token"] == ""
-    assert github_payload["repo_mapping_tokens"] == {"DEMO": "saved-space-token"}
+    scm_payload = store.load(main_module.SCM_STORE_KEY)
+    assert scm_payload is not None
+    assert scm_payload["repo_mapping_tokens"] == {"DEMO": "saved-space-token"}
+    assert scm_payload["repo_mappings"] == f"DEMO|github|team/demo-repo|main|{repo_path}"
 
 
 def test_github_check_requires_issue_key_when_repo_mappings_exist(monkeypatch) -> None:

@@ -82,17 +82,27 @@
             </summary>
             <div class="config-space-panel__body config-panel__body">
               <div class="config-panel__body-inner">
+                <div class="grid">
+                  <label>GitLab Base URL<input id="gitlab_base_url" type="text" placeholder="https://git.withhite.com"></label>
+                </div>
                 <label class="wide repo-mapping-panel-host">
                   공간별 저장소 연결
                   <textarea id="repo_mappings" rows="1" hidden></textarea>
+                  <p id="scm_token_help" class="grid-note">공간 연결마다 GitHub PAT 또는 GitLab Project Access Token을 저장한다.</p>
                   <div class="repo-mapping-builder">
                     <div class="repo-mapping-inputs">
                       <input id="mapping_space_key" type="text" placeholder="예: GCPPLDCAD">
+                      <select id="mapping_provider">
+                        <option value="github">GitHub</option>
+                        <option value="gitlab">GitLab</option>
+                      </select>
                       <input id="mapping_repo_owner" type="text" placeholder="GitHub owner">
                       <input id="mapping_repo_name" type="text" placeholder="GitHub repo">
+                      <input id="mapping_repo_ref" type="text" placeholder="GitLab project path" hidden>
                       <input id="mapping_base_branch" type="text" placeholder="기본 브랜치">
                       <input id="mapping_local_repo_path" type="text" placeholder="로컬 저장소 경로">
-                      <input id="mapping_github_token" type="password" placeholder="공간 전용 GitHub Token">
+                      <input id="mapping_scm_token" type="password" placeholder="공간 전용 SCM Token">
+                      <input id="mapping_github_token" type="hidden">
                     </div>
                     <div class="actions">
                       <button id="add_repo_mapping" type="button" class="secondary-button">연결 추가</button>
@@ -212,6 +222,7 @@
 
       <div class="actions">
         <label class="checkbox-row"><input id="allow_auto_commit" type="checkbox" checked> 로컬 테스트 없이 자동 커밋 허용</label>
+        <label class="checkbox-row"><input id="allow_auto_push" type="checkbox" checked> 커밋 후 원격 저장소까지 push</label>
       </div>
 
       <div id="workflow_batch_actions" class="actions workflow-batch-actions"></div>
@@ -388,11 +399,17 @@
         <form id="repo_mapping_edit_form" class="repo-mapping-modal__form">
           <div class="repo-mapping-inputs repo-mapping-inputs--modal">
             <input id="repo_mapping_edit_space_key" type="text" placeholder="예: GCPPLDCAD">
+            <select id="repo_mapping_edit_provider">
+              <option value="github">GitHub</option>
+              <option value="gitlab">GitLab</option>
+            </select>
             <input id="repo_mapping_edit_repo_owner" type="text" placeholder="GitHub owner">
             <input id="repo_mapping_edit_repo_name" type="text" placeholder="GitHub repo">
+            <input id="repo_mapping_edit_repo_ref" type="text" placeholder="GitLab project path" hidden>
             <input id="repo_mapping_edit_base_branch" type="text" placeholder="기본 브랜치">
             <input id="repo_mapping_edit_local_repo_path" type="text" placeholder="로컬 저장소 경로">
-            <input id="repo_mapping_edit_github_token" type="password" placeholder="새 GitHub Token 입력 시 갱신">
+            <input id="repo_mapping_edit_scm_token" type="password" placeholder="새 SCM Token 입력 시 갱신">
+            <input id="repo_mapping_edit_github_token" type="hidden">
           </div>
 
           <section class="repo-mapping-modal__token-panel" aria-live="polite">

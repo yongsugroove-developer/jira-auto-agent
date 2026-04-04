@@ -94,6 +94,7 @@
       git_author_name: String($("#git_author_name").val() || "").trim(),
       git_author_email: String($("#git_author_email").val() || "").trim(),
       allow_auto_commit: $("#allow_auto_commit").is(":checked"),
+      allow_auto_push: $("#allow_auto_push").is(":checked"),
     };
   }
 
@@ -158,7 +159,8 @@
           </div>
         </div>
         <div class="batch-preview-item__meta">
-          <div>저장소 ${escapeHtml(`${item.repo_owner}/${item.repo_name}`)}</div>
+          <div>저장소 ${escapeHtml(item.repo_ref || `${item.repo_owner}/${item.repo_name}`)}</div>
+          <div>Provider ${escapeHtml(item.repo_provider || "-")}</div>
           <div>기준 브랜치 ${escapeHtml(item.base_branch || "-")}</div>
           <div>로컬 경로 ${escapeHtml(item.local_repo_path || "-")}</div>
           <div>작업 브랜치 ${escapeHtml(item.branch_name || "-")}</div>
@@ -375,6 +377,7 @@
       setSummaryCard("진행 중", `${(counts.queued || 0) + (counts.running || 0)}건`),
       setSummaryCard("추가 확인", `${counts.needs_input || 0}건`),
       setSummaryCard("완료", `${counts.completed || 0}건`),
+      setSummaryCard("부분 완료", `${counts.partially_completed || 0}건`),
       setSummaryCard("실패", `${counts.failed || 0}건`),
     ].join("");
     $("#batch_summary_cards").html(cards);
@@ -1093,4 +1096,23 @@
       }
     });
   });
+  renderRunOverview = function (run, payload) {
+    const latestEvent = typeof latestWorkflowEvent === "function" ? latestWorkflowEvent(run) : null;
+    const phaseLabels = typeof WORKFLOW_PHASE_LABELS === "object" ? WORKFLOW_PHASE_LABELS : {};
+    const syntaxReturncode = payload.syntax_check_returncode != null ? payload.syntax_check_returncode : payload.test_returncode;
+    const syntaxFiles = payload.syntax_checked_files || [];
+    const cards = [
+      setSummaryCard("상태", run.status || payload.status || "-", run.message || payload.message || ""),
+      setSummaryCard("현재 단계", latestEvent ? (phaseLabels[latestEvent.phase] || latestEvent.phase) : "-", latestEvent ? latestEvent.message : ""),
+      setSummaryCard("경과 시간", typeof workflowElapsedLabel === "function" ? workflowElapsedLabel(run) : "-", payload.codex_elapsed_seconds != null ? `Codex ${payload.codex_elapsed_seconds}초` : ""),
+      setSummaryCard("모델", payload.resolved_model || payload.requested_model || "-", payload.resolved_reasoning_effort ? `reasoning: ${payload.resolved_reasoning_effort}` : ""),
+      setSummaryCard("저장소", run.resolved_repo_ref || payload.remote_repo_ref || "-", run.resolved_repo_provider || payload.remote_provider || ""),
+      setSummaryCard("브랜치", payload.branch_name || "-", payload.current_branch ? `현재 브랜치 ${payload.current_branch}` : ""),
+      setSummaryCard("커밋", payload.commit_sha || "-", payload.commit_message || ""),
+      setSummaryCard("원격 Push", payload.push_succeeded ? "성공" : (payload.allow_auto_push ? "실패/미실행" : "비활성"), payload.remote_branch || ""),
+      setSummaryCard("문법 검사", syntaxReturncode == null ? "-" : String(syntaxReturncode), syntaxFiles.length ? `대상 파일 ${syntaxFiles.length}개` : (payload.test_command || "")),
+      setSummaryCard("업데이트", formatTimestamp(run.updated_at || run.finished_at || run.started_at || run.created_at)),
+    ].join("");
+    $("#batch_run_overview").html(cards);
+  };
 })(jQuery);
