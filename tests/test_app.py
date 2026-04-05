@@ -345,6 +345,113 @@ def test_find_claude_launcher_falls_back_to_path(monkeypatch) -> None:
     assert launcher == ["C:\\Users\\tester\\AppData\\Roaming\\npm\\claude.cmd"]
 
 
+def test_run_claude_clarification_uses_subprocess_cwd_only(monkeypatch, tmp_path) -> None:
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(main_module, "_find_claude_launcher", lambda: ["claude"])
+    monkeypatch.setattr(main_module, "_build_codex_clarification_prompt", lambda payload, repo: "prompt")
+    monkeypatch.setattr(
+        main_module,
+        "_resolve_claude_execution_settings",
+        lambda payload: {
+            "resolved_model": "",
+            "resolved_permission_mode": "acceptEdits",
+            "claude_default_model": "",
+            "claude_default_permission_mode": "acceptEdits",
+        },
+    )
+
+    def fake_run_claude_command(command, *, cwd, timeout, reporter=None):
+        captured["command"] = command
+        captured["cwd"] = cwd
+        captured["timeout"] = timeout
+        return {
+            "returncode": 0,
+            "timed_out": False,
+            "elapsed_seconds": 1,
+            "stdout": json.dumps(
+                {
+                    "needs_input": False,
+                    "analysis_summary": "clear",
+                    "requested_information": [],
+                }
+            ),
+            "last_progress_message": "",
+            "progress_event_count": 0,
+        }
+
+    monkeypatch.setattr(main_module, "_run_claude_command", fake_run_claude_command)
+
+    result = main_module._run_claude_clarification(repo_path, {})
+
+    assert result["needs_input"] is False
+    assert result["analysis_summary"] == "clear"
+    assert captured["cwd"] == repo_path
+    assert "--cwd" not in captured["command"]
+    assert "--tools" in captured["command"]
+    assert "" in captured["command"]
+
+
+def test_run_claude_edit_uses_subprocess_cwd_only(monkeypatch, tmp_path) -> None:
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(main_module, "_find_claude_launcher", lambda: ["claude"])
+    monkeypatch.setattr(main_module, "_build_codex_prompt", lambda payload, repo: "prompt")
+    monkeypatch.setattr(
+        main_module,
+        "_resolve_claude_execution_settings",
+        lambda payload: {
+            "resolved_model": "",
+            "resolved_permission_mode": "acceptEdits",
+            "claude_default_model": "",
+            "claude_default_permission_mode": "acceptEdits",
+        },
+    )
+
+    def fake_run_claude_command(command, *, cwd, timeout, reporter=None):
+        captured["command"] = command
+        captured["cwd"] = cwd
+        captured["timeout"] = timeout
+        return {
+            "returncode": 0,
+            "timed_out": False,
+            "elapsed_seconds": 1,
+            "stdout": json.dumps({"ok": True, "summary": "done"}),
+            "last_agent_message": "",
+            "activity_log": "",
+            "activity_log_truncated": False,
+            "last_progress_message": "",
+            "progress_event_count": 0,
+        }
+
+    monkeypatch.setattr(main_module, "_run_claude_command", fake_run_claude_command)
+
+    result = main_module._run_claude_edit(repo_path, {})
+
+    assert result["returncode"] == 0
+    assert captured["cwd"] == repo_path
+    assert "--cwd" not in captured["command"]
+
+
+def test_parse_claude_json_message_uses_structured_output() -> None:
+    payload = {
+        "type": "result",
+        "structured_output": {
+            "needs_input": False,
+            "analysis_summary": "ready",
+            "requested_information": [],
+        },
+    }
+
+    parsed = main_module._parse_claude_json_message(json.dumps(payload, ensure_ascii=False))
+
+    assert parsed == payload["structured_output"]
+
+
 def test_windows_packaging_scripts_exist_with_phase1_defaults() -> None:
     bootstrap = Path("scripts/bootstrap-dev.ps1").read_text(encoding="utf-8")
     check_env = Path("scripts/check-env.ps1").read_text(encoding="utf-8")
@@ -356,6 +463,9 @@ def test_windows_packaging_scripts_exist_with_phase1_defaults() -> None:
     assert 'CODEX_CLI_PATH' in check_env
     assert 'CLAUDE_CLI_PATH' in check_env
     assert 'claude doctor' in check_env
+    assert '@("--version")' in check_env
+    assert 'auth login' in check_env
+    assert 'Invoke-ExternalCommandWithTimeout' in check_env
     assert 'Claude Code install' in bootstrap
     assert 'CLAUDE_CLI_PATH' in run_dev
     assert 'AGENTATION_ENABLED = "0"' in run_dev

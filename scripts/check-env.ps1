@@ -11,7 +11,6 @@ $PinnedNodeVersion = "24.13.1"
 $PinnedNpmVersion = "11.8.0"
 $PinnedGitVersion = "2.45.2.windows.1"
 $PinnedCodexVersion = "0.104.0"
-$LocalClaudeCmd = if ($env:CLAUDE_CLI_PATH) { $env:CLAUDE_CLI_PATH } else { "" }
 $VenvPython = Join-Path $RepoRoot ".venv\Scripts\python.exe"
 $LocalCodexCmd = Join-Path $RepoRoot ".tools\codex\node_modules\.bin\codex.cmd"
 $BlockingIssues = New-Object System.Collections.Generic.List[string]
@@ -123,18 +122,83 @@ if ($resolvedCodexPath -and $nodeCmd) {
     }
 }
 
-$resolvedClaudePath = Resolve-ClaudePath
-if ($resolvedClaudePath) {
-    Write-Host "  Claude: $resolvedClaudePath"
+function Invoke-ExternalCommand([string]$CommandPath, [string[]]$Arguments) {
     $previousPreference = $ErrorActionPreference
     $ErrorActionPreference = "Continue"
     try {
-        $doctorOutput = (& $resolvedClaudePath doctor 2>&1 | Out-String).Trim()
-        if ($LASTEXITCODE -ne 0) {
-            $Warnings.Add("Claude Code doctor check needs attention. Run: $resolvedClaudePath doctor")
-        }
+        return & $CommandPath @Arguments 2>&1
     } finally {
         $ErrorActionPreference = $previousPreference
+    }
+}
+
+function Invoke-ExternalCommandWithTimeout([string]$CommandPath, [string[]]$Arguments, [int]$TimeoutSeconds) {
+    $job = Start-Job -ScriptBlock {
+        param([string]$InnerCommandPath, [string[]]$InnerArguments)
+        $previousPreference = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
+        try {
+            $output = (& $InnerCommandPath @InnerArguments 2>&1 | Out-String).Trim()
+            [pscustomobject]@{
+                TimedOut = $false
+                ExitCode = $LASTEXITCODE
+                Output = $output
+            }
+        } finally {
+            $ErrorActionPreference = $previousPreference
+        }
+    } -ArgumentList $CommandPath, $Arguments
+
+    try {
+        $completedJob = Wait-Job -Job $job -Timeout $TimeoutSeconds
+        if (-not $completedJob) {
+            Stop-Job -Job $job -ErrorAction SilentlyContinue | Out-Null
+            return [pscustomobject]@{
+                TimedOut = $true
+                ExitCode = $null
+                Output = ""
+            }
+        }
+        return Receive-Job -Job $job
+    } finally {
+        Remove-Job -Job $job -Force -ErrorAction SilentlyContinue | Out-Null
+    }
+}
+
+$resolvedClaudePath = Resolve-ClaudePath
+if ($resolvedClaudePath) {
+    $claudeVersionOutput = (Invoke-ExternalCommand -CommandPath $resolvedClaudePath -Arguments @("--version") | Out-String).Trim()
+    Write-Host "  Claude: $claudeVersionOutput"
+    Write-Host "  Claude Path: $resolvedClaudePath"
+
+    $claudeAuthResult = Invoke-ExternalCommandWithTimeout -CommandPath $resolvedClaudePath -Arguments @("auth", "status") -TimeoutSeconds 10
+    if ($claudeAuthResult.TimedOut) {
+        $Warnings.Add("Claude Code auth status check timed out. Run: $resolvedClaudePath auth status")
+    } elseif ($claudeAuthResult.ExitCode -ne 0) {
+        $Warnings.Add("Claude Code auth status check failed. Run: $resolvedClaudePath auth status")
+    } else {
+        try {
+            $claudeAuth = $claudeAuthResult.Output | ConvertFrom-Json
+            if ($claudeAuth.loggedIn) {
+                $authMethod = if ($claudeAuth.authMethod) { [string]$claudeAuth.authMethod } else { "unknown" }
+                $apiProvider = if ($claudeAuth.apiProvider) { [string]$claudeAuth.apiProvider } else { "unknown" }
+                Write-Host "  Claude Auth: logged in ($authMethod / $apiProvider)"
+            } else {
+                Write-Host "  Claude Auth: not logged in"
+                $BlockingIssues.Add("Claude Code login is required. Run: $resolvedClaudePath auth login")
+            }
+        } catch {
+            $Warnings.Add("Claude Code auth status output could not be parsed. Run: $resolvedClaudePath auth status")
+        }
+    }
+
+    $doctorResult = Invoke-ExternalCommandWithTimeout -CommandPath $resolvedClaudePath -Arguments @("doctor") -TimeoutSeconds 20
+    if ($doctorResult.TimedOut) {
+        $Warnings.Add("Claude Code doctor check timed out after 20s. Run: $resolvedClaudePath doctor")
+    } elseif ($doctorResult.ExitCode -ne 0) {
+        $Warnings.Add("Claude Code doctor check needs attention. Run: $resolvedClaudePath doctor")
+    } else {
+        Write-Host "  Claude Doctor: OK"
     }
 } else {
     $ManualSteps.Add("Install Claude Code manually if needed: npm install -g @anthropic-ai/claude-code")

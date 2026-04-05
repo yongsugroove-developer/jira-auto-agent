@@ -3477,6 +3477,9 @@ def _parse_claude_json_message(text: str) -> dict[str, Any]:
         nested = payload.get("result")
         if isinstance(nested, dict):
             return nested
+        structured_output = payload.get("structured_output")
+        if isinstance(structured_output, dict):
+            return structured_output
         return payload
     return {}
 
@@ -4052,8 +4055,6 @@ def _run_claude_edit(repo_path: Path, payload: dict[str, Any], reporter: Any = N
         claude_settings["resolved_permission_mode"] or "acceptEdits",
         "--json-schema",
         json.dumps(_codex_output_schema(), ensure_ascii=False),
-        "--cwd",
-        str(repo_path),
     ]
     if claude_settings["resolved_model"]:
         command.extend(["--model", claude_settings["resolved_model"]])
@@ -4107,8 +4108,8 @@ def _run_claude_clarification(repo_path: Path, payload: dict[str, Any]) -> dict[
         "plan",
         "--json-schema",
         json.dumps(_codex_clarification_schema(), ensure_ascii=False),
-        "--cwd",
-        str(repo_path),
+        "--tools",
+        "",
     ]
     if claude_settings["resolved_model"]:
         command.extend(["--model", claude_settings["resolved_model"]])
