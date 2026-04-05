@@ -11,6 +11,7 @@ $PinnedNodeVersion = "24.13.1"
 $PinnedNpmVersion = "11.8.0"
 $PinnedGitVersion = "2.45.2.windows.1"
 $PinnedCodexVersion = "0.104.0"
+$LocalClaudeCmd = if ($env:CLAUDE_CLI_PATH) { $env:CLAUDE_CLI_PATH } else { "" }
 $VenvPython = Join-Path $RepoRoot ".venv\Scripts\python.exe"
 $LocalCodexCmd = Join-Path $RepoRoot ".tools\codex\node_modules\.bin\codex.cmd"
 $BlockingIssues = New-Object System.Collections.Generic.List[string]
@@ -50,6 +51,22 @@ function Warn-VersionDrift([string]$ToolName, [string]$ActualVersion, [string]$P
     if ($ActualVersion -ne $PinnedVersion) {
         $Warnings.Add("$ToolName 버전 drift: expected=$PinnedVersion actual=$ActualVersion")
     }
+}
+
+function Resolve-ClaudePath() {
+    if ($env:CLAUDE_CLI_PATH) {
+        $resolved = (Resolve-Path $env:CLAUDE_CLI_PATH -ErrorAction SilentlyContinue).Path
+        if ($resolved) {
+            return $resolved
+        }
+        $Warnings.Add("CLAUDE_CLI_PATH is set but invalid: $($env:CLAUDE_CLI_PATH)")
+        return ""
+    }
+    $command = Get-Command "claude" -ErrorAction SilentlyContinue
+    if ($command) {
+        return $command.Source
+    }
+    return ""
 }
 
 $pythonCmd = Require-Command "Python" @("python.exe", "python")
@@ -104,6 +121,25 @@ if ($resolvedCodexPath -and $nodeCmd) {
     if ($LASTEXITCODE -ne 0 -or $loginOutput -notmatch "Logged in") {
         $BlockingIssues.Add("Codex CLI login is required. Run: $resolvedCodexPath login")
     }
+}
+
+$resolvedClaudePath = Resolve-ClaudePath
+if ($resolvedClaudePath) {
+    Write-Host "  Claude: $resolvedClaudePath"
+    $previousPreference = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        $doctorOutput = (& $resolvedClaudePath doctor 2>&1 | Out-String).Trim()
+        if ($LASTEXITCODE -ne 0) {
+            $Warnings.Add("Claude Code doctor check needs attention. Run: $resolvedClaudePath doctor")
+        }
+    } finally {
+        $ErrorActionPreference = $previousPreference
+    }
+} else {
+    $ManualSteps.Add("Install Claude Code manually if needed: npm install -g @anthropic-ai/claude-code")
+    $ManualSteps.Add("After install, run: claude doctor")
+    $ManualSteps.Add("Authenticate Claude Code before selecting it in the app.")
 }
 
 if ($env:AGENTATION_ENABLED -and $env:AGENTATION_ENABLED.Trim() -ne "0") {

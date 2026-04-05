@@ -236,7 +236,7 @@
       <div class="card-header">
         <div class="card-header__copy">
           <p class="section-kicker">Workflow</p>
-          <h2>3. Codex 배치 작업 준비와 실행</h2>
+          <h2>3. Agent 배치 작업 준비와 실행</h2>
         </div>
         <div class="card-header__actions">
           <button id="check_repo" type="button">레포 상태 확인</button>
@@ -253,20 +253,53 @@
       </div>
 
       <div class="grid workflow-grid">
-        <label>Codex Model<input id="codex_model" type="text" placeholder="비우면 로컬 기본값 사용{% if codex_defaults.model %} ({{ codex_defaults.model }}){% endif %}"></label>
-        <label>Reasoning Effort
-          <select id="codex_reasoning_effort">
-            <option value="">로컬 기본값 사용{% if codex_defaults.model_reasoning_effort %} ({{ codex_defaults.model_reasoning_effort }}){% endif %}</option>
-            {% for effort in valid_reasoning_efforts %}
-            <option value="{{ effort }}">{{ effort }}</option>
+        <label>Agent Provider
+          <select id="agent_provider">
+            {% for provider, option in agent_provider_options.items() %}
+            <option value="{{ provider }}" {% if provider == agent_provider_default %}selected{% endif %}>{{ option.label }}</option>
             {% endfor %}
           </select>
         </label>
+        <div id="agent_provider_status" class="workflow-provider-status wide"></div>
+        <section id="workflow_provider_panel_codex" class="workflow-provider-panel wide" data-agent-provider-panel="codex">
+          <div class="workflow-provider-panel__header">
+            <strong>Codex 설정</strong>
+            <p>Codex CLI 모델과 reasoning 옵션을 설정한다.</p>
+          </div>
+          <div class="grid workflow-provider-grid">
+            <label>Codex Model<input id="codex_model" type="text" placeholder="비우면 로컬 기본값 사용{% if codex_defaults.model %} ({{ codex_defaults.model }}){% endif %}"></label>
+            <label>Reasoning Effort
+              <select id="codex_reasoning_effort">
+                <option value="">로컬 기본값 사용{% if codex_defaults.model_reasoning_effort %} ({{ codex_defaults.model_reasoning_effort }}){% endif %}</option>
+                {% for effort in valid_reasoning_efforts %}
+                <option value="{{ effort }}">{{ effort }}</option>
+                {% endfor %}
+              </select>
+            </label>
+          </div>
+        </section>
+        <section id="workflow_provider_panel_claude" class="workflow-provider-panel wide" data-agent-provider-panel="claude" hidden>
+          <div class="workflow-provider-panel__header">
+            <strong>Claude Code 설정</strong>
+            <p>Claude Code 모델과 permission mode를 설정한다.</p>
+          </div>
+          <div class="grid workflow-provider-grid">
+            <label>Claude Model<input id="claude_model" type="text" placeholder="비우면 로컬 기본값 사용{% if claude_defaults.model %} ({{ claude_defaults.model }}){% endif %}"></label>
+            <label>Permission Mode
+              <select id="claude_permission_mode">
+                <option value="">로컬 기본값 사용{% if claude_defaults.permission_mode %} ({{ claude_defaults.permission_mode }}){% endif %}</option>
+                {% for mode in valid_claude_permission_modes %}
+                <option value="{{ mode }}">{{ mode }}</option>
+                {% endfor %}
+              </select>
+            </label>
+          </div>
+        </section>
         <label class="wide">작업 지시 상세<textarea id="work_instruction" rows="4" placeholder="예) 승인 버튼 클릭 시 /api/approve를 호출하고, 기존 테이블 구조와 DOM id는 유지한다."></textarea></label>
         <label class="wide">수용 기준<textarea id="acceptance_criteria" rows="4" placeholder="예) 승인 버튼 클릭 시 API가 1회 호출된다.&#10;예) 성공 시 완료 메시지가 표시된다.&#10;예) 기존 배치 실행 흐름은 깨지지 않는다."></textarea></label>
         <label class="wide">커밋 체크리스트<textarea id="commit_checklist" rows="3" placeholder="- README 수정 금지&#10;- 에러 코드 메시지 유지"></textarea></label>
-        <label>Git Author Name<input id="git_author_name" type="text" placeholder="Codex Bot"></label>
-        <label>Git Author Email<input id="git_author_email" type="email" placeholder="codex@example.com"></label>
+        <label>Git Author Name<input id="git_author_name" type="text" placeholder="Agent Bot"></label>
+        <label>Git Author Email<input id="git_author_email" type="email" placeholder="agent@example.com"></label>
       </div>
 
       <input id="test_command" type="hidden" value="">
@@ -590,6 +623,8 @@
 
   <script>
     window.__AGENTATION_CONFIG__ = {{ agentation_frontend|tojson }};
+    window.__AGENT_PROVIDER_DEFAULT__ = {{ agent_provider_default|tojson }};
+    window.__AGENT_PROVIDER_OPTIONS__ = {{ agent_provider_options|tojson }};
   </script>
   <script src="{{ url_for('static', filename='app.js') }}"></script>
   <script src="{{ url_for('static', filename='batch-workspace.js') }}"></script>

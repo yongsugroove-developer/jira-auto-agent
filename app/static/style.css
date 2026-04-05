@@ -199,6 +199,64 @@ textarea {
   margin-top: 18px;
 }
 
+.workflow-provider-status {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: var(--surface-muted);
+  color: var(--text);
+}
+
+.workflow-provider-status strong {
+  font-size: 14px;
+}
+
+.workflow-provider-status span {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.workflow-provider-status.is-unavailable {
+  border-color: var(--danger);
+  background: #fff5f5;
+}
+
+.workflow-provider-panel {
+  display: grid;
+  gap: 12px;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  background: var(--surface);
+}
+
+.workflow-provider-panel[hidden] {
+  display: none !important;
+}
+
+.workflow-provider-panel__header {
+  display: grid;
+  gap: 6px;
+}
+
+.workflow-provider-panel__header strong {
+  color: var(--text);
+  font-size: 15px;
+}
+
+.workflow-provider-panel__header p {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.workflow-provider-grid {
+  margin-top: 0;
+}
+
 .checkbox-row {
   display: inline-flex;
   align-items: center;

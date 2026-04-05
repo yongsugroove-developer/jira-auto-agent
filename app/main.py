@@ -59,8 +59,11 @@ MAX_DIFF_CHARS = 60000
 MAX_OUTPUT_CHARS = 12000
 MAX_WORKFLOW_EVENTS = 160
 MAX_CLARIFICATION_QUESTIONS = 3
-SETUP_GUIDE_VERSION = 6
+SETUP_GUIDE_VERSION = 7
+DEFAULT_AGENT_PROVIDER = "codex"
+VALID_AGENT_PROVIDERS = ("codex", "claude")
 VALID_REASONING_EFFORTS = ("low", "medium", "high", "xhigh")
+VALID_CLAUDE_PERMISSION_MODES = ("default", "acceptEdits", "plan", "auto", "dontAsk", "bypassPermissions")
 VALID_SCM_PROVIDERS = ("github", "gitlab")
 WORKFLOW_HEARTBEAT_SECONDS = 10
 WORKFLOW_STALE_SECONDS = 30
@@ -79,16 +82,28 @@ REPO_LOCAL_CODEX_DIR = REPO_LOCAL_TOOLS_DIR / "codex"
 REPO_LOCAL_CODEX_JS = REPO_LOCAL_CODEX_DIR / "node_modules" / "@openai" / "codex" / "bin" / "codex.js"
 REPO_LOCAL_CODEX_CMD = REPO_LOCAL_CODEX_DIR / "node_modules" / ".bin" / "codex.cmd"
 REPO_LOCAL_CODEX_BIN = REPO_LOCAL_CODEX_DIR / "node_modules" / ".bin" / "codex"
+CLAUDE_WINDOWS_GIT_BASH = Path(os.getenv("ProgramFiles", r"C:\Program Files")) / "Git" / "bin" / "bash.exe"
 SCM_STORE_KEY = "scm"
 LEGACY_GITHUB_STORE_KEY = "github"
 DEFAULT_GITHUB_WEB_BASE_URL = "https://github.com"
 DEFAULT_GITHUB_API_BASE_URL = "https://api.github.com"
 GITLAB_TOKEN_USERNAME = "oauth2"
 GITHUB_TOKEN_USERNAME = "x-access-token"
+AGENT_PROVIDER_LABELS = {
+    "codex": "Codex",
+    "claude": "Claude Code",
+}
+AGENT_EXECUTION_MODE_LABELS = {
+    "codex": "Reasoning Effort",
+    "claude": "Permission Mode",
+}
 FIELD_LABEL_OVERRIDES = {
     "gitlab_base_url": "GitLab Base URL",
     "repo_mappings": "공간별 저장소 연결",
     "local_repo_path": "기본 로컬 레포 경로",
+    "agent_provider": "Agent Provider",
+    "claude_model": "Claude Model",
+    "claude_permission_mode": "Permission Mode",
     "work_instruction": "작업 지시 상세",
     "acceptance_criteria": "수용 기준",
     "test_command": "참고용 로컬 테스트 명령",
@@ -135,8 +150,11 @@ FIELD_GUIDES: dict[str, dict[str, str]] = {
     "local_repo_path": {"label": "Local Repo Path", "guide_section": "local_repo", "guide_step_id": "local-repo-path"},
     "branch_name": {"label": "Branch Name", "guide_section": "automation", "guide_step_id": "automation-branch-commit"},
     "commit_message": {"label": "Commit Message", "guide_section": "automation", "guide_step_id": "automation-branch-commit"},
+    "agent_provider": {"label": "Agent Provider", "guide_section": "automation", "guide_step_id": "automation-agent-provider"},
     "codex_model": {"label": "Codex Model", "guide_section": "automation", "guide_step_id": "automation-codex-model"},
     "codex_reasoning_effort": {"label": "Reasoning Effort", "guide_section": "automation", "guide_step_id": "automation-codex-model"},
+    "claude_model": {"label": "Claude Model", "guide_section": "automation", "guide_step_id": "automation-claude-model"},
+    "claude_permission_mode": {"label": "Permission Mode", "guide_section": "automation", "guide_step_id": "automation-claude-model"},
     "work_instruction": {"label": "작업 지시 상세", "guide_section": "automation", "guide_step_id": "automation-work-instruction"},
     "acceptance_criteria": {"label": "수용 기준", "guide_section": "automation", "guide_step_id": "automation-acceptance-criteria"},
     "test_command": {"label": "로컬 테스트 명령", "guide_section": "automation", "guide_step_id": "automation-test-command"},
@@ -484,8 +502,11 @@ FIELD_GUIDES = {
     "local_repo_path": {"label": "Local Repo Path", "guide_section": "local_repo", "guide_step_id": "local-repo-path"},
     "branch_name": {"label": "Branch Name", "guide_section": "automation", "guide_step_id": "automation-branch-commit"},
     "commit_message": {"label": "Commit Message", "guide_section": "automation", "guide_step_id": "automation-branch-commit"},
+    "agent_provider": {"label": "Agent Provider", "guide_section": "automation", "guide_step_id": "automation-agent-provider"},
     "codex_model": {"label": "Codex Model", "guide_section": "automation", "guide_step_id": "automation-codex-model"},
     "codex_reasoning_effort": {"label": "Reasoning Effort", "guide_section": "automation", "guide_step_id": "automation-codex-model"},
+    "claude_model": {"label": "Claude Model", "guide_section": "automation", "guide_step_id": "automation-claude-model"},
+    "claude_permission_mode": {"label": "Permission Mode", "guide_section": "automation", "guide_step_id": "automation-claude-model"},
     "work_instruction": {"label": "작업 지시 상세", "guide_section": "automation", "guide_step_id": "automation-work-instruction"},
     "acceptance_criteria": {"label": "수용 기준", "guide_section": "automation", "guide_step_id": "automation-acceptance-criteria"},
     "test_command": {"label": "참고용 로컬 테스트 명령", "guide_section": "automation", "guide_step_id": "automation-test-command"},
@@ -811,6 +832,175 @@ def _setup_guide_sections() -> list[dict[str, Any]]:
 SETUP_GUIDE = {"version": SETUP_GUIDE_VERSION, "sections": _setup_guide_sections()}
 
 
+def _agent_automation_guide_steps() -> list[dict[str, Any]]:
+    return [
+        _guide_step(
+            "automation-agent-provider",
+            "Agent Provider 선택",
+            "Codex와 Claude Code 중 현재 작업에 사용할 에이전트 실행기를 먼저 선택합니다.",
+            [
+                "기본값은 Codex입니다.",
+                "Claude Code를 선택하면 Claude 전용 입력 패널이 열리고, Codex 전용 필드는 숨겨집니다.",
+                "실행기 탐지나 사전 조건이 부족하면 상태 안내에 바로 표시됩니다.",
+            ],
+            "Claude Code는 로컬 CLI 설치와 인증이 끝난 환경을 전제로 하며, 앱이 로그인이나 구독 생성을 대신 처리하지 않습니다.",
+            "codex 또는 claude",
+            ["agent_provider"],
+        ),
+        _guide_step(
+            "automation-branch-commit",
+            "브랜치명과 커밋 메시지 결정",
+            "선택한 이슈를 기준으로 작업 브랜치와 최종 커밋 메시지를 명확히 정합니다.",
+            [
+                "Jira 이슈를 선택한 뒤 준비 버튼을 눌러 기본값을 채웁니다.",
+                "브랜치명은 팀 규칙이 있으면 그 형식을 따르고, 없으면 feature/<issue>-<slug> 형태를 사용합니다.",
+                "커밋 메시지는 이슈 키를 앞에 두고 한 줄로 요약합니다.",
+            ],
+            "브랜치명은 기본 브랜치와 같을 수 없습니다.",
+            "feature/DEMO-102-approve-api / DEMO-102: 승인 API 추가",
+            ["branch_name", "commit_message"],
+        ),
+        _guide_step(
+            "automation-codex-model",
+            "Codex 설정",
+            "Codex를 선택했을 때 사용할 모델과 reasoning effort를 설정합니다.",
+            [
+                "값을 비우면 로컬 Codex 기본값을 사용합니다.",
+                "특정 작업만 다른 모델로 실행하려면 Codex Model에 직접 입력합니다.",
+                "Reasoning Effort는 low, medium, high, xhigh 중 하나를 선택합니다.",
+            ],
+            "이 단계는 Agent Provider가 codex일 때만 적용됩니다.",
+            "model: gpt-5.4 / reasoning: high",
+            ["codex_model", "codex_reasoning_effort"],
+        ),
+        _guide_step(
+            "automation-claude-model",
+            "Claude Code 설정",
+            "Claude Code를 선택했을 때 사용할 모델과 permission mode를 설정합니다.",
+            [
+                "값을 비우면 로컬 Claude Code 기본값을 사용합니다.",
+                "Permission Mode는 acceptEdits, plan, auto, dontAsk, bypassPermissions 등 허용된 값만 사용합니다.",
+                "Windows에서는 Git for Windows의 bash 또는 WSL 준비 여부를 먼저 확인합니다.",
+            ],
+            "이 단계는 Agent Provider가 claude일 때만 적용됩니다.",
+            "model: sonnet / permission: acceptEdits",
+            ["claude_model", "claude_permission_mode"],
+        ),
+        _guide_step(
+            "automation-work-instruction",
+            "작업 지시 상세 작성",
+            "무엇을 바꾸고 무엇을 유지해야 하는지 구체적으로 적습니다.",
+            [
+                "변경 대상, 유지 대상, 금지 사항을 짧은 문장으로 분리해 적습니다.",
+                "API, 화면, 데이터 구조, 예외 처리처럼 중요한 제약을 먼저 적습니다.",
+                "기존 DOM id나 응답 계약을 유지해야 하면 명시합니다.",
+            ],
+            "값이 비어 있으면 실행을 시작하지 않습니다.",
+            "확인 버튼 클릭 시 /api/approve를 호출하고 기존 DOM id와 응답 필드는 유지한다.",
+            ["work_instruction"],
+        ),
+        _guide_step(
+            "automation-acceptance-criteria",
+            "수용 기준 정리",
+            "완료 조건과 검증 기준을 체크리스트 형태로 적습니다.",
+            [
+                "사용자 관점에서 확인 가능한 결과를 줄바꿈으로 나눠 적습니다.",
+                "정상 동작, 예외 처리, 회귀 방지 조건을 분리하면 좋습니다.",
+                "필수 조건만 간단히 적어도 됩니다.",
+            ],
+            "수용 기준이 구체적일수록 결과 확인이 쉬워집니다.",
+            "1. 승인 버튼 클릭 시 API가 1회 호출된다.\n2. 성공 시 완료 메시지가 표시된다.",
+            ["acceptance_criteria"],
+        ),
+        _guide_step(
+            "automation-test-command",
+            "숨겨진 test_command 이해",
+            "현재 화면에서는 test_command 입력칸이 보이지 않지만, hidden input으로 유지되며 저장된 값이 있으면 payload 호환성과 결과 요약에 함께 사용됩니다.",
+            [
+                "기존에 저장된 값이 있으면 현재 화면에 직접 보이지 않아도 계속 유지됩니다.",
+                "현재 서버 검증은 주로 변경 파일 문법 검사 중심으로 동작합니다.",
+                "추가 수동 검증이 필요하면 커밋 체크리스트에 명시합니다.",
+            ],
+            "직접 수정하는 화면은 현재 제공하지 않습니다.",
+            "PYTHONPATH=. pytest -q",
+            ["allow_auto_commit", "commit_checklist"],
+        ),
+        _guide_step(
+            "automation-commit-mode",
+            "자동 커밋과 push 모드 확인",
+            "체크박스 상태에 따라 자동 커밋과 원격 push 범위가 달라집니다.",
+            [
+                "자동 커밋을 켜면 문법 검사 통과 후 git commit까지 진행합니다.",
+                "자동 커밋을 끄면 변경 내용만 남기고 수동 확인 상태에서 멈춥니다.",
+                "push를 켜면 커밋 후 원격 저장소까지 push를 시도합니다.",
+            ],
+            "Git 작성자 정보와 원격 권한을 먼저 확인합니다.",
+            "체크박스: 로컬 테스트 없이 자동 커밋 허용 / 커밋 후 원격 저장소까지 push",
+            ["allow_auto_commit", "allow_auto_push"],
+        ),
+        _guide_step(
+            "automation-commit-checklist",
+            "커밋 체크리스트 작성",
+            "마지막 확인 단계에서 다시 봐야 할 항목을 기록합니다.",
+            [
+                "건드리면 안 되는 파일, 문구 유지, 추가 확인 항목을 적습니다.",
+                "리뷰어가 다시 볼 확인 포인트를 짧게 적으면 충분합니다.",
+                "없으면 비워도 됩니다.",
+            ],
+            "필수는 아니지만 회귀 방지에 도움이 됩니다.",
+            "- README 수정 금지\n- 에러 코드 메시지 유지",
+            ["commit_checklist"],
+        ),
+        _guide_step(
+            "automation-git-author",
+            "Git 작성자 정보 준비",
+            "로컬 Git 설정에 user.name, user.email이 없으면 자동 커밋을 위해 별도 입력이 필요합니다.",
+            [
+                "현재 PC의 git config user.name, user.email 설정 여부를 먼저 확인합니다.",
+                "이미 설정되어 있으면 입력칸을 비워도 됩니다.",
+                "없으면 이번 실행에 사용할 이름과 이메일을 입력합니다.",
+            ],
+            "작성자 정보가 없으면 git commit 단계에서 실패합니다.",
+            "name: Agent Bot / email: agent@example.com",
+            ["git_author_name", "git_author_email"],
+            "https://git-scm.com/book/en/v2/Getting-Started-First-Time-Git-Setup",
+        ),
+    ]
+
+
+def _patch_setup_guide_for_agent_provider(guide: dict[str, Any]) -> dict[str, Any]:
+    patched_sections: list[dict[str, Any]] = []
+    for section in guide.get("sections", []):
+        if section.get("id") != "automation":
+            patched_sections.append(section)
+            continue
+        patched_section = dict(section)
+        patched_section["title"] = "Agent 입력과 실행"
+        patched_section["summary"] = "Agent Provider 선택, 실행 조건 입력, 저장소 상태 확인, 배치 실행을 준비합니다."
+        patched_section["fields"] = [
+            "agent_provider",
+            "branch_name",
+            "commit_message",
+            "codex_model",
+            "codex_reasoning_effort",
+            "claude_model",
+            "claude_permission_mode",
+            "work_instruction",
+            "acceptance_criteria",
+            "test_command",
+            "commit_checklist",
+            "git_author_name",
+            "git_author_email",
+            "allow_auto_push",
+        ]
+        patched_section["steps"] = _agent_automation_guide_steps()
+        patched_sections.append(patched_section)
+    return {"version": guide.get("version", SETUP_GUIDE_VERSION), "sections": patched_sections}
+
+
+SETUP_GUIDE = _patch_setup_guide_for_agent_provider(SETUP_GUIDE)
+
+
 def _utcnow_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -978,6 +1168,7 @@ def _workflow_run_snapshot(run: dict[str, Any]) -> dict[str, Any]:
     return {
         "run_id": run["run_id"],
         "batch_id": run.get("batch_id"),
+        "agent_provider": run.get("agent_provider", DEFAULT_AGENT_PROVIDER),
         "issue_key": run.get("issue_key", ""),
         "issue_summary": run.get("issue_summary", ""),
         "tab_label": run.get("tab_label", ""),
@@ -1029,8 +1220,10 @@ def _batch_tab_label(issue_key: str, issue_summary: str) -> str:
 
 
 def _workflow_batch_run_ref(run: dict[str, Any]) -> dict[str, Any]:
+    request_payload = run.get("request_payload") if isinstance(run.get("request_payload"), dict) else {}
     return {
         "run_id": run.get("run_id", ""),
+        "agent_provider": str(run.get("agent_provider", request_payload.get("agent_provider", DEFAULT_AGENT_PROVIDER))).strip() or DEFAULT_AGENT_PROVIDER,
         "issue_key": run.get("issue_key", ""),
         "issue_summary": run.get("issue_summary", ""),
         "tab_label": run.get("tab_label", ""),
@@ -1069,6 +1262,28 @@ def _workflow_log_ref(run: dict[str, Any]) -> dict[str, Any]:
     return {
         "run_id": str(run.get("run_id", "")).strip(),
         "batch_id": str(run.get("batch_id", "")).strip(),
+        "agent_provider": str(run.get("agent_provider", request_payload.get("agent_provider", DEFAULT_AGENT_PROVIDER))).strip() or DEFAULT_AGENT_PROVIDER,
+        "resolved_agent_label": str(
+            result_payload.get(
+                "resolved_agent_label",
+                AGENT_PROVIDER_LABELS.get(
+                    str(run.get("agent_provider", request_payload.get("agent_provider", DEFAULT_AGENT_PROVIDER))).strip() or DEFAULT_AGENT_PROVIDER,
+                    AGENT_PROVIDER_LABELS[DEFAULT_AGENT_PROVIDER],
+                ),
+            )
+        ).strip(),
+        "resolved_agent_model": str(
+            result_payload.get(
+                "resolved_agent_model",
+                result_payload.get("resolved_model", request_payload.get("claude_model", request_payload.get("codex_model", ""))),
+            )
+        ).strip(),
+        "resolved_agent_execution_mode": str(
+            result_payload.get(
+                "resolved_agent_execution_mode",
+                result_payload.get("resolved_reasoning_effort", request_payload.get("claude_permission_mode", request_payload.get("codex_reasoning_effort", ""))),
+            )
+        ).strip(),
         "issue_key": str(run.get("issue_key", "")).strip(),
         "issue_summary": str(run.get("issue_summary", "")).strip(),
         "resolved_space_key": str(run.get("resolved_space_key", "")).strip(),
@@ -1298,6 +1513,7 @@ def _mark_workflow_run_stale(run: dict[str, Any]) -> tuple[dict[str, Any], bool]
 def _new_workflow_run(
     *,
     batch_id: str | None = None,
+    agent_provider: str = DEFAULT_AGENT_PROVIDER,
     issue_key: str = "",
     issue_summary: str = "",
     resolved_space_key: str = "",
@@ -1314,6 +1530,7 @@ def _new_workflow_run(
     return {
         "run_id": uuid.uuid4().hex,
         "batch_id": batch_id,
+        "agent_provider": _normalize_agent_provider(agent_provider),
         "issue_key": issue_key.strip().upper(),
         "issue_summary": issue_summary.strip(),
         "tab_label": _batch_tab_label(issue_key, issue_summary),
@@ -1761,6 +1978,62 @@ def _required_workflow_fields(payload: dict[str, Any]) -> list[str]:
     return [name for name, value in required.items() if not str(value or "").strip()]
 
 
+def _normalize_workflow_agent_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    payload["agent_provider"] = _normalize_agent_provider(payload.get("agent_provider"))
+    payload["codex_model"] = str(payload.get("codex_model", "")).strip()
+    payload["codex_reasoning_effort"] = _normalize_reasoning_effort(payload.get("codex_reasoning_effort"))
+    payload["claude_model"] = str(payload.get("claude_model", "")).strip()
+    payload["claude_permission_mode"] = _normalize_claude_permission_mode(payload.get("claude_permission_mode"))
+    return payload
+
+
+def _agent_execution_validation_error(payload: dict[str, Any]) -> dict[str, Any] | None:
+    provider = _normalize_agent_provider(payload.get("agent_provider"))
+    if provider == "claude":
+        permission_mode = _normalize_claude_permission_mode(payload.get("claude_permission_mode"))
+        if permission_mode and permission_mode not in VALID_CLAUDE_PERMISSION_MODES:
+            return {
+                "ok": False,
+                "error": "invalid_claude_permission_mode",
+                "fields": ["claude_permission_mode"],
+                "requested_information": _build_requested_information(["claude_permission_mode"]),
+                "allowed_values": list(VALID_CLAUDE_PERMISSION_MODES),
+                "message": "Permission Mode는 허용된 Claude Code 값이어야 합니다.",
+            }
+        return None
+
+    reasoning_effort = _normalize_reasoning_effort(payload.get("codex_reasoning_effort"))
+    if reasoning_effort and reasoning_effort not in VALID_REASONING_EFFORTS:
+        return {
+            "ok": False,
+            "error": "invalid_reasoning_effort",
+            "fields": ["codex_reasoning_effort"],
+            "requested_information": _build_requested_information(["codex_reasoning_effort"]),
+            "allowed_values": list(VALID_REASONING_EFFORTS),
+            "message": "Reasoning Effort는 low, medium, high, xhigh 중 하나여야 합니다.",
+        }
+    return None
+
+
+def _agent_cli_missing_error(provider: str, exc: FileNotFoundError) -> dict[str, Any]:
+    normalized_provider = _normalize_agent_provider(provider)
+    if normalized_provider == "claude":
+        return {
+            "ok": False,
+            "error": "claude_cli_not_found",
+            "fields": ["agent_provider", "claude_model", "claude_permission_mode"],
+            "requested_information": _build_requested_information(["agent_provider", "claude_model", "claude_permission_mode"]),
+            "details": str(exc),
+        }
+    return {
+        "ok": False,
+        "error": "codex_cli_not_found",
+        "fields": ["agent_provider", "codex_model", "codex_reasoning_effort"],
+        "requested_information": _build_requested_information(["agent_provider", "codex_model", "codex_reasoning_effort"]),
+        "details": str(exc),
+    }
+
+
 def _guide_metadata(field: str) -> dict[str, str]:
     metadata = FIELD_GUIDES.get(field)
     if metadata:
@@ -1930,6 +2203,155 @@ def _resolve_codex_execution_settings(payload: dict[str, Any]) -> dict[str, str]
         "codex_default_model": defaults["model"],
         "codex_default_reasoning_effort": defaults["model_reasoning_effort"],
     }
+
+
+def _normalize_agent_provider(value: Any) -> str:
+    provider = str(value or "").strip().lower()
+    if provider in VALID_AGENT_PROVIDERS:
+        return provider
+    return DEFAULT_AGENT_PROVIDER
+
+
+def _normalize_claude_permission_mode(value: Any) -> str:
+    normalized = str(value or "").strip()
+    if normalized in VALID_CLAUDE_PERMISSION_MODES:
+        return normalized
+    return ""
+
+
+def _load_claude_cli_defaults() -> dict[str, str]:
+    return {
+        "model": "",
+        "permission_mode": "acceptEdits",
+    }
+
+
+def _resolve_claude_execution_settings(payload: dict[str, Any]) -> dict[str, str]:
+    defaults = _load_claude_cli_defaults()
+    requested_model = str(payload.get("claude_model", "")).strip()
+    requested_permission_mode = _normalize_claude_permission_mode(payload.get("claude_permission_mode"))
+    return {
+        "requested_model": requested_model,
+        "requested_permission_mode": requested_permission_mode,
+        "resolved_model": requested_model or defaults["model"],
+        "resolved_permission_mode": requested_permission_mode or defaults["permission_mode"],
+        "claude_default_model": defaults["model"],
+        "claude_default_permission_mode": defaults["permission_mode"],
+    }
+
+
+def _resolve_agent_execution_settings(payload: dict[str, Any]) -> dict[str, Any]:
+    provider = _normalize_agent_provider(payload.get("agent_provider"))
+    if provider == "claude":
+        settings = _resolve_claude_execution_settings(payload)
+        return {
+            "agent_provider": "claude",
+            "agent_label": AGENT_PROVIDER_LABELS["claude"],
+            "execution_mode_label": AGENT_EXECUTION_MODE_LABELS["claude"],
+            "requested_agent_model": settings["requested_model"],
+            "requested_agent_execution_mode": settings["requested_permission_mode"],
+            "resolved_agent_model": settings["resolved_model"],
+            "resolved_agent_execution_mode": settings["resolved_permission_mode"],
+            "agent_default_model": settings["claude_default_model"],
+            "agent_default_execution_mode": settings["claude_default_permission_mode"],
+            **settings,
+        }
+
+    settings = _resolve_codex_execution_settings(payload)
+    return {
+        "agent_provider": "codex",
+        "agent_label": AGENT_PROVIDER_LABELS["codex"],
+        "execution_mode_label": AGENT_EXECUTION_MODE_LABELS["codex"],
+        "requested_agent_model": settings["requested_model"],
+        "requested_agent_execution_mode": settings["requested_reasoning_effort"],
+        "resolved_agent_model": settings["resolved_model"],
+        "resolved_agent_execution_mode": settings["resolved_reasoning_effort"],
+        "agent_default_model": settings["codex_default_model"],
+        "agent_default_execution_mode": settings["codex_default_reasoning_effort"],
+        **settings,
+    }
+
+
+def _is_claude_git_bash_ready() -> bool:
+    if os.name != "nt":
+        return True
+    configured_path = str(os.getenv("CLAUDE_CODE_GIT_BASH_PATH", "")).strip()
+    if configured_path:
+        return Path(configured_path).expanduser().exists()
+    if CLAUDE_WINDOWS_GIT_BASH.exists():
+        return True
+    bash_on_path = shutil.which("bash")
+    return bool(bash_on_path)
+
+
+def _find_claude_launcher() -> list[str]:
+    configured_path = str(os.getenv("CLAUDE_CLI_PATH", "")).strip()
+    if configured_path:
+        return _codex_launcher_from_path(Path(configured_path).expanduser(), source_name="CLAUDE_CLI_PATH")
+
+    claude_bin = shutil.which("claude")
+    if claude_bin:
+        return [claude_bin]
+
+    raise FileNotFoundError("Claude Code CLI was not found. Install Claude Code and authenticate first.")
+
+
+def _provider_launcher(provider: str) -> list[str]:
+    if provider == "claude":
+        return _find_claude_launcher()
+    return _find_codex_launcher()
+
+
+def _provider_option_payload(provider: str) -> dict[str, Any]:
+    normalized_provider = _normalize_agent_provider(provider)
+    available = True
+    launcher = ""
+    error = ""
+    if normalized_provider == "claude":
+        defaults = _load_claude_cli_defaults()
+        try:
+            launcher = _display_command(_find_claude_launcher())
+        except FileNotFoundError as exc:
+            available = False
+            error = str(exc)
+            launcher = error
+        if available and not _is_claude_git_bash_ready():
+            available = False
+            error = "Git Bash for Claude Code was not found. Install Git for Windows or configure CLAUDE_CODE_GIT_BASH_PATH."
+        return {
+            "provider": "claude",
+            "label": AGENT_PROVIDER_LABELS["claude"],
+            "available": available,
+            "launcher": launcher,
+            "error": error,
+            "default_model": defaults["model"],
+            "default_execution_mode": defaults["permission_mode"],
+            "execution_mode_label": AGENT_EXECUTION_MODE_LABELS["claude"],
+            "allowed_execution_modes": list(VALID_CLAUDE_PERMISSION_MODES),
+        }
+
+    defaults = _load_codex_cli_defaults()
+    try:
+        launcher = _display_command(_find_codex_launcher())
+    except FileNotFoundError as exc:
+        available = False
+        error = str(exc)
+        launcher = error
+    return {
+        "provider": "codex",
+        "label": AGENT_PROVIDER_LABELS["codex"],
+        "available": available,
+        "launcher": launcher,
+        "error": error,
+        "default_model": defaults["model"],
+        "default_execution_mode": defaults["model_reasoning_effort"],
+        "execution_mode_label": AGENT_EXECUTION_MODE_LABELS["codex"],
+        "allowed_execution_modes": list(VALID_REASONING_EFFORTS),
+    }
+
+
+def _agent_provider_options_payload() -> dict[str, dict[str, Any]]:
+    return {provider: _provider_option_payload(provider) for provider in VALID_AGENT_PROVIDERS}
 
 
 def _to_jira_config(payload: dict[str, Any]) -> JiraConfig:
@@ -3031,6 +3453,194 @@ def _run_codex_command(
     }
 
 
+def _extract_claude_text_fragment(value: Any) -> str:
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, dict):
+        for key in ("text", "message", "content", "delta", "output", "result"):
+            fragment = _extract_claude_text_fragment(value.get(key))
+            if fragment:
+                return fragment
+        return ""
+    if isinstance(value, list):
+        parts = [_extract_claude_text_fragment(item) for item in value]
+        return "\n".join(part for part in parts if part).strip()
+    return ""
+
+
+def _parse_claude_json_message(text: str) -> dict[str, Any]:
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        return {}
+    if isinstance(payload, dict):
+        nested = payload.get("result")
+        if isinstance(nested, dict):
+            return nested
+        return payload
+    return {}
+
+
+def _should_skip_claude_stderr(line: str) -> bool:
+    _ = line
+    return False
+
+
+def _describe_claude_event(event: dict[str, Any]) -> tuple[str, str] | None:
+    event_type = str(event.get("type", "")).strip().lower()
+    if event_type in {"system", "session", "init"}:
+        return None
+
+    message = _short_text(_extract_claude_text_fragment(event), limit=220)
+    if not message:
+        return None
+
+    if "tool" in event_type or "command" in event_type or "bash" in event_type:
+        return ("agent_command", f"명령 실행: {message}")
+    return ("agent_message", message)
+
+
+def _run_claude_command(
+    command: list[str],
+    *,
+    cwd: Path,
+    timeout: int,
+    reporter: Any = None,
+) -> dict[str, Any]:
+    started_at = time.monotonic()
+    display_command = _display_command(command)
+    LOGGER.info("Claude process start: cwd=%s timeout=%s command=%s", str(cwd), timeout, display_command)
+    process = subprocess.Popen(
+        command,
+        cwd=str(cwd),
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+
+    stdout_lines: list[str] = []
+    stderr_lines: list[str] = []
+    activity_lines: list[str] = []
+    output_queue: queue.Queue[tuple[str, str | None]] = queue.Queue()
+    last_agent_message = ""
+    last_progress_message = ""
+    progress_event_count = 0
+
+    readers = [
+        threading.Thread(
+            target=_stream_reader,
+            args=("stdout", process.stdout, stdout_lines, output_queue),
+            name="claude-stdout-reader",
+            daemon=True,
+        ),
+        threading.Thread(
+            target=_stream_reader,
+            args=("stderr", process.stderr, stderr_lines, output_queue),
+            name="claude-stderr-reader",
+            daemon=True,
+        ),
+    ]
+    for reader in readers:
+        reader.start()
+
+    eof_count = 0
+    timed_out = False
+    while eof_count < 2:
+        remaining = timeout - (time.monotonic() - started_at)
+        if remaining <= 0:
+            timed_out = True
+            process.kill()
+            LOGGER.warning("Claude process timeout after %.2fs: cwd=%s command=%s", time.monotonic() - started_at, str(cwd), display_command)
+            break
+
+        try:
+            stream_name, line = output_queue.get(timeout=min(0.25, max(remaining, 0.01)))
+        except queue.Empty:
+            if process.poll() is not None and not any(reader.is_alive() for reader in readers):
+                break
+            continue
+
+        if line is None:
+            eof_count += 1
+            continue
+
+        stripped = line.rstrip("\r\n")
+        if stream_name == "stdout":
+            try:
+                event = json.loads(stripped)
+            except json.JSONDecodeError:
+                message = _short_text(stripped)
+                if message:
+                    activity_lines.append(message)
+                    last_agent_message = message
+                    last_progress_message = message
+                    progress_event_count += 1
+                    LOGGER.info("Claude stdout: %s", message)
+                    if reporter:
+                        reporter("agent_message", message)
+                continue
+
+            LOGGER.info("Claude event: %s", _short_text(stripped, limit=240))
+            extracted_message = _extract_claude_text_fragment(event)
+            if extracted_message:
+                last_agent_message = extracted_message
+            described = _describe_claude_event(event)
+            if described is None:
+                continue
+            phase, message = described
+            activity_lines.append(message)
+            last_progress_message = message
+            progress_event_count += 1
+            if reporter:
+                reporter(phase, message)
+        else:
+            if _should_skip_claude_stderr(stripped):
+                LOGGER.info("Claude stderr(skip): %s", stripped)
+                continue
+            message = _short_text(stripped, limit=220)
+            if not message:
+                continue
+            LOGGER.warning("Claude stderr: %s", message)
+            activity_lines.append(f"[stderr] {message}")
+            last_progress_message = message
+
+    try:
+        returncode = process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        returncode = process.wait(timeout=5)
+
+    for reader in readers:
+        reader.join(timeout=1)
+
+    activity_log = "\n".join(activity_lines)
+    activity_log, activity_log_truncated = _truncate_text(activity_log or _combined_output("".join(stdout_lines), "".join(stderr_lines)), MAX_OUTPUT_CHARS)
+    elapsed = int(time.monotonic() - started_at)
+    LOGGER.info(
+        "Claude process end: cwd=%s returncode=%s timed_out=%s elapsed=%ss command=%s",
+        str(cwd),
+        None if timed_out else returncode,
+        timed_out,
+        elapsed,
+        display_command,
+    )
+    return {
+        "returncode": None if timed_out else returncode,
+        "timed_out": timed_out,
+        "elapsed_seconds": elapsed,
+        "stdout": "".join(stdout_lines),
+        "stderr": "".join(stderr_lines),
+        "activity_log": activity_log,
+        "activity_log_truncated": activity_log_truncated,
+        "last_agent_message": last_agent_message,
+        "last_progress_message": last_progress_message,
+        "progress_event_count": progress_event_count,
+    }
+
+
 def _build_codex_prompt(payload: dict[str, Any], repo_path: Path) -> str:
     project_memory_block = _safe_build_project_memory_block(
         repo_path,
@@ -3426,6 +4036,113 @@ def _run_codex_clarification(repo_path: Path, payload: dict[str, Any]) -> dict[s
     if result["returncode"] not in {0, None}:
         raise RuntimeError("clarification_failed")
     return normalized
+
+
+def _run_claude_edit(repo_path: Path, payload: dict[str, Any], reporter: Any = None) -> dict[str, Any]:
+    launcher = _find_claude_launcher()
+    prompt = _build_codex_prompt(payload, repo_path)
+    claude_settings = _resolve_claude_execution_settings(payload)
+    command = [
+        *launcher,
+        "-p",
+        prompt,
+        "--output-format",
+        "stream-json",
+        "--permission-mode",
+        claude_settings["resolved_permission_mode"] or "acceptEdits",
+        "--json-schema",
+        json.dumps(_codex_output_schema(), ensure_ascii=False),
+        "--cwd",
+        str(repo_path),
+    ]
+    if claude_settings["resolved_model"]:
+        command.extend(["--model", claude_settings["resolved_model"]])
+    if reporter:
+        reporter(
+            "agent_start",
+            "Claude Code 실행 시작: "
+            f"model={claude_settings['resolved_model'] or 'CLI default'}, "
+            f"permission={claude_settings['resolved_permission_mode'] or 'acceptEdits'}",
+        )
+    result = _run_claude_command(command, cwd=repo_path, timeout=CODEX_TIMEOUT_SECONDS, reporter=reporter)
+    stdout_text = str(result.get("stdout", "")).strip()
+    final_message = _parse_claude_json_message(stdout_text)
+    if not final_message:
+        final_message = _parse_claude_json_message(str(result.get("last_agent_message", "")).strip())
+    if reporter:
+        if result["timed_out"]:
+            timeout_message = f"Claude Code timeout({CODEX_TIMEOUT_SECONDS}초)"
+            last_progress = str(result.get("last_progress_message", "")).strip()
+            if last_progress:
+                timeout_message += f" - last progress: {last_progress}"
+            reporter("agent_timeout", timeout_message)
+        reporter("agent_end", f"Claude Code 종료(returncode={result['returncode']}, elapsed={result['elapsed_seconds']}초)")
+
+    return {
+        "returncode": result["returncode"],
+        "timed_out": bool(result["timed_out"]),
+        "elapsed_seconds": result["elapsed_seconds"],
+        "command": _display_command(command),
+        "final_message": final_message,
+        "raw_final_message": stdout_text or str(result.get("last_agent_message", "")).strip(),
+        "output_tail": str(result.get("activity_log", "")).strip(),
+        "output_truncated": bool(result.get("activity_log_truncated", False)),
+        "last_progress_message": str(result.get("last_progress_message", "")).strip(),
+        "progress_event_count": int(result.get("progress_event_count", 0) or 0),
+        **claude_settings,
+    }
+
+
+def _run_claude_clarification(repo_path: Path, payload: dict[str, Any]) -> dict[str, Any]:
+    launcher = _find_claude_launcher()
+    prompt = _build_codex_clarification_prompt(payload, repo_path)
+    claude_settings = _resolve_claude_execution_settings(payload)
+    command = [
+        *launcher,
+        "-p",
+        prompt,
+        "--output-format",
+        "json",
+        "--permission-mode",
+        "plan",
+        "--json-schema",
+        json.dumps(_codex_clarification_schema(), ensure_ascii=False),
+        "--cwd",
+        str(repo_path),
+    ]
+    if claude_settings["resolved_model"]:
+        command.extend(["--model", claude_settings["resolved_model"]])
+    result = _run_claude_command(command, cwd=repo_path, timeout=CLARIFICATION_TIMEOUT_SECONDS, reporter=None)
+    parsed = _parse_claude_json_message(str(result.get("stdout", "")).strip())
+    normalized = _normalize_clarification_response(parsed)
+    normalized.update(
+        {
+            "claude_returncode": result["returncode"],
+            "claude_timed_out": bool(result["timed_out"]),
+            "claude_elapsed_seconds": result["elapsed_seconds"],
+            "claude_last_progress_message": str(result.get("last_progress_message", "")).strip(),
+            "claude_progress_event_count": int(result.get("progress_event_count", 0) or 0),
+        }
+    )
+    if result["timed_out"]:
+        raise RuntimeError("clarification_timeout")
+    if result["returncode"] not in {0, None}:
+        raise RuntimeError("clarification_failed")
+    return normalized
+
+
+def _run_agent_edit(repo_path: Path, payload: dict[str, Any], reporter: Any = None) -> dict[str, Any]:
+    provider = _normalize_agent_provider(payload.get("agent_provider"))
+    if provider == "claude":
+        return _run_claude_edit(repo_path, payload, reporter=reporter)
+    return _run_codex_edit(repo_path, payload, reporter=reporter)
+
+
+def _run_agent_clarification(repo_path: Path, payload: dict[str, Any]) -> dict[str, Any]:
+    provider = _normalize_agent_provider(payload.get("agent_provider"))
+    if provider == "claude":
+        return _run_claude_clarification(repo_path, payload)
+    return _run_codex_clarification(repo_path, payload)
 
 
 def _stage_changes(repo_path: Path) -> None:
@@ -3948,6 +4665,271 @@ def _execute_coding_workflow(repo_path: Path, scm_config: ScmRepoConfig, payload
     return response
 
 
+def _execute_agent_workflow(repo_path: Path, scm_config: ScmRepoConfig, payload: dict[str, Any], reporter: Any = None) -> dict[str, Any]:
+    agent_settings = _resolve_agent_execution_settings(payload)
+    agent_provider = str(agent_settings.get("agent_provider", DEFAULT_AGENT_PROVIDER)).strip() or DEFAULT_AGENT_PROVIDER
+    agent_label = str(agent_settings.get("agent_label", AGENT_PROVIDER_LABELS.get(agent_provider, "Agent"))).strip() or "Agent"
+    execution_mode_label = str(
+        agent_settings.get("execution_mode_label", AGENT_EXECUTION_MODE_LABELS.get(agent_provider, "Execution Mode"))
+    ).strip() or "Execution Mode"
+
+    if agent_provider == "codex":
+        response = dict(_execute_coding_workflow(repo_path, scm_config, payload, reporter=reporter))
+        response["agent_provider"] = agent_provider
+        response["resolved_agent_label"] = agent_label
+        response["resolved_agent_model"] = str(
+            response.get("resolved_model")
+            or agent_settings.get("resolved_agent_model")
+            or response.get("requested_model")
+            or agent_settings.get("requested_agent_model")
+            or ""
+        ).strip()
+        response["resolved_agent_execution_mode"] = str(
+            response.get("resolved_reasoning_effort")
+            or agent_settings.get("resolved_agent_execution_mode")
+            or response.get("requested_reasoning_effort")
+            or agent_settings.get("requested_agent_execution_mode")
+            or ""
+        ).strip()
+        response["agent_elapsed_seconds"] = response.get("codex_elapsed_seconds")
+        response["agent_last_progress_message"] = str(response.get("codex_last_progress_message", "")).strip()
+        response["agent_progress_event_count"] = int(response.get("codex_progress_event_count", 0) or 0)
+        provider_metadata = dict(response.get("provider_metadata") or {})
+        provider_metadata.update(
+            {
+                "provider": agent_provider,
+                "label": agent_label,
+                "execution_mode_label": execution_mode_label,
+                "available": True,
+            }
+        )
+        response["provider_metadata"] = provider_metadata
+        return response
+
+    _safe_ensure_project_memory(repo_path, space_key=str(payload.get("resolved_space_key", "")).strip())
+
+    dirty_entries = _repo_dirty_entries(repo_path)
+    if dirty_entries:
+        return {
+            "ok": False,
+            "status": "repo_not_clean",
+            "message": "자동 작업 전에 로컬 저장소를 깨끗한 상태로 정리해야 합니다.",
+            "agent_provider": agent_provider,
+            "resolved_agent_label": agent_label,
+            "dirty_entries": dirty_entries,
+            "current_branch": _git_optional_output(repo_path, "branch", "--show-current"),
+        }
+
+    branch_name = _sanitize_branch_name(
+        str(payload.get("branch_name", "")).strip(),
+        str(payload.get("issue_key", "")).strip().upper(),
+        str(payload.get("issue_summary", "")).strip(),
+    )
+    if branch_name == scm_config.base_branch:
+        return {
+            "ok": False,
+            "status": "invalid_branch_name",
+            "message": "작업 브랜치는 기본 브랜치와 달라야 합니다.",
+            "agent_provider": agent_provider,
+            "resolved_agent_label": agent_label,
+            "branch_name": branch_name,
+            "base_branch": scm_config.base_branch,
+        }
+
+    if reporter:
+        reporter("branch_prepare", f"작업 브랜치를 준비합니다: {branch_name}")
+    branch_info = _prepare_branch(repo_path, scm_config.base_branch, branch_name)
+    if reporter:
+        reporter("branch_ready", f"브랜치 준비 완료: {branch_info['active_branch']}")
+    start_sha = branch_info["head_sha"]
+    agent_result = _run_agent_edit(repo_path, {**payload, "branch_name": branch_name}, reporter=reporter)
+
+    if reporter:
+        reporter("stage_changes", f"{agent_label} 변경을 stage하고 diff를 수집합니다.")
+    _stage_changes(repo_path)
+    processed_files, staged_diff, staged_diff_truncated = _collect_staged_changes(repo_path)
+    if reporter:
+        reporter("stage_ready", f"변경 수집 완료: {len(processed_files)} file(s)")
+    final_message = agent_result["final_message"] if isinstance(agent_result.get("final_message"), dict) else {}
+
+    response: dict[str, Any] = {
+        "ok": False,
+        "status": "agent_completed",
+        "agent_provider": agent_provider,
+        "resolved_agent_label": agent_label,
+        "resolved_agent_model": agent_settings.get("resolved_agent_model", ""),
+        "resolved_agent_execution_mode": agent_settings.get("resolved_agent_execution_mode", ""),
+        "agent_elapsed_seconds": agent_result.get("elapsed_seconds"),
+        "agent_last_progress_message": str(agent_result.get("last_progress_message", "")).strip(),
+        "agent_progress_event_count": int(agent_result.get("progress_event_count", 0) or 0),
+        "provider_metadata": {
+            "provider": agent_provider,
+            "label": agent_label,
+            "execution_mode_label": execution_mode_label,
+            "available": True,
+        },
+        "issue_key": str(payload.get("issue_key", "")).strip().upper(),
+        "issue_summary": str(payload.get("issue_summary", "")).strip(),
+        "branch_name": branch_name,
+        "base_branch": scm_config.base_branch,
+        "starting_branch": branch_info["starting_branch"],
+        "current_branch": branch_info["active_branch"],
+        "start_sha": start_sha,
+        "end_sha": _git_output(repo_path, "rev-parse", "HEAD"),
+        "commit_message": str(payload.get("commit_message", "")).strip(),
+        "auto_commit": bool(payload.get("allow_auto_commit", True)),
+        "allow_auto_push": bool(payload.get("allow_auto_push", True)),
+        "remote_provider": scm_config.provider,
+        "remote_repo_ref": scm_config.repo_ref,
+        "remote_branch": branch_name,
+        "push_succeeded": False,
+        "requested_model": agent_settings.get("requested_agent_model", ""),
+        "requested_reasoning_effort": agent_result.get("requested_reasoning_effort", ""),
+        "resolved_model": agent_settings.get("resolved_agent_model", ""),
+        "resolved_reasoning_effort": agent_result.get("resolved_reasoning_effort", ""),
+        "codex_default_model": agent_result.get("codex_default_model", ""),
+        "codex_default_reasoning_effort": agent_result.get("codex_default_reasoning_effort", ""),
+        "codex_timed_out": bool(agent_result.get("timed_out", False)),
+        "claude_default_model": agent_result.get("claude_default_model", ""),
+        "claude_default_permission_mode": agent_result.get("claude_default_permission_mode", ""),
+        "requested_agent_model": agent_settings.get("requested_agent_model", ""),
+        "requested_agent_execution_mode": agent_settings.get("requested_agent_execution_mode", ""),
+        "model_intent": str(final_message.get("intent_summary", "")).strip(),
+        "implementation_summary": str(final_message.get("implementation_summary", "")).strip(),
+        "validation_summary": str(final_message.get("validation_summary", "")).strip(),
+        "risks": final_message.get("risks", []),
+        "processed_files": processed_files,
+        "diff": staged_diff,
+        "diff_truncated": staged_diff_truncated,
+        "codex_command": agent_result["command"],
+        "codex_returncode": agent_result["returncode"],
+        "codex_elapsed_seconds": agent_result["elapsed_seconds"],
+        "codex_last_progress_message": str(agent_result.get("last_progress_message", "")).strip(),
+        "codex_progress_event_count": int(agent_result.get("progress_event_count", 0) or 0),
+        "execution_log_tail": agent_result["output_tail"],
+        "execution_log_truncated": agent_result["output_truncated"],
+        "test_command": str(payload.get("test_command", "")).strip(),
+        "test_skipped": False,
+        "test_returncode": None,
+        "test_elapsed_seconds": None,
+        "test_output": "",
+        "test_output_truncated": False,
+        "syntax_check_returncode": None,
+        "syntax_check_elapsed_seconds": None,
+        "syntax_check_output": "",
+        "syntax_check_output_truncated": False,
+        "syntax_checked_files": [],
+        "syntax_check_skipped": False,
+        "commit_sha": None,
+        "commit_output": "",
+        "commit_output_truncated": False,
+        "push_output": "",
+        "push_output_truncated": False,
+        "git_author_name": "",
+        "git_author_email": "",
+    }
+
+    if agent_result["timed_out"]:
+        response["status"] = "agent_timeout"
+        response["message"] = f"{agent_label} 실행 시간이 초과됐습니다. 마지막 진행 로그를 확인해 주세요."
+        return response
+
+    if agent_result["returncode"] != 0:
+        response["status"] = "agent_failed"
+        response["message"] = f"{agent_label} 실행이 실패했습니다. 로그와 staged diff를 확인해 주세요."
+        return response
+
+    if not processed_files:
+        response["status"] = "no_changes"
+        response["message"] = f"{agent_label}가 적용한 변경 파일이 없습니다."
+        return response
+
+    if reporter:
+        reporter("syntax_start", f"검증을 시작합니다: {str(payload.get('test_command', '')).strip() or '기본 문법 검사'}")
+    test_result = _test_changes(repo_path, str(payload.get("test_command", "")).strip(), reporter=reporter)
+    response["test_returncode"] = test_result["returncode"]
+    response["test_elapsed_seconds"] = test_result["elapsed_seconds"]
+    response["test_output"] = test_result["output"]
+    response["test_output_truncated"] = test_result["output_truncated"]
+    response["syntax_check_returncode"] = test_result["returncode"]
+    response["syntax_check_elapsed_seconds"] = test_result["elapsed_seconds"]
+    response["syntax_check_output"] = test_result["output"]
+    response["syntax_check_output_truncated"] = test_result["output_truncated"]
+    response["syntax_checked_files"] = test_result.get("checked_files", [])
+    response["syntax_check_skipped"] = test_result.get("skipped", False)
+    if reporter:
+        reporter("syntax_end", f"검증 종료(returncode={test_result['returncode']})")
+
+    if test_result["returncode"] != 0:
+        response["status"] = "syntax_failed"
+        response["syntax_check_output"] = response["test_output"]
+        response["syntax_check_returncode"] = test_result["returncode"]
+        response["message"] = "검증 명령이 실패해서 자동 커밋을 중단했습니다."
+        return response
+
+    response["status"] = "validated"
+    response["message"] = f"{agent_label} 변경과 검증이 완료됐습니다."
+    if not bool(payload.get("allow_auto_commit", True)):
+        response["ok"] = True
+        response["status"] = "ready_for_manual_commit"
+        response["message"] = f"{agent_label} 변경과 검증이 완료됐고 자동 커밋은 비활성 상태입니다."
+        return response
+
+    identity, missing_identity = _resolve_commit_identity(repo_path, payload)
+    if missing_identity:
+        response["status"] = "missing_git_identity"
+        response["message"] = "Git 작성자 정보가 없어 자동 커밋을 진행할 수 없습니다."
+        response["requested_information"] = _build_requested_information(missing_identity)
+        return response
+
+    response["git_author_name"] = identity["name"]
+    response["git_author_email"] = identity["email"]
+
+    if reporter:
+        reporter("commit_start", f"자동 커밋을 시작합니다: {str(payload.get('commit_message', '')).strip()}")
+    commit_result = _commit_changes(repo_path, str(payload.get("commit_message", "")).strip(), identity)
+    response["commit_output"] = commit_result["output"]
+    response["commit_output_truncated"] = commit_result["output_truncated"]
+    if reporter:
+        reporter("commit_end", "자동 커밋 단계가 끝났습니다.")
+
+    if not commit_result["ok"]:
+        response["status"] = "commit_failed"
+        response["message"] = "검증은 통과했지만 git commit 단계에서 실패했습니다."
+        return response
+
+    response["commit_sha"] = commit_result["sha"]
+    response["end_sha"] = commit_result["sha"]
+    response["processed_files"] = commit_result["files"]
+    response["diff"] = commit_result["diff"]
+    response["diff_truncated"] = commit_result["diff_truncated"]
+    if not bool(payload.get("allow_auto_push", True)):
+        response["ok"] = True
+        response["status"] = "committed"
+        response["message"] = f"{agent_label} 작업, 검증, 커밋까지 완료됐습니다."
+        return response
+
+    if reporter:
+        reporter("push_start", f"원격 push를 시작합니다: {branch_name}")
+    push_result = _push_changes(repo_path, scm_config, branch_name)
+    response["push_output"] = push_result["output"]
+    response["push_output_truncated"] = push_result["output_truncated"]
+    response["remote_branch"] = push_result["remote_branch"]
+    if reporter:
+        reporter("push_end" if push_result["ok"] else "push_failed", f"원격 push {'완료' if push_result['ok'] else '실패'}: {branch_name}")
+    if not push_result["ok"]:
+        response["status"] = "push_failed"
+        response["message"] = "로컬 커밋까지는 완료됐지만 원격 push 단계에서 실패했습니다."
+        response["push_succeeded"] = False
+        return response
+
+    response["ok"] = True
+    response["status"] = "pushed"
+    response["message"] = f"{agent_label} 작업, 검증, 커밋, 원격 push까지 완료됐습니다."
+    response["push_succeeded"] = True
+    return response
+
+
 def create_app() -> Flask:
     app = Flask(__name__, template_folder="templates", static_folder="static")
     store = CredentialStore(DB_PATH, _load_encryption_key())
@@ -4236,7 +5218,7 @@ def create_app() -> Flask:
                 ),
             )
             try:
-                result = _execute_coding_workflow(repo_path, job.scm_config, job.payload, reporter=reporter)
+                result = _execute_agent_workflow(repo_path, job.scm_config, job.payload, reporter=reporter)
                 result_status = str(result.get("status", "")).strip()
                 final_status = "completed" if result.get("ok") else ("partially_completed" if result_status == "push_failed" else "failed")
                 normalized_messages = {
@@ -4410,7 +5392,11 @@ def create_app() -> Flask:
             "index.html",
             agentation_frontend=_agentation_frontend_config(),
             codex_defaults=_load_codex_cli_defaults(),
+            claude_defaults=_load_claude_cli_defaults(),
             valid_reasoning_efforts=VALID_REASONING_EFFORTS,
+            valid_claude_permission_modes=VALID_CLAUDE_PERMISSION_MODES,
+            agent_provider_default=DEFAULT_AGENT_PROVIDER,
+            agent_provider_options=_agent_provider_options_payload(),
         )
 
     @app.get("/api/setup-guide")
@@ -4662,14 +5648,6 @@ def create_app() -> Flask:
             if local_repo_exists
             else ({"name": "", "email": ""}, ["git_author_name", "git_author_email"])
         )
-        try:
-            codex_launcher = _display_command(_find_codex_launcher())
-            codex_available = True
-        except FileNotFoundError as exc:
-            codex_launcher = str(exc)
-            codex_available = False
-        codex_defaults = _load_codex_cli_defaults()
-
         return jsonify(
             {
                 "provider": config.provider,
@@ -4685,10 +5663,12 @@ def create_app() -> Flask:
                 "current_branch": _git_optional_output(local_repo_path, "branch", "--show-current") if local_repo_exists else "",
                 "working_tree_clean": local_repo_exists and not dirty_entries,
                 "dirty_entries": dirty_entries,
-                "codex_available": codex_available,
-                "codex_launcher": codex_launcher,
-                "codex_default_model": codex_defaults["model"],
-                "codex_default_reasoning_effort": codex_defaults["model_reasoning_effort"],
+                "codex_available": _provider_option_payload("codex")["available"],
+                "codex_launcher": _provider_option_payload("codex")["launcher"],
+                "codex_default_model": _load_codex_cli_defaults()["model"],
+                "codex_default_reasoning_effort": _load_codex_cli_defaults()["model_reasoning_effort"],
+                "agent_provider_default": DEFAULT_AGENT_PROVIDER,
+                "agent_provider_options": _agent_provider_options_payload(),
                 "git_user_name": git_identity["name"],
                 "git_user_email": git_identity["email"],
                 "git_identity_missing_fields": missing_identity,
@@ -4715,6 +5695,7 @@ def create_app() -> Flask:
         if not issue_key or not issue_summary:
             return jsonify({"error": "issue_key_and_summary_required"}), 400
         codex_defaults = _load_codex_cli_defaults()
+        claude_defaults = _load_claude_cli_defaults()
 
         return jsonify(
             {
@@ -4726,7 +5707,12 @@ def create_app() -> Flask:
                 "approval_mode": "auto-commit-without-local-tests",
                 "codex_model_default": codex_defaults["model"],
                 "codex_reasoning_effort_default": codex_defaults["model_reasoning_effort"],
+                "claude_model_default": claude_defaults["model"],
+                "claude_permission_mode_default": claude_defaults["permission_mode"],
                 "allowed_reasoning_efforts": list(VALID_REASONING_EFFORTS),
+                "allowed_claude_permission_modes": list(VALID_CLAUDE_PERMISSION_MODES),
+                "agent_provider_default": DEFAULT_AGENT_PROVIDER,
+                "agent_provider_options": _agent_provider_options_payload(),
                 "requested_information": _build_requested_information(["work_instruction", "commit_checklist"]),
             }
         )
@@ -4777,9 +5763,7 @@ def create_app() -> Flask:
 
     @app.post("/api/workflow/batch/run")
     def run_workflow_batch() -> Any:
-        payload = request.get_json(silent=True) or {}
-        payload["codex_model"] = str(payload.get("codex_model", "")).strip()
-        payload["codex_reasoning_effort"] = _normalize_reasoning_effort(payload.get("codex_reasoning_effort"))
+        payload = _normalize_workflow_agent_payload(request.get_json(silent=True) or {})
         issues = _normalize_batch_issues(payload.get("issues"))
         missing = _required_batch_workflow_fields(payload)
         if missing:
@@ -4796,6 +5780,9 @@ def create_app() -> Flask:
             )
         if not issues:
             return jsonify({"ok": False, "error": "batch_issues_required", "fields": ["issues"]}), 400
+        validation_error = _agent_execution_validation_error(payload)
+        if validation_error is not None:
+            return jsonify(validation_error), 400
         if payload["codex_reasoning_effort"] and payload["codex_reasoning_effort"] not in VALID_REASONING_EFFORTS:
             return (
                 jsonify(
@@ -4817,13 +5804,16 @@ def create_app() -> Flask:
             return jsonify({"ok": False, "error": "scm_config_not_found"}), 400
 
         try:
-            _find_codex_launcher()
+            _provider_launcher(str(payload.get("agent_provider", DEFAULT_AGENT_PROVIDER)))
         except FileNotFoundError as exc:
-            return jsonify({"ok": False, "error": "codex_cli_not_found", "details": str(exc)}), 400
+            return jsonify(_agent_cli_missing_error(str(payload.get("agent_provider", DEFAULT_AGENT_PROVIDER)), exc)), 400
 
         common_payload = {
+            "agent_provider": payload["agent_provider"],
             "codex_model": payload["codex_model"],
             "codex_reasoning_effort": payload["codex_reasoning_effort"],
+            "claude_model": payload["claude_model"],
+            "claude_permission_mode": payload["claude_permission_mode"],
             "work_instruction": str(payload.get("work_instruction", "")).strip(),
             "acceptance_criteria": str(payload.get("acceptance_criteria", "")).strip(),
             "test_command": str(payload.get("test_command", "")).strip(),
@@ -4846,6 +5836,7 @@ def create_app() -> Flask:
             scm_config = candidate["scm_config"]
             run = _new_workflow_run(
                 batch_id=batch["batch_id"],
+                agent_provider=str(run_payload.get("agent_provider", DEFAULT_AGENT_PROVIDER)),
                 issue_key=issue["issue_key"],
                 issue_summary=issue["issue_summary"],
                 resolved_space_key=str(candidate["resolved_space_key"]),
@@ -4866,12 +5857,12 @@ def create_app() -> Flask:
             _register_run(run)
 
             try:
-                clarification = _run_codex_clarification(repo_path, run_payload)
+                clarification = _run_agent_clarification(repo_path, run_payload)
             except RuntimeError as exc:
                 error_payload = {
                     "ok": False,
                     "status": str(exc),
-                    "message": "사전 확인 단계에서 Codex 응답을 해석하지 못했습니다.",
+                    "message": "사전 확인 단계에서 Agent 응답을 해석하지 못했습니다.",
                 }
                 update_run(
                     run["run_id"],
@@ -4994,11 +5985,11 @@ def create_app() -> Flask:
         )
 
         try:
-            clarification = _run_codex_clarification(repo_path, request_payload)
+            clarification = _run_agent_clarification(repo_path, request_payload)
         except FileNotFoundError as exc:
-            return jsonify({"ok": False, "error": "codex_cli_not_found", "details": str(exc)}), 400
+            return jsonify(_agent_cli_missing_error(str(request_payload.get("agent_provider", DEFAULT_AGENT_PROVIDER)), exc)), 400
         except RuntimeError as exc:
-            return jsonify({"ok": False, "error": str(exc), "message": "사전 확인 단계에서 Codex 응답을 해석하지 못했습니다."}), 502
+            return jsonify({"ok": False, "error": str(exc), "message": "사전 확인 단계에서 Agent 응답을 해석하지 못했습니다."}), 502
 
         if clarification["needs_input"]:
             jira_comment_sync["questions"] = _safe_sync_jira_clarification_questions(
@@ -5094,9 +6085,7 @@ def create_app() -> Flask:
 
     @app.post("/api/workflow/clarify")
     def clarify_workflow() -> Any:
-        payload = request.get_json(silent=True) or {}
-        payload["codex_model"] = str(payload.get("codex_model", "")).strip()
-        payload["codex_reasoning_effort"] = _normalize_reasoning_effort(payload.get("codex_reasoning_effort"))
+        payload = _normalize_workflow_agent_payload(request.get_json(silent=True) or {})
         payload["clarification_questions"] = _normalize_clarification_requests(payload.get("clarification_questions"))
         payload["clarification_answers"] = _normalize_clarification_answers(payload.get("clarification_answers"))
         jira_comment_sync = {
@@ -5118,6 +6107,9 @@ def create_app() -> Flask:
                 400,
             )
 
+        validation_error = _agent_execution_validation_error(payload)
+        if validation_error is not None:
+            return jsonify(validation_error), 400
         if payload["codex_reasoning_effort"] and payload["codex_reasoning_effort"] not in VALID_REASONING_EFFORTS:
             return (
                 jsonify(
@@ -5172,7 +6164,7 @@ def create_app() -> Flask:
         _safe_ensure_project_memory(repo_path, space_key=resolved_space_key)
 
         try:
-            clarification = _run_codex_clarification(
+            clarification = _run_agent_clarification(
                 repo_path,
                 {
                     **payload,
@@ -5185,14 +6177,14 @@ def create_app() -> Flask:
                 },
             )
         except FileNotFoundError as exc:
-            return jsonify({"ok": False, "error": "codex_cli_not_found", "details": str(exc)}), 400
+            return jsonify(_agent_cli_missing_error(str(payload.get("agent_provider", DEFAULT_AGENT_PROVIDER)), exc)), 400
         except RuntimeError as exc:
             return (
                 jsonify(
                     {
                         "ok": False,
                         "error": str(exc),
-                        "message": "사전 확인 단계에서 Codex 응답을 해석하지 못했습니다.",
+                        "message": "사전 확인 단계에서 Agent 응답을 해석하지 못했습니다.",
                     }
                 ),
                 502,
@@ -5220,20 +6212,34 @@ def create_app() -> Flask:
                 "analysis_summary": clarification["analysis_summary"],
                 "requested_information": clarification["requested_information"],
                 "jira_comment_sync": jira_comment_sync,
+                "agent_provider": str(payload.get("agent_provider", DEFAULT_AGENT_PROVIDER)),
+                "resolved_agent_label": AGENT_PROVIDER_LABELS.get(
+                    str(payload.get("agent_provider", DEFAULT_AGENT_PROVIDER)),
+                    AGENT_PROVIDER_LABELS[DEFAULT_AGENT_PROVIDER],
+                ),
                 "resolved_space_key": resolved_space_key,
                 "resolved_repo_provider": scm_config.provider,
                 "resolved_repo_ref": scm_config.repo_ref,
                 "resolved_repo_owner": scm_config.repo_owner,
                 "resolved_repo_name": scm_config.repo_name,
                 "resolved_base_branch": scm_config.base_branch,
+                "provider_metadata": {
+                    "provider": str(payload.get("agent_provider", DEFAULT_AGENT_PROVIDER)),
+                    "label": AGENT_PROVIDER_LABELS.get(
+                        str(payload.get("agent_provider", DEFAULT_AGENT_PROVIDER)),
+                        AGENT_PROVIDER_LABELS[DEFAULT_AGENT_PROVIDER],
+                    ),
+                    "execution_mode_label": AGENT_EXECUTION_MODE_LABELS.get(
+                        str(payload.get("agent_provider", DEFAULT_AGENT_PROVIDER)),
+                        AGENT_EXECUTION_MODE_LABELS[DEFAULT_AGENT_PROVIDER],
+                    ),
+                },
             }
         )
 
     @app.post("/api/workflow/run")
     def run_workflow() -> Any:
-        payload = request.get_json(silent=True) or {}
-        payload["codex_model"] = str(payload.get("codex_model", "")).strip()
-        payload["codex_reasoning_effort"] = _normalize_reasoning_effort(payload.get("codex_reasoning_effort"))
+        payload = _normalize_workflow_agent_payload(request.get_json(silent=True) or {})
         payload["clarification_questions"] = _normalize_clarification_requests(payload.get("clarification_questions"))
         payload["clarification_answers"] = _normalize_clarification_answers(payload.get("clarification_answers"))
         jira_comment_sync = {
@@ -5254,6 +6260,9 @@ def create_app() -> Flask:
                 400,
             )
 
+        validation_error = _agent_execution_validation_error(payload)
+        if validation_error is not None:
+            return jsonify(validation_error), 400
         if payload["codex_reasoning_effort"] and payload["codex_reasoning_effort"] not in VALID_REASONING_EFFORTS:
             return (
                 jsonify(
@@ -5320,9 +6329,9 @@ def create_app() -> Flask:
             )
 
         try:
-            _find_codex_launcher()
+            _provider_launcher(str(payload.get("agent_provider", DEFAULT_AGENT_PROVIDER)))
         except FileNotFoundError as exc:
-            return jsonify({"ok": False, "error": "codex_cli_not_found", "details": str(exc)}), 400
+            return jsonify(_agent_cli_missing_error(str(payload.get("agent_provider", DEFAULT_AGENT_PROVIDER)), exc)), 400
 
         if payload["clarification_answers"]:
             jira_comment_sync["answers"] = _safe_sync_jira_clarification_answers(
@@ -5344,6 +6353,7 @@ def create_app() -> Flask:
             "git_author_email": identity["email"],
         }
         run = _new_workflow_run(
+            agent_provider=str(payload.get("agent_provider", DEFAULT_AGENT_PROVIDER)),
             issue_key=str(payload.get("issue_key", "")).strip(),
             issue_summary=str(payload.get("issue_summary", "")).strip(),
             resolved_space_key=resolved_space_key,
