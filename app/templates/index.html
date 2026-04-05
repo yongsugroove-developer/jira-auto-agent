@@ -291,15 +291,14 @@
         <div class="card-header__actions">
           <button id="refresh_batch_workspace" type="button" class="secondary-button">새로고침</button>
           <button id="focus_running_run" type="button" class="secondary-button">진행 중 탭으로 이동</button>
-          <button id="toggle_failed_runs" type="button" class="secondary-button" aria-pressed="false">실패 탭만 보기</button>
         </div>
       </div>
 
       <div class="work-status-layout">
         <section class="work-status-main">
           <section id="work_status_empty" class="detail-card work-status-empty">
-            <h3>활성 배치 없음</h3>
-            <p class="detail-copy">배치 실행을 시작하면 여기에서 이슈별 탭을 확인할 수 있다.</p>
+            <h3>진행 중인 작업 없음</h3>
+            <p class="detail-copy">실행 중이거나 추가 확인이 필요한 작업만 여기에서 보여준다.</p>
           </section>
 
           <div id="work_status_content" hidden>
@@ -400,6 +399,25 @@
             </section>
           </div>
         </section>
+      </div>
+    </section>
+
+    <section id="workflow_log_section" class="card" hidden>
+      <div class="card-header">
+        <div class="card-header__copy">
+          <p class="section-kicker">History</p>
+          <h2>5. 작업 로그</h2>
+        </div>
+        <div class="card-header__actions">
+          <button id="refresh_workflow_logs" type="button" class="secondary-button">새로고침</button>
+        </div>
+      </div>
+
+      <div class="workflow-log-shell">
+        <p id="workflow_log_caption" class="detail-copy">최근 처리된 작업 요약을 시간순으로 확인한다.</p>
+        <div id="workflow_log_list" class="workflow-log-list">
+          <p class="batch-list__empty">저장된 작업 로그가 없다.</p>
+        </div>
       </div>
     </section>
   </main>

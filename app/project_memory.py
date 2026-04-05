@@ -37,6 +37,7 @@ SECRET_FILE_PATTERNS = (".env", ".env.*", "*.pem", "*.key")
 class ProjectSnapshot:
     repo_key: str
     repo_path: str
+    space_key: str
     generated_at: str
     head_sha: str
     is_dirty: bool
@@ -61,13 +62,14 @@ class ProjectHistoryEntry:
     risks: list[str]
 
 
-def ensure_project_memory(repo_path: Path, app_data_dir: Path | None = None) -> ProjectSnapshot:
+def ensure_project_memory(repo_path: Path, app_data_dir: Path | None = None, *, space_key: str = "") -> ProjectSnapshot:
     normalized_repo_path = Path(repo_path).expanduser().resolve()
     if not normalized_repo_path.exists() or not normalized_repo_path.is_dir():
         raise FileNotFoundError(f"repo_path_not_found:{normalized_repo_path}")
 
     app_data_root = _resolve_app_data_dir(app_data_dir)
-    memory_dir = _project_memory_dir(app_data_root, normalized_repo_path)
+    normalized_space_key = _normalize_space_key(space_key)
+    memory_dir = _project_memory_dir(app_data_root, normalized_repo_path, normalized_space_key)
     snapshot_path = memory_dir / "snapshot.json"
     preferred_overview_path = normalized_repo_path / OVERVIEW_RELATIVE_PATH
     fallback_overview_path = memory_dir / OVERVIEW_RELATIVE_PATH.name
@@ -89,7 +91,8 @@ def ensure_project_memory(repo_path: Path, app_data_dir: Path | None = None) -> 
     memory_dir.mkdir(parents=True, exist_ok=True)
     snapshot = _build_snapshot(
         normalized_repo_path,
-        repo_key=_repo_key(normalized_repo_path),
+        repo_key=_repo_key(normalized_repo_path, normalized_space_key),
+        space_key=normalized_space_key,
         head_sha=current_head_sha,
         is_dirty=current_is_dirty,
     )
@@ -101,9 +104,20 @@ def ensure_project_memory(repo_path: Path, app_data_dir: Path | None = None) -> 
     return snapshot
 
 
-def build_project_memory_block(repo_path: Path, max_history: int = 5, app_data_dir: Path | None = None) -> str:
-    snapshot = ensure_project_memory(repo_path, app_data_dir=app_data_dir)
-    memory_dir = _project_memory_dir(_resolve_app_data_dir(app_data_dir), Path(repo_path).expanduser().resolve())
+def build_project_memory_block(
+    repo_path: Path,
+    max_history: int = 5,
+    app_data_dir: Path | None = None,
+    *,
+    space_key: str = "",
+) -> str:
+    normalized_space_key = _normalize_space_key(space_key)
+    snapshot = ensure_project_memory(repo_path, app_data_dir=app_data_dir, space_key=normalized_space_key)
+    memory_dir = _project_memory_dir(
+        _resolve_app_data_dir(app_data_dir),
+        Path(repo_path).expanduser().resolve(),
+        normalized_space_key,
+    )
     history_entries = _load_history_entries(memory_dir / "history.jsonl")
     recent_entries = list(reversed(history_entries[-max(max_history, 0) :])) if max_history > 0 else []
 
@@ -114,9 +128,16 @@ def build_project_memory_block(repo_path: Path, max_history: int = 5, app_data_d
         recent_entries.pop()
 
 
-def record_project_history(repo_path: Path, workflow_run: dict[str, Any], app_data_dir: Path | None = None) -> None:
-    snapshot = ensure_project_memory(repo_path, app_data_dir=app_data_dir)
-    memory_dir = _project_memory_dir(_resolve_app_data_dir(app_data_dir), Path(snapshot.repo_path))
+def record_project_history(
+    repo_path: Path,
+    workflow_run: dict[str, Any],
+    app_data_dir: Path | None = None,
+    *,
+    space_key: str = "",
+) -> None:
+    normalized_space_key = _normalize_space_key(space_key)
+    snapshot = ensure_project_memory(repo_path, app_data_dir=app_data_dir, space_key=normalized_space_key)
+    memory_dir = _project_memory_dir(_resolve_app_data_dir(app_data_dir), Path(snapshot.repo_path), normalized_space_key)
     history_path = memory_dir / "history.jsonl"
     history_entries = _load_history_entries(history_path)
     entry = _workflow_run_to_history_entry(workflow_run)
@@ -145,12 +166,18 @@ def _resolve_app_data_dir(app_data_dir: Path | None) -> Path:
     return Path(app_data_dir) if app_data_dir is not None else DEFAULT_APP_DATA_DIR
 
 
-def _repo_key(repo_path: Path) -> str:
-    return hashlib.sha256(str(repo_path).encode("utf-8")).hexdigest()
+def _normalize_space_key(space_key: str) -> str:
+    return str(space_key or "").strip().upper()
 
 
-def _project_memory_dir(app_data_dir: Path, repo_path: Path) -> Path:
-    return app_data_dir / PROJECT_MEMORY_DIRNAME / _repo_key(repo_path)
+def _repo_key(repo_path: Path, space_key: str = "") -> str:
+    normalized_space_key = _normalize_space_key(space_key)
+    raw_value = f"{repo_path}::{normalized_space_key}" if normalized_space_key else str(repo_path)
+    return hashlib.sha256(raw_value.encode("utf-8")).hexdigest()
+
+
+def _project_memory_dir(app_data_dir: Path, repo_path: Path, space_key: str = "") -> Path:
+    return app_data_dir / PROJECT_MEMORY_DIRNAME / _repo_key(repo_path, space_key)
 
 
 def _utcnow_iso() -> str:
@@ -205,6 +232,7 @@ def _load_snapshot(snapshot_path: Path) -> ProjectSnapshot | None:
         return ProjectSnapshot(
             repo_key=str(payload.get("repo_key", "")).strip(),
             repo_path=str(payload.get("repo_path", "")).strip(),
+            space_key=_normalize_space_key(str(payload.get("space_key", "")).strip()),
             generated_at=str(payload.get("generated_at", "")).strip(),
             head_sha=str(payload.get("head_sha", "")).strip(),
             is_dirty=bool(payload.get("is_dirty", False)),
@@ -251,7 +279,7 @@ def _write_text_file(path: Path, contents: str) -> None:
     path.write_text(contents, encoding="utf-8")
 
 
-def _build_snapshot(repo_path: Path, *, repo_key: str, head_sha: str, is_dirty: bool) -> ProjectSnapshot:
+def _build_snapshot(repo_path: Path, *, repo_key: str, space_key: str, head_sha: str, is_dirty: bool) -> ProjectSnapshot:
     warnings: list[str] = []
     tech_stack = _infer_tech_stack(repo_path)
     entrypoints = _collect_entrypoints(repo_path)
@@ -263,6 +291,7 @@ def _build_snapshot(repo_path: Path, *, repo_key: str, head_sha: str, is_dirty: 
     return ProjectSnapshot(
         repo_key=repo_key,
         repo_path=str(repo_path),
+        space_key=_normalize_space_key(space_key),
         generated_at=_utcnow_iso(),
         head_sha=head_sha,
         is_dirty=is_dirty,
@@ -542,7 +571,7 @@ def _workflow_run_to_history_entry(workflow_run: dict[str, Any]) -> ProjectHisto
     result = workflow_run.get("result") if isinstance(workflow_run.get("result"), dict) else {}
     error = workflow_run.get("error") if isinstance(workflow_run.get("error"), dict) else {}
     status = str(result.get("status", "")).strip() or str(workflow_run.get("status", "")).strip() or "unknown"
-    issue_key = str(result.get("issue_key", "")).strip().upper()
+    issue_key = str(result.get("issue_key") or workflow_run.get("issue_key") or "").strip().upper()
     run_id = str(workflow_run.get("run_id", "")).strip()
     if not run_id:
         return None
@@ -571,6 +600,7 @@ def _render_memory_block(snapshot: ProjectSnapshot, history_entries: list[Projec
     lines = [
         "Project memory summary:",
         f"- Repo path: {snapshot.repo_path}",
+        f"- Jira space key: {snapshot.space_key or 'shared'}",
         f"- Git HEAD: {snapshot.head_sha or 'not-a-git-repo'}",
         f"- Snapshot time: {snapshot.generated_at}",
         f"- Dirty at snapshot: {str(snapshot.is_dirty).lower()}",

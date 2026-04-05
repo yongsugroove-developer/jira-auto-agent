@@ -156,3 +156,71 @@ def test_build_project_memory_block_and_record_history(tmp_path) -> None:
     assert "DEMO-1" in block
     assert "workflow_run" in block
     assert "codex_failed" in block
+
+
+def test_project_memory_is_scoped_by_space_key(tmp_path) -> None:
+    repo_path = tmp_path / "repo"
+    app_data_dir = tmp_path / "app-data"
+    _init_repo(repo_path)
+
+    snapshot_demo = project_memory.ensure_project_memory(repo_path, app_data_dir=app_data_dir, space_key="DEMO")
+    snapshot_ops = project_memory.ensure_project_memory(repo_path, app_data_dir=app_data_dir, space_key="OPS")
+
+    assert snapshot_demo.repo_key != snapshot_ops.repo_key
+    assert snapshot_demo.space_key == "DEMO"
+    assert snapshot_ops.space_key == "OPS"
+
+    project_memory.record_project_history(
+        repo_path,
+        {
+            "run_id": "run-demo",
+            "issue_key": "DEMO-1",
+            "status": "completed",
+            "finished_at": "2026-04-02T01:00:00+00:00",
+            "message": "done",
+            "result": {
+                "issue_key": "DEMO-1",
+                "status": "committed",
+                "message": "Committed",
+                "model_intent": "Demo intent",
+                "implementation_summary": "Demo implementation",
+                "validation_summary": "Demo validation",
+                "risks": [],
+            },
+            "error": None,
+        },
+        app_data_dir=app_data_dir,
+        space_key="DEMO",
+    )
+    project_memory.record_project_history(
+        repo_path,
+        {
+            "run_id": "run-ops",
+            "issue_key": "OPS-1",
+            "status": "completed",
+            "finished_at": "2026-04-02T02:00:00+00:00",
+            "message": "done",
+            "result": {
+                "issue_key": "OPS-1",
+                "status": "committed",
+                "message": "Committed",
+                "model_intent": "Ops intent",
+                "implementation_summary": "Ops implementation",
+                "validation_summary": "Ops validation",
+                "risks": [],
+            },
+            "error": None,
+        },
+        app_data_dir=app_data_dir,
+        space_key="OPS",
+    )
+
+    demo_block = project_memory.build_project_memory_block(repo_path, max_history=5, app_data_dir=app_data_dir, space_key="DEMO")
+    ops_block = project_memory.build_project_memory_block(repo_path, max_history=5, app_data_dir=app_data_dir, space_key="OPS")
+
+    assert "Jira space key: DEMO" in demo_block
+    assert "DEMO-1" in demo_block
+    assert "OPS-1" not in demo_block
+    assert "Jira space key: OPS" in ops_block
+    assert "OPS-1" in ops_block
+    assert "DEMO-1" not in ops_block
