@@ -84,6 +84,8 @@ Warn-VersionDrift "Codex CLI" $codexVersion $PinnedCodexVersion
 Write-Host ""
 Write-Host "Next manual steps"
 Write-Host ("1. {0} login" -f $LocalCodexCmd)
-Write-Host "2. powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\check-env.ps1"
-Write-Host "3. powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\run-dev.ps1"
-Write-Host "4. Enter Jira/GitHub tokens and per-space local repo paths in the app"
+Write-Host "2. Optional Claude Code install: npm install -g @anthropic-ai/claude-code"
+Write-Host "3. Optional Claude Code check: claude doctor"
+Write-Host "4. powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\check-env.ps1"
+Write-Host "5. powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\run-dev.ps1"
+Write-Host "6. Enter Jira/GitHub tokens and per-space local repo paths in the app"

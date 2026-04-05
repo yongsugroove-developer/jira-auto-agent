@@ -25,6 +25,9 @@ $env:CODEX_CLI_PATH = $LocalCodexCmd
 Write-Host "[run-dev] AGENTATION_ENABLED=0"
 Write-Host "[run-dev] AGENTATION_AUTOSTART=0"
 Write-Host "[run-dev] CODEX_CLI_PATH=$LocalCodexCmd"
+if ($env:CLAUDE_CLI_PATH) {
+    Write-Host "[run-dev] CLAUDE_CLI_PATH=$($env:CLAUDE_CLI_PATH)"
+}
 Write-Host "[run-dev] http://localhost:5000"
 
 & $VenvPython $AppEntry

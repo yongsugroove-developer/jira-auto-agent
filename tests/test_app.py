@@ -77,6 +77,9 @@ def test_setup_guide_contains_expected_sections_and_steps() -> None:
     assert github_steps["github-space-repo-mappings"]["target_fields"] == ["mapping_space_key", "mapping_local_repo_path"]
 
     automation_steps = {step["id"]: step for step in sections_by_id["automation"]["steps"]}
+    assert "Codex와 Claude Code" in automation_steps["automation-agent-provider"]["purpose"]
+    assert automation_steps["automation-agent-provider"]["target_fields"] == ["agent_provider"]
+    assert automation_steps["automation-claude-model"]["target_fields"] == ["claude_model", "claude_permission_mode"]
     assert "숨겨져 있지만" in automation_steps["automation-test-command"]["purpose"]
     assert automation_steps["automation-test-command"]["target_fields"] == ["allow_auto_commit", "commit_checklist"]
 
@@ -118,11 +121,19 @@ def test_index_page_renders_automation_fields() -> None:
     assert 'id="repo_mapping_modal"' in html
     assert 'id="guide_tabs"' in html
     assert 'id="run_automation"' in html
+    assert 'id="agent_provider"' in html
     assert 'id="codex_model"' in html
     assert 'id="codex_reasoning_effort"' in html
+    assert 'id="claude_model"' in html
+    assert 'id="claude_permission_mode"' in html
+    assert 'id="workflow_provider_panel_codex"' in html
+    assert 'id="workflow_provider_panel_claude"' in html
+    assert 'id="agent_provider_status"' in html
     assert 'id="work_instruction"' in html
     assert 'id="agentation_react_root"' in html
     assert "window.__AGENTATION_CONFIG__" in html
+    assert "window.__AGENT_PROVIDER_DEFAULT__" in html
+    assert "window.__AGENT_PROVIDER_OPTIONS__" in html
     assert 'id="mock_mode"' not in html
     assert 'id="backlog_result"' not in html
     assert "<h1>" not in html
@@ -313,6 +324,135 @@ def test_find_codex_launcher_prefers_repo_local_install(monkeypatch, tmp_path) -
     assert launcher == ["C:\\Program Files\\nodejs\\node.exe", str(repo_local_js)]
 
 
+def test_find_claude_launcher_prefers_claude_cli_path(monkeypatch, tmp_path) -> None:
+    configured_cmd = tmp_path / "claude.cmd"
+    configured_cmd.write_text("@echo off\r\n", encoding="utf-8")
+
+    monkeypatch.setenv("CLAUDE_CLI_PATH", str(configured_cmd))
+    monkeypatch.setattr(main_module.shutil, "which", lambda name: None)
+
+    launcher = main_module._find_claude_launcher()
+
+    assert launcher == ["cmd.exe", "/d", "/c", str(configured_cmd)]
+
+
+def test_find_claude_launcher_falls_back_to_path(monkeypatch) -> None:
+    monkeypatch.delenv("CLAUDE_CLI_PATH", raising=False)
+    monkeypatch.setattr(main_module.shutil, "which", lambda name: "C:\\Users\\tester\\AppData\\Roaming\\npm\\claude.cmd" if name == "claude" else None)
+
+    launcher = main_module._find_claude_launcher()
+
+    assert launcher == ["C:\\Users\\tester\\AppData\\Roaming\\npm\\claude.cmd"]
+
+
+def test_run_claude_clarification_uses_subprocess_cwd_only(monkeypatch, tmp_path) -> None:
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(main_module, "_find_claude_launcher", lambda: ["claude"])
+    monkeypatch.setattr(main_module, "_build_codex_clarification_prompt", lambda payload, repo: "prompt")
+    monkeypatch.setattr(
+        main_module,
+        "_resolve_claude_execution_settings",
+        lambda payload: {
+            "resolved_model": "",
+            "resolved_permission_mode": "acceptEdits",
+            "claude_default_model": "",
+            "claude_default_permission_mode": "acceptEdits",
+        },
+    )
+
+    def fake_run_claude_command(command, *, cwd, timeout, reporter=None):
+        captured["command"] = command
+        captured["cwd"] = cwd
+        captured["timeout"] = timeout
+        return {
+            "returncode": 0,
+            "timed_out": False,
+            "elapsed_seconds": 1,
+            "stdout": json.dumps(
+                {
+                    "needs_input": False,
+                    "analysis_summary": "clear",
+                    "requested_information": [],
+                }
+            ),
+            "last_progress_message": "",
+            "progress_event_count": 0,
+        }
+
+    monkeypatch.setattr(main_module, "_run_claude_command", fake_run_claude_command)
+
+    result = main_module._run_claude_clarification(repo_path, {})
+
+    assert result["needs_input"] is False
+    assert result["analysis_summary"] == "clear"
+    assert captured["cwd"] == repo_path
+    assert "--cwd" not in captured["command"]
+    assert "--tools" in captured["command"]
+    assert "" in captured["command"]
+
+
+def test_run_claude_edit_uses_subprocess_cwd_only(monkeypatch, tmp_path) -> None:
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(main_module, "_find_claude_launcher", lambda: ["claude"])
+    monkeypatch.setattr(main_module, "_build_codex_prompt", lambda payload, repo: "prompt")
+    monkeypatch.setattr(
+        main_module,
+        "_resolve_claude_execution_settings",
+        lambda payload: {
+            "resolved_model": "",
+            "resolved_permission_mode": "acceptEdits",
+            "claude_default_model": "",
+            "claude_default_permission_mode": "acceptEdits",
+        },
+    )
+
+    def fake_run_claude_command(command, *, cwd, timeout, reporter=None):
+        captured["command"] = command
+        captured["cwd"] = cwd
+        captured["timeout"] = timeout
+        return {
+            "returncode": 0,
+            "timed_out": False,
+            "elapsed_seconds": 1,
+            "stdout": json.dumps({"ok": True, "summary": "done"}),
+            "last_agent_message": "",
+            "activity_log": "",
+            "activity_log_truncated": False,
+            "last_progress_message": "",
+            "progress_event_count": 0,
+        }
+
+    monkeypatch.setattr(main_module, "_run_claude_command", fake_run_claude_command)
+
+    result = main_module._run_claude_edit(repo_path, {})
+
+    assert result["returncode"] == 0
+    assert captured["cwd"] == repo_path
+    assert "--cwd" not in captured["command"]
+    assert "--verbose" in captured["command"]
+
+
+def test_parse_claude_json_message_uses_structured_output() -> None:
+    payload = {
+        "type": "result",
+        "structured_output": {
+            "needs_input": False,
+            "analysis_summary": "ready",
+            "requested_information": [],
+        },
+    }
+
+    parsed = main_module._parse_claude_json_message(json.dumps(payload, ensure_ascii=False))
+
+    assert parsed == payload["structured_output"]
+
+
 def test_windows_packaging_scripts_exist_with_phase1_defaults() -> None:
     bootstrap = Path("scripts/bootstrap-dev.ps1").read_text(encoding="utf-8")
     check_env = Path("scripts/check-env.ps1").read_text(encoding="utf-8")
@@ -322,6 +462,13 @@ def test_windows_packaging_scripts_exist_with_phase1_defaults() -> None:
     assert '$PinnedCodexVersion = "0.104.0"' in bootstrap
     assert '@openai/codex@$PinnedCodexVersion' in bootstrap
     assert 'CODEX_CLI_PATH' in check_env
+    assert 'CLAUDE_CLI_PATH' in check_env
+    assert 'claude doctor' in check_env
+    assert '@("--version")' in check_env
+    assert 'auth login' in check_env
+    assert 'Invoke-ExternalCommandWithTimeout' in check_env
+    assert 'Claude Code install' in bootstrap
+    assert 'CLAUDE_CLI_PATH' in run_dev
     assert 'AGENTATION_ENABLED = "0"' in run_dev
     assert 'phase-1-freeze' in freeze
 
@@ -386,9 +533,14 @@ def test_prepare_workflow_branch_and_requested_information() -> None:
     assert data["branch_name"].startswith("feature/DEMO-123-")
     assert data["token_budget"] == 40000
     assert data["approval_mode"] == "auto-commit-without-local-tests"
+    assert data["agent_provider_default"] == "codex"
     assert "codex_model_default" in data
     assert "codex_reasoning_effort_default" in data
+    assert "claude_model_default" in data
+    assert "claude_permission_mode_default" in data
+    assert "agent_provider_options" in data
     assert data["allowed_reasoning_efforts"] == ["low", "medium", "high", "xhigh"]
+    assert "acceptEdits" in data["allowed_claude_permission_modes"]
     requested_fields = [item["field"] for item in data["requested_information"]]
     assert requested_fields == ["work_instruction", "commit_checklist"]
 
@@ -2529,7 +2681,7 @@ def test_setup_guide_contains_expected_sections_and_steps() -> None:
 
     data = response.get_json()
     assert data is not None
-    assert data["version"] == 6
+    assert data["version"] == 7
 
     sections = data["sections"]
     assert [section["id"] for section in sections] == ["jira", "github", "local_repo", "automation"]
@@ -2540,7 +2692,9 @@ def test_setup_guide_contains_expected_sections_and_steps() -> None:
     assert "github-base-branch" in step_ids
     assert "gitlab-base-url" in step_ids
     assert "local-repo-path" in step_ids
+    assert "automation-agent-provider" in step_ids
     assert "automation-codex-model" in step_ids
+    assert "automation-claude-model" in step_ids
     assert "automation-test-command" in step_ids
     assert "automation-git-author" in step_ids
 

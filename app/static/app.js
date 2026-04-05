@@ -3241,3 +3241,398 @@ $(document).ready(function () {
 
   $("#allow_auto_push").closest("label").contents().last()[0].textContent = " 커밋 후 원격 저장소까지 push";
 });
+
+FIELD_LABELS.agent_provider = "Agent Provider";
+FIELD_LABELS.claude_model = "Claude Model";
+FIELD_LABELS.claude_permission_mode = "Permission Mode";
+VISIBLE_WORKFLOW_PHASES.add("agent_start");
+VISIBLE_WORKFLOW_PHASES.add("agent_end");
+VISIBLE_WORKFLOW_PHASES.add("agent_timeout");
+WORKFLOW_PHASE_LABELS.agent_start = "Agent 시작";
+WORKFLOW_PHASE_LABELS.agent_end = "Agent 종료";
+WORKFLOW_PHASE_LABELS.agent_timeout = "Agent 시간 초과";
+
+function agentProviderOptions() {
+  return window.__AGENT_PROVIDER_OPTIONS__ || {};
+}
+
+function currentAgentProvider() {
+  return String($("#agent_provider").val() || window.__AGENT_PROVIDER_DEFAULT__ || "codex").trim() || "codex";
+}
+
+function currentAgentProviderOption() {
+  const provider = currentAgentProvider();
+  const options = agentProviderOptions();
+  return options[provider] || { provider, label: provider, available: true, default_model: "", default_execution_mode: "" };
+}
+
+function agentExecutionModeSummary(provider, value) {
+  const normalizedProvider = String(provider || "").trim() || "codex";
+  const normalizedValue = String(value || "").trim();
+  if (!normalizedValue) {
+    return "";
+  }
+  if (normalizedProvider === "claude") {
+    return `permission: ${normalizedValue}`;
+  }
+  return `reasoning: ${normalizedValue}`;
+}
+
+function renderAgentProviderStatus() {
+  const option = currentAgentProviderOption();
+  const status = $("#agent_provider_status");
+  if (!status.length) {
+    return;
+  }
+  const lines = [
+    `<strong>${escapeHtml(option.label || "Agent")}</strong>`,
+    `<span>${escapeHtml(option.available ? "실행 가능" : "실행기 확인 필요")}</span>`,
+  ];
+  if (option.launcher) {
+    lines.push(`<span>launcher: ${escapeHtml(option.launcher)}</span>`);
+  }
+  if (option.default_model) {
+    lines.push(`<span>기본 모델 ${escapeHtml(option.default_model)}</span>`);
+  }
+  if (option.default_execution_mode) {
+    lines.push(`<span>${escapeHtml(option.execution_mode_label || "Execution Mode")} ${escapeHtml(option.default_execution_mode)}</span>`);
+  }
+  if (option.error) {
+    lines.push(`<span>${escapeHtml(option.error)}</span>`);
+  }
+  status
+    .toggleClass("is-unavailable", option.available === false)
+    .html(lines.join(""));
+  $("#run_automation").prop("disabled", option.available === false);
+}
+
+function syncAgentProviderPanels() {
+  const provider = currentAgentProvider();
+  $("[data-agent-provider-panel]").each(function () {
+    const panelProvider = String($(this).attr("data-agent-provider-panel") || "").trim();
+    $(this).prop("hidden", panelProvider !== provider);
+  });
+  renderAgentProviderStatus();
+}
+
+function collectWorkflow() {
+  const issue = selectedIssue();
+  const detail = issue && jiraState.selectedIssueDetail && jiraState.selectedIssueDetail.issue_key === issue.issue_key
+    ? jiraState.selectedIssueDetail
+    : null;
+  return {
+    issue_key: $("#issue_key").val().trim(),
+    issue_summary: $("#issue_summary").val().trim(),
+    branch_name: $("#branch_name").val().trim(),
+    commit_message: $("#commit_message").val().trim(),
+    agent_provider: currentAgentProvider(),
+    codex_model: $("#codex_model").val().trim(),
+    codex_reasoning_effort: $("#codex_reasoning_effort").val().trim(),
+    claude_model: $("#claude_model").val().trim(),
+    claude_permission_mode: $("#claude_permission_mode").val().trim(),
+    work_instruction: $("#work_instruction").val().trim(),
+    acceptance_criteria: $("#acceptance_criteria").val().trim(),
+    test_command: $("#test_command").val().trim(),
+    commit_checklist: $("#commit_checklist").val().trim(),
+    git_author_name: $("#git_author_name").val().trim(),
+    git_author_email: $("#git_author_email").val().trim(),
+    issue_status: detail ? (detail.status || "") : "",
+    issue_type: detail ? (detail.issue_type || "") : "",
+    issue_priority: detail ? (detail.priority || "") : "",
+    issue_assignee: detail ? (detail.assignee || "") : "",
+    issue_labels: detail ? ((detail.labels || []).join(", ")) : "",
+    issue_description: detail ? (detail.description || "") : "",
+    issue_comments_text: detail ? (detail.comments_text || "") : "",
+    clarification_questions: workflowState.clarificationQuestions.map((item) => ({ ...item })),
+    clarification_answers: { ...workflowState.clarificationAnswers },
+    allow_auto_commit: $("#allow_auto_commit").is(":checked"),
+    allow_auto_push: $("#allow_auto_push").is(":checked"),
+  };
+}
+
+function requestedInfoForFields(fields) {
+  const automationMap = {
+    agent_provider: { guide_section: "automation", guide_step_id: "automation-agent-provider" },
+    branch_name: { guide_section: "automation", guide_step_id: "automation-branch-commit" },
+    commit_message: { guide_section: "automation", guide_step_id: "automation-branch-commit" },
+    codex_model: { guide_section: "automation", guide_step_id: "automation-codex-model" },
+    codex_reasoning_effort: { guide_section: "automation", guide_step_id: "automation-codex-model" },
+    claude_model: { guide_section: "automation", guide_step_id: "automation-claude-model" },
+    claude_permission_mode: { guide_section: "automation", guide_step_id: "automation-claude-model" },
+    work_instruction: { guide_section: "automation", guide_step_id: "automation-work-instruction" },
+    acceptance_criteria: { guide_section: "automation", guide_step_id: "automation-acceptance-criteria" },
+    commit_checklist: { guide_section: "automation", guide_step_id: "automation-commit-checklist" },
+    git_author_name: { guide_section: "automation", guide_step_id: "automation-git-author" },
+    git_author_email: { guide_section: "automation", guide_step_id: "automation-git-author" },
+    issue_key: { guide_section: "automation", guide_step_id: "automation-branch-commit" },
+    issue_summary: { guide_section: "automation", guide_step_id: "automation-branch-commit" },
+  };
+  return fields.map((field) => ({
+    field,
+    label: fieldLabel(field),
+    guide_section: automationMap[field] ? automationMap[field].guide_section : "automation",
+    guide_step_id: automationMap[field] ? automationMap[field].guide_step_id : "",
+  }));
+}
+
+function setAutomationResultHint(text) {
+  $("#automation_result_hint").text(String(text || "Agent 자동 작업을 실행하면 결과를 여기에서 확인할 수 있다."));
+}
+
+function renderAutomationResult(data) {
+  const payload = data.result || data.error || data;
+  const provider = String(payload.agent_provider || data.agent_provider || "codex").trim() || "codex";
+  const providerOption = agentProviderOptions()[provider] || {};
+  const providerLabel = payload.resolved_agent_label || providerOption.label || (provider === "claude" ? "Claude Code" : "Codex");
+  const modelLabel = payload.resolved_agent_model || payload.resolved_model || payload.requested_agent_model || payload.requested_model || payload.claude_default_model || payload.codex_default_model || "CLI default";
+  const executionValue = payload.resolved_agent_execution_mode || payload.resolved_reasoning_effort || payload.requested_agent_execution_mode || payload.requested_reasoning_effort || payload.claude_default_permission_mode || payload.codex_default_reasoning_effort || "";
+  const latestEvent = latestWorkflowEvent(data);
+  const syntaxReturncode = payload.syntax_check_returncode != null ? payload.syntax_check_returncode : payload.test_returncode;
+  const syntaxOutput = payload.syntax_check_output || payload.test_output || "";
+  const syntaxElapsed = payload.syntax_check_elapsed_seconds != null ? payload.syntax_check_elapsed_seconds : payload.test_elapsed_seconds;
+  const syntaxFiles = payload.syntax_checked_files || [];
+  const elapsedSeconds = payload.agent_elapsed_seconds != null ? payload.agent_elapsed_seconds : payload.codex_elapsed_seconds;
+  const lastProgress = payload.agent_last_progress_message || payload.codex_last_progress_message || "-";
+  const progressCount = payload.agent_progress_event_count != null ? payload.agent_progress_event_count : payload.codex_progress_event_count;
+  const syntaxDetail = syntaxFiles.length ? `대상 파일 ${syntaxFiles.length}개` : (payload.test_command || "지정한 검증 명령이 없다.");
+  const cards = [
+    setSummaryCard("상태", data.status || payload.status || "-", data.message || payload.message || ""),
+    setSummaryCard("현재 단계", latestEvent ? (WORKFLOW_PHASE_LABELS[latestEvent.phase] || latestEvent.phase) : "-", latestEvent ? latestEvent.message : ""),
+    setSummaryCard("Agent", providerLabel, payload.provider_metadata && payload.provider_metadata.execution_mode_label ? payload.provider_metadata.execution_mode_label : ""),
+    setSummaryCard("모델", modelLabel, agentExecutionModeSummary(provider, executionValue)),
+    setSummaryCard("경과 시간", workflowElapsedLabel(data), elapsedSeconds != null ? `${providerLabel} ${elapsedSeconds}초 / 문법 ${syntaxElapsed == null ? "-" : `${syntaxElapsed}초`}` : ""),
+    setSummaryCard("브랜치", payload.branch_name || "-", payload.current_branch ? `현재 브랜치 ${payload.current_branch}` : ""),
+    setSummaryCard("커밋", payload.commit_sha || "-", payload.commit_message || ""),
+    setSummaryCard("문법 검사", syntaxReturncode == null ? "-" : String(syntaxReturncode), syntaxDetail),
+    setSummaryCard("최근 진행", lastProgress, progressCount ? `이벤트 ${progressCount}건` : ""),
+  ].join("");
+
+  $("#automation_overview").html(cards);
+  $("#automation_intent").text(payload.model_intent || "응답 없음");
+  $("#automation_implementation").text(payload.implementation_summary || "응답 없음");
+  $("#automation_validation").text(payload.validation_summary || "응답 없음");
+
+  const risks = payload.risks || [];
+  $("#automation_risks").html(
+    risks.length
+      ? risks.map((risk) => `<li>${escapeHtml(risk)}</li>`).join("")
+      : '<li class="file-list__empty">특이 리스크가 보고되지 않았다.</li>'
+  );
+
+  const files = payload.processed_files || [];
+  $("#automation_files").html(
+    files.length
+      ? files.map((file) => `<li>${escapeHtml(file)}</li>`).join("")
+      : '<li class="file-list__empty">변경 파일이 없다.</li>'
+  );
+
+  $("#automation_diff").text(payload.diff || "diff 없음");
+  $("#automation_test_output").text(syntaxOutput || "문법 검사 출력이 없다.");
+  $("#automation_log").text(eventLogText(data.events));
+  renderAutomationSync(data);
+}
+
+$(document).ready(function () {
+  $("#agent_provider").on("change", function () {
+    syncAgentProviderPanels();
+  });
+  syncAgentProviderPanels();
+});
+
+function agentRunButtonLabel() {
+  return "Agent 자동 작업 실행";
+}
+
+resetAutomationResultPanel = function () {
+  $("#automation_overview").empty();
+  $("#automation_intent").text("응답 없음");
+  $("#automation_implementation").text("응답 없음");
+  $("#automation_validation").text("응답 없음");
+  $("#automation_risks").html('<li class="file-list__empty">리스크가 보고되지 않았다.</li>');
+  $("#automation_files").html('<li class="file-list__empty">변경 파일이 없다.</li>');
+  $("#automation_diff").text("diff 없음");
+  $("#automation_test_output").text("검증 출력이 없다.");
+  $("#automation_log").text("이벤트 로그가 없다.");
+  renderAutomationSync(null);
+  setAutomationResultPanelOpen(false);
+  setAutomationResultHint("Agent 자동 작업을 실행하면 결과를 여기에 표시한다.");
+};
+
+syncAutomationResultPanel = function (data) {
+  const payload = (data && (data.result || data.error || data)) || {};
+  const status = data && data.status ? String(data.status) : String(payload.status || "");
+  const message = String((data && data.message) || payload.message || "").trim();
+  let hint = "Agent 자동 작업을 실행하면 결과를 여기에 표시한다.";
+
+  if (status === "queued") {
+    hint = "Agent 자동 작업 요청을 접수했다.";
+  } else if (status === "running") {
+    hint = message || "Agent 자동 작업을 진행 중이다.";
+  } else if (status === "completed") {
+    hint = message || "Agent 자동 작업을 완료했다.";
+  } else if (status === "failed") {
+    hint = message || "Agent 자동 작업이 실패했다.";
+  } else if (message) {
+    hint = message;
+  }
+
+  showAutomationResultPanel();
+  setAutomationResultHint(hint);
+};
+
+scheduleWorkflowPoll = function (runId, button) {
+  stopWorkflowPolling();
+  workflowState.activeRunId = runId;
+  workflowState.pollTimer = window.setTimeout(() => {
+    $.getJSON(`/api/workflow/run/${encodeURIComponent(runId)}`)
+      .done((data) => {
+        const payload = data.result || data.error || {};
+        setResult("#workflow_result", data);
+        renderCallout("#workflow_result_actions", payload.requested_information || []);
+        renderAutomationResult(data);
+        syncAutomationResultPanel(data);
+
+        if (data.status === "completed" || data.status === "failed") {
+          stopWorkflowPolling();
+          workflowState.activeRunId = null;
+          button.prop("disabled", false).text(agentRunButtonLabel());
+          return;
+        }
+        scheduleWorkflowPoll(runId, button);
+      })
+      .fail((xhr) => {
+        stopWorkflowPolling();
+        workflowState.activeRunId = null;
+        button.prop("disabled", false).text(agentRunButtonLabel());
+        const data = xhr.status === 404
+          ? {
+            ok: false,
+            error: "workflow_run_not_found",
+            message: "실행 정보를 찾을 수 없다.",
+          }
+          : {
+            ok: false,
+            error: "workflow_run_status_failed",
+            message: xhr.responseJSON && xhr.responseJSON.message ? xhr.responseJSON.message : "실행 상태를 불러오지 못했다.",
+          };
+        setResult("#workflow_result", data);
+        renderCallout("#workflow_result_actions", (data && data.requested_information) || []);
+        renderAutomationResult(data);
+        syncAutomationResultPanel(data);
+      });
+  }, 1500);
+};
+
+executeWorkflowRunWithClarification = function (button, payload) {
+  button.prop("disabled", true).text("실행 중..");
+  clearWorkflowClarification();
+  showAutomationResultPanel(true);
+  setAutomationResultHint("Agent 자동 작업 요청을 접수했다.");
+  setResult("#workflow_result", { ok: false, status: "queued", message: "Agent 자동 작업을 접수했다." });
+  $("#automation_log").text("실행 요청을 전송했다.");
+
+  $.ajax({
+    url: "/api/workflow/run",
+    method: "POST",
+    contentType: "application/json",
+    data: JSON.stringify(payload),
+  })
+    .done((data) => {
+      setResult("#workflow_result", data);
+      renderCallout("#workflow_result_actions", data.requested_information || []);
+      renderAutomationResult(data);
+      syncAutomationResultPanel(data);
+      if (data.run_id) {
+        scheduleWorkflowPoll(data.run_id, button);
+      } else {
+        button.prop("disabled", false).text(agentRunButtonLabel());
+      }
+    })
+    .fail((xhr) => {
+      const data = xhr.responseJSON || { ok: false, error: xhr.responseText };
+      setResult("#workflow_result", data);
+      renderCallout("#workflow_result_actions", data.requested_information || []);
+      renderAutomationResult(data);
+      syncAutomationResultPanel(data);
+      button.prop("disabled", false).text(agentRunButtonLabel());
+    });
+};
+
+requestWorkflowClarification = function (button, payload) {
+  button.prop("disabled", true).text("사전 확인 중..");
+  clearResultActions("#workflow_result_actions");
+
+  $.ajax({
+    url: "/api/workflow/clarify",
+    method: "POST",
+    contentType: "application/json",
+    data: JSON.stringify(payload),
+  })
+    .done((data) => {
+      setResult("#workflow_result", data);
+      if (data.status === "needs_input") {
+        renderWorkflowClarification(data);
+        button.prop("disabled", false).text(agentRunButtonLabel());
+        return;
+      }
+
+      clearWorkflowClarification();
+      executeWorkflowRunWithClarification(button, payload);
+    })
+    .fail((xhr) => {
+      const data = xhr.responseJSON || { ok: false, error: xhr.responseText };
+      clearWorkflowClarification();
+      setResult("#workflow_result", data);
+      renderCallout("#workflow_result_actions", data.requested_information || []);
+      button.prop("disabled", false).text(agentRunButtonLabel());
+    });
+};
+
+$(document).ready(function () {
+  $("#run_automation").off("click").on("click", function () {
+    const button = $(this);
+    syncWorkflowClarificationAnswers();
+    const payload = collectWorkflow();
+    const missingFields = workflowRequiredFields(payload);
+
+    stopWorkflowPolling();
+    resetAutomationResult();
+    hideAutomationResultPanel();
+    clearResultActions("#workflow_result_actions");
+    if (missingFields.length) {
+      const requestedInformation = requestedInfoForFields(missingFields);
+      const data = {
+        ok: false,
+        error: "workflow_fields_missing",
+        fields: missingFields,
+        requested_information: requestedInformation,
+        message: "필수 입력값이 비어 있어 Agent 실행을 시작하지 않았다.",
+      };
+      setResult("#workflow_result", data);
+      renderCallout("#workflow_result_actions", requestedInformation);
+      renderAutomationResult(data);
+      focusFields([missingFields[0]]);
+      return;
+    }
+
+    if (workflowState.clarificationQuestions.length) {
+      const missingClarifications = missingClarificationItems();
+      if (missingClarifications.length) {
+        setResult("#workflow_result", {
+          ok: false,
+          error: "clarification_answers_missing",
+          fields: missingClarifications.map((item) => item.field),
+          message: "추가 확인 질문에 대한 답변을 모두 입력해 달라.",
+        });
+        const firstField = missingClarifications[0].field;
+        const firstInput = $(`[data-clarification-answer="${firstField}"]`);
+        if (firstInput.length) {
+          firstInput.trigger("focus");
+        }
+        return;
+      }
+    }
+
+    requestWorkflowClarification(button, payload);
+  });
+});

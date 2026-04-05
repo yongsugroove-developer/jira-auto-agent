@@ -100,8 +100,11 @@
   function workflowCommonPayload() {
     return {
       issues: selectedIssues(),
+      agent_provider: String($("#agent_provider").val() || window.__AGENT_PROVIDER_DEFAULT__ || "codex").trim() || "codex",
       codex_model: String($("#codex_model").val() || "").trim(),
       codex_reasoning_effort: String($("#codex_reasoning_effort").val() || "").trim(),
+      claude_model: String($("#claude_model").val() || "").trim(),
+      claude_permission_mode: String($("#claude_permission_mode").val() || "").trim(),
       work_instruction: String($("#work_instruction").val() || "").trim(),
       acceptance_criteria: String($("#acceptance_criteria").val() || "").trim(),
       test_command: String($("#test_command").val() || "").trim(),
@@ -300,6 +303,9 @@
           </div>
         </div>
         <div class="workflow-log-item__meta">
+          <div>에이전트 ${escapeHtml(item.resolved_agent_label || item.agent_provider || "-")}</div>
+          <div>모델 ${escapeHtml(item.resolved_agent_model || "-")}</div>
+          <div>실행 모드 ${escapeHtml(item.resolved_agent_execution_mode || "-")}</div>
           <div>공간 ${escapeHtml(item.resolved_space_key || "-")}</div>
           <div>저장소 ${escapeHtml(item.resolved_repo_ref || "-")}</div>
           <div>브랜치 ${escapeHtml(item.branch_name || "-")}</div>
@@ -514,11 +520,13 @@
     return { status: "partially_completed", counts };
   }
 
-  function buildPendingBatch(issues) {
+  function buildPendingBatch(issues, provider) {
     const timestamp = new Date().toISOString();
+    const agentProvider = String(provider || $("#agent_provider").val() || window.__AGENT_PROVIDER_DEFAULT__ || "codex").trim() || "codex";
     const runs = (issues || []).map((issue, index) => ({
       run_id: `pending-run-${index + 1}`,
       batch_id: "pending-batch",
+      agent_provider: agentProvider,
       issue_key: String(issue.issue_key || "").trim(),
       issue_summary: String(issue.issue_summary || "").trim(),
       tab_label: `${String(issue.issue_key || "").trim()} ${String(issue.issue_summary || "").trim()}`.trim(),
@@ -532,6 +540,7 @@
       clarification_status: "not_requested",
       clarification: null,
       request_payload: {
+        agent_provider: agentProvider,
         issue_key: String(issue.issue_key || "").trim(),
         issue_summary: String(issue.issue_summary || "").trim(),
       },
@@ -709,7 +718,10 @@
   }
 
   function renderRunMeta(run, payload) {
+    const provider = String(run.agent_provider || payload.agent_provider || (run.request_payload || {}).agent_provider || "codex").trim() || "codex";
+    const providerLabel = payload.resolved_agent_label || (provider === "claude" ? "Claude Code" : "Codex");
     const items = [
+      `<span class="field-pill">${escapeHtml(providerLabel)}</span>`,
       statusBadge(run.status),
       queueMetaBadge(run),
       run.resolved_space_key ? `<span class="field-pill">${escapeHtml(run.resolved_space_key)}</span>` : "",
@@ -755,7 +767,7 @@
       activeStepId = "done";
     } else if (["syntax_start", "syntax_end", "stage_changes", "stage_ready", "commit_start", "commit_end"].includes(phase)) {
       activeStepId = "review";
-    } else if (phase.startsWith("codex") || status === "running") {
+    } else if (phase.startsWith("codex") || phase.startsWith("agent") || status === "running") {
       activeStepId = "execute";
     } else if (["branch_prepare", "branch_ready"].includes(phase) || run.queue_state === "running") {
       activeStepId = "prepare";
@@ -1206,7 +1218,7 @@
     button.prop("disabled", true).text("배치 실행 중...");
     showWorkStatusSection("선택한 이슈 배치를 준비하고 있다.");
     setResult("#workflow_result", { ok: true, status: "queued", message: `선택한 이슈 ${payload.issues.length}건의 배치 실행을 접수했다.` });
-    renderActiveBatch(buildPendingBatch(payload.issues), { preserveSelection: false });
+    renderActiveBatch(buildPendingBatch(payload.issues, payload.agent_provider), { preserveSelection: false });
 
     $.ajax({
       url: "/api/workflow/batch/run",
@@ -1360,11 +1372,17 @@
     const phaseLabels = typeof WORKFLOW_PHASE_LABELS === "object" ? WORKFLOW_PHASE_LABELS : {};
     const syntaxReturncode = payload.syntax_check_returncode != null ? payload.syntax_check_returncode : payload.test_returncode;
     const syntaxFiles = payload.syntax_checked_files || [];
+    const provider = String(run.agent_provider || payload.agent_provider || (run.request_payload || {}).agent_provider || "codex").trim() || "codex";
+    const providerLabel = payload.resolved_agent_label || (provider === "claude" ? "Claude Code" : "Codex");
+    const modelLabel = payload.resolved_agent_model || payload.resolved_model || payload.requested_agent_model || payload.requested_model || "-";
+    const executionValue = payload.resolved_agent_execution_mode || payload.resolved_reasoning_effort || payload.requested_agent_execution_mode || payload.requested_reasoning_effort || "";
+    const elapsedSeconds = payload.agent_elapsed_seconds != null ? payload.agent_elapsed_seconds : payload.codex_elapsed_seconds;
     const cards = [
       setSummaryCard("상태", run.status || payload.status || "-", run.message || payload.message || ""),
       setSummaryCard("현재 단계", latestEvent ? (phaseLabels[latestEvent.phase] || latestEvent.phase) : "-", latestEvent ? latestEvent.message : ""),
-      setSummaryCard("경과 시간", typeof workflowElapsedLabel === "function" ? workflowElapsedLabel(run) : "-", payload.codex_elapsed_seconds != null ? `Codex ${payload.codex_elapsed_seconds}초` : ""),
-      setSummaryCard("모델", payload.resolved_model || payload.requested_model || "-", payload.resolved_reasoning_effort ? `reasoning: ${payload.resolved_reasoning_effort}` : ""),
+      setSummaryCard("Agent", providerLabel, payload.provider_metadata && payload.provider_metadata.execution_mode_label ? payload.provider_metadata.execution_mode_label : ""),
+      setSummaryCard("경과 시간", typeof workflowElapsedLabel === "function" ? workflowElapsedLabel(run) : "-", elapsedSeconds != null ? `${providerLabel} ${elapsedSeconds}초` : ""),
+      setSummaryCard("모델", modelLabel, executionValue ? (provider === "claude" ? `permission: ${executionValue}` : `reasoning: ${executionValue}`) : ""),
       setSummaryCard("저장소", run.resolved_repo_ref || payload.remote_repo_ref || "-", run.resolved_repo_provider || payload.remote_provider || ""),
       setSummaryCard("브랜치", payload.branch_name || "-", payload.current_branch ? `현재 브랜치 ${payload.current_branch}` : ""),
       setSummaryCard("커밋", payload.commit_sha || "-", payload.commit_message || ""),
