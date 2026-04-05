@@ -41,6 +41,12 @@ def _github_mapping_payload(
     }
 
 
+def _isolate_workflow_storage(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(main_module, "DATA_DIR", tmp_path / "app-data")
+    monkeypatch.setattr(main_module, "WORKFLOW_RUNS_DIR", tmp_path / "workflow-runs")
+    monkeypatch.setattr(main_module, "WORKFLOW_BATCHES_DIR", tmp_path / "workflow-batches")
+
+
 def test_setup_guide_contains_expected_sections_and_steps() -> None:
     app = create_app()
     client = app.test_client()
@@ -159,6 +165,7 @@ def test_index_page_renders_automation_fields() -> None:
     assert 'id="batch_list"' not in html
     assert 'id="batch_run_tabs"' in html
     assert 'id="batch_detail_tabs"' in html
+    assert 'id="toggle_failed_runs"' not in html
     assert 'data-detail-panel="overview"' in html
     assert 'data-detail-panel="summary"' in html
     assert 'data-detail-panel="clarification"' in html
@@ -335,6 +342,14 @@ def test_jira_backlog_script_uses_inline_meta_without_click_helper_copy() -> Non
     assert 'data-jira-issue-meta></div>' not in script
     assert 'checked: idx === 0' not in script
     assert 'checked: index === 0' not in batch_script
+
+
+def test_batch_workspace_script_limits_work_status_to_active_runs() -> None:
+    batch_script = Path("app/static/batch-workspace.js").read_text(encoding="utf-8")
+
+    assert 'const ACTIVE_RUN_STATUSES = ["queued", "running", "needs_input"];' in batch_script
+    assert 'const batches = (data.batches || []).filter((batch) => isCurrentBatch(batch));' in batch_script
+    assert '$("#toggle_failed_runs")' not in batch_script
 
 
 def test_mock_jira_issue_detail_returns_description_and_comments() -> None:
@@ -1222,7 +1237,9 @@ def test_github_check_creates_project_memory_on_repo_access(monkeypatch, tmp_pat
     assert (repo_path / "docs" / "project-overview.md").exists()
 
 
-def test_run_workflow_returns_stubbed_automation_result(monkeypatch) -> None:
+def test_run_workflow_returns_stubbed_automation_result(monkeypatch, tmp_path) -> None:
+    _isolate_workflow_storage(monkeypatch, tmp_path)
+
     def fake_load(self, provider: str):  # noqa: ANN001
         if provider == "github":
             return _github_mapping_payload(_repo_mapping_line("DEMO", "."))
@@ -1316,7 +1333,9 @@ def test_run_workflow_returns_stubbed_automation_result(monkeypatch) -> None:
     assert status_data["result"]["processed_files"] == ["app/static/app.js", "app/main.py"]
 
 
-def test_run_workflow_passes_normalized_clarification_answers(monkeypatch) -> None:
+def test_run_workflow_passes_normalized_clarification_answers(monkeypatch, tmp_path) -> None:
+    _isolate_workflow_storage(monkeypatch, tmp_path)
+
     captured_payload: dict[str, object] = {}
     synced_answers: dict[str, object] = {}
 
@@ -1533,7 +1552,7 @@ def test_run_workflow_records_project_history(monkeypatch, tmp_path) -> None:
 
 
 def test_workflow_run_persists_across_app_recreation(monkeypatch, tmp_path) -> None:
-    monkeypatch.setattr(main_module, "WORKFLOW_RUNS_DIR", tmp_path / "workflow-runs")
+    _isolate_workflow_storage(monkeypatch, tmp_path)
 
     def fake_load(self, provider: str):  # noqa: ANN001
         if provider == "github":

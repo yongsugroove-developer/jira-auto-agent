@@ -921,6 +921,7 @@ tbody tr:hover {
 .batch-flow-step.is-active .batch-flow-step__dot {
   border-color: rgba(255, 173, 38, 0.78);
   background: rgba(255, 173, 38, 0.96);
+  animation: flow-step-breathe 1.15s ease-in-out infinite;
 }
 
 .batch-flow-step.is-active .batch-flow-step__dot::after {
@@ -949,6 +950,11 @@ tbody tr:hover {
 
 .batch-flow-step.is-active .batch-flow-step__label {
   color: #755100;
+  animation: flow-step-glow 1.2s ease-in-out infinite;
+}
+
+.batch-flow-row.is-processing .batch-flow-step.is-active {
+  animation: flow-step-float 1.3s ease-in-out infinite;
 }
 
 .batch-flow-step.is-failed .batch-flow-step__dot {
@@ -1099,6 +1105,11 @@ tbody tr:hover {
 .clarification-state-banner__body.is-locked {
   border-color: rgba(245, 246, 249, 0.98);
   background: rgba(243, 246, 244, 0.98);
+}
+
+.clarification-state-banner__body.is-submitted {
+  border-color: rgba(42, 115, 245, 0.18);
+  background: rgba(239, 245, 255, 0.98);
 }
 
 .clarification-answer-item {
@@ -2329,6 +2340,45 @@ tbody tr:hover {
   100% {
     transform: scale(1.45);
     opacity: 0;
+  }
+}
+
+@keyframes flow-step-breathe {
+  0% {
+    transform: scale(0.92);
+    box-shadow: 0 0 0 0 rgba(255, 173, 38, 0.18);
+  }
+  50% {
+    transform: scale(1.08);
+    box-shadow: 0 0 0 8px rgba(255, 173, 38, 0);
+  }
+  100% {
+    transform: scale(0.92);
+    box-shadow: 0 0 0 0 rgba(255, 173, 38, 0);
+  }
+}
+
+@keyframes flow-step-glow {
+  0% {
+    opacity: 0.72;
+  }
+  50% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0.72;
+  }
+}
+
+@keyframes flow-step-float {
+  0% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-2px);
+  }
+  100% {
+    transform: translateY(0);
   }
 }
 

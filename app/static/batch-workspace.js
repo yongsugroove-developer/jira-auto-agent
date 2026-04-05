@@ -1,4 +1,4 @@
-(function ($) {
+﻿(function ($) {
   const batchWorkspaceState = {
     previewTimer: null,
     pollTimer: null,
@@ -8,7 +8,7 @@
     activeBatchId: null,
     activeDetailTab: "overview",
     clarificationDrafts: {},
-    failedOnly: false,
+    clarificationSubmissionPending: {},
   };
 
   const STORAGE_KEYS = {
@@ -31,6 +31,8 @@
     { id: "done", label: "완료" },
   ];
 
+  const ACTIVE_RUN_STATUSES = ["queued", "running", "needs_input"];
+
   function batchRunStorageKey(batchId) {
     return `jira-auto-agent.active-run.${String(batchId || "").trim()}`;
   }
@@ -41,6 +43,10 @@
 
   function clarificationDraftKey(batchId, runId) {
     return `${String(batchId || "").trim()}:${String(runId || "").trim()}`;
+  }
+
+  function cloneJson(value) {
+    return JSON.parse(JSON.stringify(value));
   }
 
   function safeStorageGet(key) {
@@ -368,6 +374,10 @@
     return batchWorkspaceState.clarificationDrafts[clarificationDraftKey(batchId, runId)] || {};
   }
 
+  function currentClarificationSubmission(batchId, runId) {
+    return batchWorkspaceState.clarificationSubmissionPending[clarificationDraftKey(batchId, runId)] || null;
+  }
+
   function setClarificationDraftValue(batchId, runId, field, value) {
     const key = clarificationDraftKey(batchId, runId);
     const drafts = { ...currentClarificationDrafts(batchId, runId) };
@@ -375,8 +385,19 @@
     batchWorkspaceState.clarificationDrafts[key] = drafts;
   }
 
+  function setClarificationSubmissionPending(batchId, runId, answers) {
+    batchWorkspaceState.clarificationSubmissionPending[clarificationDraftKey(batchId, runId)] = {
+      answers: { ...(answers || {}) },
+      submittedAt: new Date().toISOString(),
+    };
+  }
+
   function clearClarificationDrafts(batchId, runId) {
     delete batchWorkspaceState.clarificationDrafts[clarificationDraftKey(batchId, runId)];
+  }
+
+  function clearClarificationSubmissionPending(batchId, runId) {
+    delete batchWorkspaceState.clarificationSubmissionPending[clarificationDraftKey(batchId, runId)];
   }
 
   function restoreClarificationFocus(focusState) {
@@ -417,6 +438,24 @@
     return runs.some((run) => ["queued", "running"].includes(String(run.status || "").trim()));
   }
 
+  function isActiveRunStatus(status) {
+    return ACTIVE_RUN_STATUSES.includes(String(status || "").trim());
+  }
+
+  function currentRuns(batch) {
+    return (batch && batch.runs ? batch.runs : []).filter((run) => isActiveRunStatus(run.status));
+  }
+
+  function isCurrentBatch(batch) {
+    if (!batch) {
+      return false;
+    }
+    if (isActiveRunStatus(batch.status)) {
+      return true;
+    }
+    return currentRuns(batch).length > 0;
+  }
+
   function scheduleBatchPoll(batchId) {
     stopBatchPolling();
     batchWorkspaceState.pollTimer = window.setTimeout(() => {
@@ -428,17 +467,156 @@
     }, 2000);
   }
 
+  function summarizeBatchRuns(runs) {
+    const counts = {
+      queued: 0,
+      running: 0,
+      needs_input: 0,
+      completed: 0,
+      failed: 0,
+      partially_completed: 0,
+      total: (runs || []).length,
+    };
+    (runs || []).forEach((run) => {
+      const status = String(run.status || "").trim();
+      if (Object.prototype.hasOwnProperty.call(counts, status)) {
+        counts[status] += 1;
+      } else {
+        counts.queued += 1;
+      }
+    });
+    return counts;
+  }
+
+  function aggregateBatchStatus(runs) {
+    const counts = summarizeBatchRuns(runs);
+    if (!counts.total) {
+      return { status: "queued", counts };
+    }
+    if (counts.running > 0) {
+      return { status: "running", counts };
+    }
+    if (counts.queued > 0) {
+      return { status: "queued", counts };
+    }
+    if (counts.needs_input > 0) {
+      return { status: "needs_input", counts };
+    }
+    if (counts.completed === counts.total) {
+      return { status: "completed", counts };
+    }
+    if (counts.partially_completed === counts.total) {
+      return { status: "partially_completed", counts };
+    }
+    if (counts.failed === counts.total) {
+      return { status: "failed", counts };
+    }
+    return { status: "partially_completed", counts };
+  }
+
+  function buildPendingBatch(issues) {
+    const timestamp = new Date().toISOString();
+    const runs = (issues || []).map((issue, index) => ({
+      run_id: `pending-run-${index + 1}`,
+      batch_id: "pending-batch",
+      issue_key: String(issue.issue_key || "").trim(),
+      issue_summary: String(issue.issue_summary || "").trim(),
+      tab_label: `${String(issue.issue_key || "").trim()} ${String(issue.issue_summary || "").trim()}`.trim(),
+      status: "queued",
+      message: "요청을 접수했고 Jira 정보와 저장소 설정을 확인하는 중이다.",
+      queue_key: "pending",
+      queue_state: "queued",
+      queue_position: index + 1,
+      local_repo_path: "",
+      resolved_space_key: "",
+      clarification_status: "not_requested",
+      clarification: null,
+      request_payload: {
+        issue_key: String(issue.issue_key || "").trim(),
+        issue_summary: String(issue.issue_summary || "").trim(),
+      },
+      created_at: timestamp,
+      started_at: null,
+      finished_at: null,
+      updated_at: timestamp,
+      events: [
+        {
+          timestamp,
+          phase: "queued",
+          message: "요청을 접수했고 초기 데이터 수집을 시작했다.",
+        },
+      ],
+      result: null,
+      error: null,
+    }));
+    const summary = aggregateBatchStatus(runs);
+    return {
+      batch_id: "pending-batch",
+      status: summary.status,
+      message: "요청을 접수했고 초기 데이터 수집을 시작했다.",
+      created_at: timestamp,
+      updated_at: timestamp,
+      active_run_id: runs[0] ? runs[0].run_id : "",
+      run_ids: runs.map((run) => run.run_id),
+      runs,
+      counts: summary.counts,
+      selected_issue_keys: runs.map((run) => run.issue_key),
+      selected_issue_count: runs.length,
+      suggested_active_run_id: runs[0] ? runs[0].run_id : "",
+    };
+  }
+
+  function buildOptimisticClarificationBatch(batch, runId, answers) {
+    const nextBatch = cloneJson(batch);
+    const submittedAt = new Date().toISOString();
+    nextBatch.runs = (nextBatch.runs || []).map((run) => {
+      if (String(run.run_id || "").trim() !== String(runId || "").trim()) {
+        return run;
+      }
+      const clarification = run.clarification || {};
+      return {
+        ...run,
+        status: "queued",
+        message: "답변을 제출했다. 작업 재개를 준비 중이다.",
+        queue_state: "queued",
+        queue_position: 0,
+        clarification_status: "submitted",
+        clarification: {
+          analysis_summary: clarification.analysis_summary || run.message || "",
+          requested_information: clarification.requested_information || [],
+          answers: { ...(answers || {}) },
+        },
+        updated_at: submittedAt,
+        events: [
+          ...(run.events || []),
+          {
+            timestamp: submittedAt,
+            phase: "queued",
+            message: "답변을 제출했고 작업 재개를 준비 중이다.",
+          },
+        ],
+      };
+    });
+    const summary = aggregateBatchStatus(nextBatch.runs || []);
+    nextBatch.status = summary.status;
+    nextBatch.counts = summary.counts;
+    nextBatch.message = "답변을 제출했고 작업 재개를 준비 중이다.";
+    nextBatch.updated_at = submittedAt;
+    nextBatch.active_run_id = runId;
+    nextBatch.suggested_active_run_id = runId;
+    return nextBatch;
+  }
+
   function renderBatchSummary(batch) {
-    const counts = batch.counts || {};
+    const counts = summarizeBatchRuns(currentRuns(batch));
     const cards = [
       setSummaryCard("배치 ID", String(batch.batch_id || "").slice(0, 10) || "-"),
       setSummaryCard("상태", batch.status || "-"),
-      setSummaryCard("전체 이슈", `${counts.total || 0}건`),
-      setSummaryCard("진행 중", `${(counts.queued || 0) + (counts.running || 0)}건`),
+      setSummaryCard("현재 이슈", `${counts.total || 0}건`),
+      setSummaryCard("접수 대기", `${counts.queued || 0}건`),
+      setSummaryCard("실행 중", `${counts.running || 0}건`),
       setSummaryCard("추가 확인", `${counts.needs_input || 0}건`),
-      setSummaryCard("완료", `${counts.completed || 0}건`),
-      setSummaryCard("부분 완료", `${counts.partially_completed || 0}건`),
-      setSummaryCard("실패", `${counts.failed || 0}건`),
+      setSummaryCard("최근 갱신", formatTimestamp(batch.updated_at || batch.created_at)),
     ].join("");
     $("#batch_summary_cards").html(cards);
   }
@@ -464,24 +642,20 @@
 
   function preferredRunId(batch) {
     const stored = safeStorageGet(batchRunStorageKey(batch.batch_id));
-    const runs = (batch.runs || []).map((run) => String(run.run_id || ""));
+    const runs = currentRuns(batch).map((run) => String(run.run_id || ""));
     if (stored && runs.includes(stored)) {
       return stored;
     }
-    return String(batch.active_run_id || batch.suggested_active_run_id || (batch.runs[0] && batch.runs[0].run_id) || "");
+    const visible = currentRuns(batch);
+    return String(batch.active_run_id || batch.suggested_active_run_id || (visible[0] && visible[0].run_id) || "");
   }
 
   function visibleRuns(batch) {
-    const runs = batch.runs || [];
-    if (!batchWorkspaceState.failedOnly) {
-      return runs;
-    }
-    const failedRuns = runs.filter((run) => ["failed", "partially_completed"].includes(String(run.status || "").trim()));
-    return failedRuns.length ? failedRuns : runs;
+    return currentRuns(batch);
   }
 
   function activeFlowRuns(batch) {
-    return (batch.runs || []).filter((run) => ["queued", "running", "needs_input"].includes(String(run.status || "").trim()));
+    return currentRuns(batch);
   }
 
   function renderRunTabs(batch, activeRunId) {
@@ -626,14 +800,8 @@
     }
     $("#batch_flow_panel").prop("hidden", false);
 
-    const counts = {
-      running: runs.filter((run) => String(run.status || "").trim() === "running").length,
-      needsInput: runs.filter((run) => String(run.status || "").trim() === "needs_input").length,
-      queued: runs.filter((run) => String(run.status || "").trim() === "queued").length,
-    };
-    $("#batch_flow_caption").text(
-      `실행 ${counts.running}건 / 대기 ${counts.queued}건 / 확인 ${counts.needsInput}건`
-    );
+    const counts = summarizeBatchRuns(runs);
+    $("#batch_flow_caption").text(`접수 ${counts.queued}건 / 실행 ${counts.running}건 / 확인 ${counts.needs_input}건 / 완료 ${counts.completed}건 / 실패 ${counts.failed + counts.partially_completed}건`);
 
     const rows = runs.map((run) => {
       const payload = runPayload(run);
@@ -642,7 +810,7 @@
       const normalizedStatus = String(run.status || "").trim().replace(/_/g, "-") || "idle";
       const isProcessing = ["queued", "running", "needs_input"].includes(String(run.status || "").trim());
       const track = flow.steps.map((step) => `
-        <div class="batch-flow-step ${step.className}">
+        <div class="batch-flow-step ${step.className}" data-step-id="${escapeHtml(step.id)}">
           <span class="batch-flow-step__dot" aria-hidden="true"></span>
           <span class="batch-flow-step__label">${escapeHtml(step.label)}</span>
         </div>
@@ -706,15 +874,21 @@
     const batchId = batchWorkspaceState.activeBatchId;
     const runId = String(run.run_id || "").trim();
     const draftAnswers = currentClarificationDrafts(batchId, runId);
-    const hasAnswers = Object.keys(answers).length > 0;
-    const editable = String(run.status || "").trim() === "needs_input" && requested.length > 0;
+    const pendingSubmission = currentClarificationSubmission(batchId, runId);
+    const displayedAnswers = pendingSubmission ? pendingSubmission.answers || {} : answers;
+    const hasAnswers = Object.keys(displayedAnswers).length > 0;
+    const editable = String(run.status || "").trim() === "needs_input" && requested.length > 0 && !pendingSubmission;
     const focusState = clarificationFocusState();
     const normalizedStatus = String(run.status || "").trim();
 
     let stateVariant = "is-idle";
     let stateTitle = "추가 질문 없음";
     let stateMessage = "현재 배치에서 추가 입력이 필요한 질문이 없다.";
-    if (editable && hasAnswers) {
+    if (pendingSubmission) {
+      stateVariant = "is-submitted";
+      stateTitle = "답변 제출 완료";
+      stateMessage = "답변을 접수했다. 실행 개요 탭으로 이동했으며, 작업이 재개되면 진행 플로우에서 상태를 바로 확인할 수 있다.";
+    } else if (editable && hasAnswers) {
       stateVariant = "is-followup";
       stateTitle = "추가 질문 도착";
       stateMessage = "이전에 제출한 답변은 잠금 상태이며, 아래 새 질문에만 추가로 답변할 수 있다.";
@@ -747,7 +921,7 @@
       const questionItems = requested.map((item) => {
         const answer = Object.prototype.hasOwnProperty.call(draftAnswers, item.field)
           ? String(draftAnswers[item.field] || "")
-          : String(answers[item.field] || "");
+          : String(displayedAnswers[item.field] || "");
         return `
           <${editable ? "label" : "article"} class="clarification-question ${editable ? "" : "clarification-question--locked"}">
             <div class="clarification-question__header">
@@ -777,7 +951,7 @@
     }
 
     if (hasAnswers) {
-      const answerItems = Object.entries(answers).map(([field, answer]) => `
+      const answerItems = Object.entries(displayedAnswers).map(([field, answer]) => `
         <article class="clarification-answer-item">
           <strong>${escapeHtml(field)}</strong>
           <p>${escapeHtml(answer)}</p>
@@ -882,6 +1056,11 @@
           clearActiveBatchView();
           return;
         }
+        if (!isCurrentBatch(data)) {
+          stopBatchPolling();
+          loadRecentBatches("", true);
+          return;
+        }
         const freezeClarificationRender = clarificationEditorFocused();
         if (freezeClarificationRender) {
           batchWorkspaceState.activeBatch = data;
@@ -914,7 +1093,7 @@
     if (stored && batches.some((batch) => String(batch.batch_id) === String(stored))) {
       return stored;
     }
-    const active = batches.find((batch) => ["running", "queued", "needs_input"].includes(String(batch.status || "").trim()));
+    const active = batches.find((batch) => isCurrentBatch(batch));
     if (active) {
       return active.batch_id;
     }
@@ -925,7 +1104,7 @@
     $.getJSON("/api/workflow/batches?limit=12")
       .done((data) => {
         loadWorkflowLogs();
-        const batches = data.batches || [];
+        const batches = (data.batches || []).filter((batch) => isCurrentBatch(batch));
         batchWorkspaceState.recentBatches = batches;
         if (!batches.length) {
           $("#work_status_section").prop("hidden", true);
@@ -969,6 +1148,13 @@
       setResult("#workflow_result", { ok: false, error: "clarification_answers_missing", message: "질문에 대한 답변을 입력해 주세요." });
       return;
     }
+    const originalBatch = cloneJson(batch);
+    stopBatchPolling();
+    clearResultActions("#workflow_result_actions");
+    setClarificationSubmissionPending(batch.batch_id, runId, answers);
+    setActiveDetailTab(batch.batch_id, "overview");
+    renderActiveBatch(buildOptimisticClarificationBatch(batch, runId, answers), { preserveSelection: true });
+    setResult("#workflow_result", { ok: true, status: "queued", message: "답변을 제출했다. 작업 재개를 준비 중이다." });
     $.ajax({
       url: `/api/workflow/batch/${encodeURIComponent(batch.batch_id)}/runs/${encodeURIComponent(runId)}/answers`,
       method: "POST",
@@ -976,15 +1162,21 @@
       data: JSON.stringify({ clarification_answers: answers }),
     })
       .done((data) => {
+        clearClarificationSubmissionPending(batch.batch_id, runId);
         clearClarificationDrafts(batch.batch_id, runId);
         setResult("#workflow_result", data);
         if (data.batch) {
           renderActiveBatch(data.batch, { preserveSelection: true });
+          if (currentBatchShouldPoll(data.batch)) {
+            scheduleBatchPoll(data.batch.batch_id);
+          }
         } else {
           loadBatch(batch.batch_id, { preserveSelection: true });
         }
       })
       .fail((xhr) => {
+        clearClarificationSubmissionPending(batch.batch_id, runId);
+        renderActiveBatch(originalBatch, { preserveSelection: true });
         setResult("#workflow_result", xhr.responseJSON || { ok: false, error: xhr.responseText });
       });
   }
@@ -1013,6 +1205,7 @@
     button.prop("disabled", true).text("배치 실행 중...");
     showWorkStatusSection("선택한 이슈 배치를 준비하고 있다.");
     setResult("#workflow_result", { ok: true, status: "queued", message: `선택한 이슈 ${payload.issues.length}건의 배치 실행을 접수했다.` });
+    renderActiveBatch(buildPendingBatch(payload.issues), { preserveSelection: false });
 
     $.ajax({
       url: "/api/workflow/batch/run",
@@ -1033,16 +1226,18 @@
       .fail((xhr) => {
         setResult("#workflow_result", xhr.responseJSON || { ok: false, error: xhr.responseText });
         button.prop("disabled", false).text("선택 이슈 배치 실행");
+        clearActiveBatchView();
       });
   }
 
   function focusPriorityRun() {
     const batch = batchWorkspaceState.activeBatch;
-    if (!batch || !(batch.runs || []).length) {
+    const runs = visibleRuns(batch);
+    if (!batch || !runs.length) {
       return;
     }
-    const priority = { running: 0, needs_input: 1, failed: 2, queued: 3, completed: 4 };
-    const nextRun = (batch.runs || []).slice().sort((left, right) => {
+    const priority = { running: 0, needs_input: 1, queued: 2 };
+    const nextRun = runs.slice().sort((left, right) => {
       return (priority[left.status] || 9) - (priority[right.status] || 9);
     })[0];
     if (!nextRun) {
@@ -1160,15 +1355,6 @@
       loadWorkflowLogs();
     });
 
-    $("#toggle_failed_runs").on("click", function () {
-      batchWorkspaceState.failedOnly = !batchWorkspaceState.failedOnly;
-      $(this)
-        .attr("aria-pressed", batchWorkspaceState.failedOnly ? "true" : "false")
-        .text(batchWorkspaceState.failedOnly ? "전체 탭 보기" : "실패 탭만 보기");
-      if (batchWorkspaceState.activeBatch) {
-        renderActiveBatch(batchWorkspaceState.activeBatch, { preserveSelection: true });
-      }
-    });
   });
   renderRunOverview = function (run, payload) {
     const latestEvent = typeof latestWorkflowEvent === "function" ? latestWorkflowEvent(run) : null;
@@ -1190,3 +1376,4 @@
     $("#batch_run_overview").html(cards);
   };
 })(jQuery);
+
