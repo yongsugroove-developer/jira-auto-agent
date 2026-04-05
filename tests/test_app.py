@@ -167,7 +167,8 @@ def test_index_page_renders_automation_fields() -> None:
     assert 'id="batch_run_sync_status_card"' in html
     assert 'id="submit_batch_run_answers"' in html
     assert 'src="/static/batch-workspace.js"' in html
-    assert 'id="work_status_hint"' not in html
+    assert 'id="work_status_hint"' in html
+    assert "현재 진행 중인 작업이 없습니다." in html
     assert "예) 승인 버튼 클릭 시 /api/approve를 호출하고, 기존 테이블 구조와 DOM id는 유지한다." in html
     assert "예) 승인 버튼 클릭 시 API가 1회 호출된다." in html
     assert 'class="repo-mapping-empty-state"' in html

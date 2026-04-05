@@ -804,6 +804,7 @@
     batchWorkspaceState.activeBatch = null;
     batchWorkspaceState.activeBatchId = null;
     batchWorkspaceState.activeDetailTab = DETAIL_TABS[0].id;
+    $("#work_status_hint").text("현재 진행 중인 작업이 없습니다.");
     $("#work_status_empty").prop("hidden", false);
     $("#work_status_content").prop("hidden", true);
     $("#batch_flow_panel").prop("hidden", true);
@@ -869,7 +870,7 @@
         const batches = data.batches || [];
         batchWorkspaceState.recentBatches = batches;
         if (!batches.length) {
-          $("#work_status_section").prop("hidden", true);
+          showWorkStatusSection("현재 진행 중인 작업이 없습니다.");
           clearActiveBatchView();
           return;
         }
@@ -1005,7 +1006,6 @@
 
     $("#workflow_clarification_panel").prop("hidden", true);
     $("#automation_result_section").prop("hidden", true);
-    $("#work_status_section").prop("hidden", true);
 
     renderSelectionSummary();
     setBatchPreviewEmpty("이슈를 선택하면 미리보기를 표시한다.");
