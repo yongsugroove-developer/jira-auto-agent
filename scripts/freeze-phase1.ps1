@@ -56,8 +56,8 @@ $pythonCmd = if (Test-Path $VenvPython) { $VenvPython } else { (Get-Command pyth
 & $pythonCmd -m pytest -q
 
 Write-Step "Checking existing tag"
-& $GitCmd rev-parse --verify "refs/tags/$TagName" *> $null
-if ($LASTEXITCODE -eq 0) {
+$existingTag = (& $GitCmd tag --list $TagName | Out-String).Trim()
+if ($existingTag) {
     throw "Tag already exists: $TagName"
 }
 
