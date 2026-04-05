@@ -1048,6 +1048,49 @@ def _workflow_batch_run_ref(run: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _workflow_log_sort_timestamp(run: dict[str, Any]) -> str:
+    for field_name in ("updated_at", "finished_at", "started_at", "created_at"):
+        value = str(run.get(field_name, "")).strip()
+        if value:
+            return value
+    return ""
+
+
+def _workflow_log_ref(run: dict[str, Any]) -> dict[str, Any]:
+    request_payload = run.get("request_payload") if isinstance(run.get("request_payload"), dict) else {}
+    result_payload = run.get("result") if isinstance(run.get("result"), dict) else {}
+    latest_event = None
+    events = run.get("events")
+    if isinstance(events, list):
+        for event in reversed(events):
+            if isinstance(event, dict):
+                latest_event = event
+                break
+    return {
+        "run_id": str(run.get("run_id", "")).strip(),
+        "batch_id": str(run.get("batch_id", "")).strip(),
+        "issue_key": str(run.get("issue_key", "")).strip(),
+        "issue_summary": str(run.get("issue_summary", "")).strip(),
+        "resolved_space_key": str(run.get("resolved_space_key", "")).strip(),
+        "resolved_repo_provider": str(run.get("resolved_repo_provider", "")).strip(),
+        "resolved_repo_ref": str(run.get("resolved_repo_ref", "")).strip(),
+        "resolved_base_branch": str(run.get("resolved_base_branch", "")).strip(),
+        "local_repo_path": str(run.get("local_repo_path", "")).strip(),
+        "branch_name": str(request_payload.get("branch_name", "")).strip(),
+        "commit_message": str(request_payload.get("commit_message", "")).strip(),
+        "status": str(run.get("status", "")).strip(),
+        "message": str(run.get("message", "")).strip(),
+        "updated_at": str(run.get("updated_at", "")).strip(),
+        "finished_at": str(run.get("finished_at", "")).strip(),
+        "created_at": str(run.get("created_at", "")).strip(),
+        "latest_phase": str((latest_event or {}).get("phase", "")).strip(),
+        "latest_phase_message": str((latest_event or {}).get("message", "")).strip(),
+        "intent_summary": str(result_payload.get("model_intent", "")).strip(),
+        "implementation_summary": str(result_payload.get("implementation_summary", "")).strip(),
+        "validation_summary": str(result_payload.get("validation_summary", "")).strip(),
+    }
+
+
 def _workflow_batch_snapshot(batch: dict[str, Any]) -> dict[str, Any]:
     return {
         "batch_id": batch["batch_id"],
@@ -1326,24 +1369,24 @@ def _finish_workflow_run(run: dict[str, Any], status: str, message: str, *, resu
     run["events"].append({"timestamp": run["finished_at"], "phase": status, "message": message})
 
 
-def _safe_ensure_project_memory(repo_path: Path) -> None:
+def _safe_ensure_project_memory(repo_path: Path, *, space_key: str = "") -> None:
     try:
-        ensure_project_memory(repo_path, app_data_dir=DATA_DIR)
+        ensure_project_memory(repo_path, app_data_dir=DATA_DIR, space_key=space_key)
     except Exception:
         LOGGER.exception("Failed to ensure project memory: repo=%s", repo_path)
 
 
-def _safe_build_project_memory_block(repo_path: Path, *, max_history: int = 5) -> str:
+def _safe_build_project_memory_block(repo_path: Path, *, max_history: int = 5, space_key: str = "") -> str:
     try:
-        return build_project_memory_block(repo_path, max_history=max_history, app_data_dir=DATA_DIR)
+        return build_project_memory_block(repo_path, max_history=max_history, app_data_dir=DATA_DIR, space_key=space_key)
     except Exception:
         LOGGER.exception("Failed to build project memory block: repo=%s", repo_path)
         return ""
 
 
-def _safe_record_project_history(repo_path: Path, workflow_run: dict[str, Any]) -> None:
+def _safe_record_project_history(repo_path: Path, workflow_run: dict[str, Any], *, space_key: str = "") -> None:
     try:
-        record_project_history(repo_path, workflow_run, app_data_dir=DATA_DIR)
+        record_project_history(repo_path, workflow_run, app_data_dir=DATA_DIR, space_key=space_key)
     except Exception:
         LOGGER.exception("Failed to record project history: repo=%s run_id=%s", repo_path, workflow_run.get("run_id", ""))
 
@@ -2989,7 +3032,11 @@ def _run_codex_command(
 
 
 def _build_codex_prompt(payload: dict[str, Any], repo_path: Path) -> str:
-    project_memory_block = _safe_build_project_memory_block(repo_path, max_history=5)
+    project_memory_block = _safe_build_project_memory_block(
+        repo_path,
+        max_history=5,
+        space_key=str(payload.get("resolved_space_key", "")).strip(),
+    )
     acceptance = str(payload.get("acceptance_criteria", "")).strip() or "별도 수용 기준 없음"
     checklist = str(payload.get("commit_checklist", "")).strip() or "별도 체크리스트 없음"
     issue_description = _prompt_text(payload.get("issue_description", ""), 6000) or "Jira 상세 설명 없음"
@@ -3049,7 +3096,11 @@ def _build_codex_prompt(payload: dict[str, Any], repo_path: Path) -> str:
 
 
 def _build_codex_clarification_prompt(payload: dict[str, Any], repo_path: Path) -> str:
-    project_memory_block = _safe_build_project_memory_block(repo_path, max_history=5)
+    project_memory_block = _safe_build_project_memory_block(
+        repo_path,
+        max_history=5,
+        space_key=str(payload.get("resolved_space_key", "")).strip(),
+    )
     acceptance = str(payload.get("acceptance_criteria", "")).strip() or "No explicit acceptance criteria provided."
     checklist = str(payload.get("commit_checklist", "")).strip() or "No explicit commit checklist provided."
     issue_description = _prompt_text(payload.get("issue_description", ""), 6000) or "No Jira issue description provided."
@@ -3690,7 +3741,7 @@ def _batch_issue_workflow_payload(
 
 
 def _execute_coding_workflow(repo_path: Path, scm_config: ScmRepoConfig, payload: dict[str, Any], reporter: Any = None) -> dict[str, Any]:
-    _safe_ensure_project_memory(repo_path)
+    _safe_ensure_project_memory(repo_path, space_key=str(payload.get("resolved_space_key", "")).strip())
     dirty_entries = _repo_dirty_entries(repo_path)
     if dirty_entries:
         return {
@@ -3920,6 +3971,18 @@ def create_app() -> Flask:
             batch_files = batch_files[:limit]
         return [item.stem for item in batch_files]
 
+    def _load_run_file_ids(limit: int | None = None) -> list[str]:
+        if not WORKFLOW_RUNS_DIR.exists():
+            return []
+        run_files = sorted(
+            WORKFLOW_RUNS_DIR.glob("*.json"),
+            key=lambda item: item.stat().st_mtime,
+            reverse=True,
+        )
+        if limit is not None:
+            run_files = run_files[:limit]
+        return [item.stem for item in run_files]
+
     def _ensure_batch_loaded(batch_id: str) -> dict[str, Any] | None:
         with workflow_batches_lock:
             batch = workflow_batches.get(batch_id)
@@ -4086,6 +4149,24 @@ def create_app() -> Flask:
         results.sort(key=lambda item: str(item.get("updated_at", "")), reverse=True)
         return results[:limit]
 
+    def list_workflow_logs(limit: int = 50) -> list[dict[str, Any]]:
+        results: list[dict[str, Any]] = []
+        seen_ids: set[str] = set()
+        with workflow_runs_lock:
+            loaded_run_ids = list(workflow_runs.keys())
+        candidate_ids = [*loaded_run_ids, *_load_run_file_ids(limit=limit * 4)]
+        for run_id in candidate_ids:
+            run_id = str(run_id).strip()
+            if not run_id or run_id in seen_ids:
+                continue
+            seen_ids.add(run_id)
+            run_snapshot = get_run(run_id)
+            if run_snapshot is None:
+                continue
+            results.append(_workflow_log_ref(run_snapshot))
+        results.sort(key=lambda item: _workflow_log_sort_timestamp(item), reverse=True)
+        return results[:limit]
+
     def _update_pending_queue_positions(queue_key: str) -> None:
         pending_jobs = workflow_queue_pending.get(queue_key, [])
         for index, pending_job in enumerate(pending_jobs, start=1):
@@ -4197,7 +4278,11 @@ def create_app() -> Flask:
                 )
             final_run = get_run(run_id)
             if final_run is not None:
-                _safe_record_project_history(repo_path, final_run)
+                _safe_record_project_history(
+                    repo_path,
+                    final_run,
+                    space_key=str(final_run.get("resolved_space_key", "")).strip(),
+                )
             _finish_queue_job(queue_key)
 
         thread = threading.Thread(target=worker, name=f"workflow-run-{run_id}", daemon=True)
@@ -4241,7 +4326,7 @@ def create_app() -> Flask:
                     "requested_information": _build_requested_information(["local_repo_path"]),
                 }
 
-            _safe_ensure_project_memory(repo_path)
+            _safe_ensure_project_memory(repo_path, space_key=resolved_space_key)
             issue_detail = _safe_fetch_issue_detail(jira_payload, issue_key, issue_summary)
             run_payload = _batch_issue_workflow_payload(common_payload, issue, issue_detail, resolved_space_key, scm_config)
             queue_key = _normalize_queue_key(repo_path)
@@ -4567,7 +4652,7 @@ def create_app() -> Flask:
             return jsonify({"error": str(exc), "fields": ["repo_mappings"]}), 400
 
         if local_repo_path.exists():
-            _safe_ensure_project_memory(local_repo_path)
+            _safe_ensure_project_memory(local_repo_path, space_key=resolved_space_key)
 
         repo_response, branch_response = _scm_repo_status(config)
         local_repo_exists = local_repo_path.exists() and (local_repo_path / ".git").exists()
@@ -4674,6 +4759,14 @@ def create_app() -> Flask:
         except (TypeError, ValueError):
             limit = MAX_RECENT_BATCHES
         return jsonify({"ok": True, "batches": list_batches(limit=limit)})
+
+    @app.get("/api/workflow/logs")
+    def list_workflow_logs_route() -> Any:
+        try:
+            limit = max(1, min(int(request.args.get("limit", 50)), 200))
+        except (TypeError, ValueError):
+            limit = 50
+        return jsonify({"ok": True, "logs": list_workflow_logs(limit=limit)})
 
     @app.get("/api/workflow/batch/<batch_id>")
     def get_workflow_batch(batch_id: str) -> Any:
@@ -5076,7 +5169,7 @@ def create_app() -> Flask:
                 400,
             )
 
-        _safe_ensure_project_memory(repo_path)
+        _safe_ensure_project_memory(repo_path, space_key=resolved_space_key)
 
         try:
             clarification = _run_codex_clarification(
@@ -5210,7 +5303,7 @@ def create_app() -> Flask:
                 ),
                 400,
             )
-        _safe_ensure_project_memory(repo_path)
+        _safe_ensure_project_memory(repo_path, space_key=resolved_space_key)
 
         identity, missing_identity = _resolve_commit_identity(repo_path, payload)
         if bool(payload.get("allow_auto_commit", True)) and missing_identity:

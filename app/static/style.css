@@ -664,6 +664,66 @@ tbody tr:hover {
   gap: var(--section-gap);
 }
 
+.workflow-log-shell {
+  display: grid;
+  gap: 16px;
+}
+
+.workflow-log-list {
+  display: grid;
+  gap: 12px;
+  max-height: 560px;
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.workflow-log-item {
+  display: grid;
+  gap: 12px;
+  padding: 16px;
+  border: 1px solid rgba(229, 229, 229, 0.96);
+  border-radius: 18px;
+  background: #ffffff;
+}
+
+.workflow-log-item__header,
+.workflow-log-item__meta,
+.workflow-log-item__summaries {
+  display: grid;
+  gap: 8px;
+}
+
+.workflow-log-item__headline {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px 10px;
+}
+
+.workflow-log-item__headline strong {
+  font-size: 15px;
+}
+
+.workflow-log-item__headline span,
+.workflow-log-item__meta,
+.workflow-log-item__message,
+.workflow-log-item__summary {
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.workflow-log-item__meta {
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+}
+
+.workflow-log-item__summary strong {
+  color: var(--text);
+  display: inline-block;
+  min-width: 72px;
+  margin-right: 8px;
+}
+
 .work-status-empty {
   min-height: 220px;
   align-content: start;

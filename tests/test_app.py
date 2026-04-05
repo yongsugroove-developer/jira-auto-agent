@@ -145,6 +145,8 @@ def test_index_page_renders_automation_fields() -> None:
     assert 'data-config-flow-step="repo"' in html
     assert 'data-config-panel="jira"' in html
     assert 'data-config-panel="repo"' in html
+    assert 'id="workflow_log_section"' in html
+    assert 'id="workflow_log_list"' in html
     assert 'id="github_owner"' not in html
     assert 'id="github_repo"' not in html
     assert 'id="github_base_branch"' not in html
@@ -416,7 +418,7 @@ def test_run_workflow_rejects_invalid_reasoning_effort() -> None:
 
 
 def test_build_codex_prompt_includes_jira_issue_details(monkeypatch) -> None:
-    monkeypatch.setattr(main_module, "_safe_build_project_memory_block", lambda repo_path, max_history=5: "cached project memory")
+    monkeypatch.setattr(main_module, "_safe_build_project_memory_block", lambda repo_path, max_history=5, space_key="": "cached project memory")
     prompt = main_module._build_codex_prompt(
         {
             "issue_key": "DEMO-11",
@@ -444,7 +446,7 @@ def test_build_codex_prompt_includes_jira_issue_details(monkeypatch) -> None:
 
 
 def test_build_codex_prompt_includes_clarification_answers(monkeypatch) -> None:
-    monkeypatch.setattr(main_module, "_safe_build_project_memory_block", lambda repo_path, max_history=5: "cached project memory")
+    monkeypatch.setattr(main_module, "_safe_build_project_memory_block", lambda repo_path, max_history=5, space_key="": "cached project memory")
     prompt = main_module._build_codex_prompt(
         {
             "issue_key": "DEMO-12",
@@ -464,6 +466,32 @@ def test_build_codex_prompt_includes_clarification_answers(monkeypatch) -> None:
     assert "Clarification answers from the user:" in prompt
     assert "- api_contract_rule: 기존 응답 필드를 유지한다." in prompt
     assert "- deploy_scope: 백엔드만 수정한다." in prompt
+
+
+def test_build_codex_prompt_uses_resolved_space_key_for_project_memory(monkeypatch) -> None:
+    captured = {}
+
+    def fake_build_project_memory(repo_path, max_history=5, space_key=""):  # noqa: ANN001
+        captured["repo_path"] = repo_path
+        captured["max_history"] = max_history
+        captured["space_key"] = space_key
+        return "space scoped memory"
+
+    monkeypatch.setattr(main_module, "_safe_build_project_memory_block", fake_build_project_memory)
+    prompt = main_module._build_codex_prompt(
+        {
+            "issue_key": "DEMO-12",
+            "issue_summary": "clarification",
+            "branch_name": "feature/DEMO-12-clarification",
+            "commit_message": "DEMO-12: clarification",
+            "work_instruction": "project memory",
+            "resolved_space_key": "DEMO",
+        },
+        main_module.BASE_DIR,
+    )
+
+    assert captured["space_key"] == "DEMO"
+    assert "space scoped memory" in prompt
 
 
 def test_jira_comment_browser_url_points_to_issue_comment() -> None:
@@ -551,7 +579,7 @@ def test_clarify_workflow_returns_requested_information(monkeypatch, tmp_path) -
         return None
 
     monkeypatch.setattr(main_module.CredentialStore, "load", fake_load)
-    monkeypatch.setattr(main_module, "_safe_ensure_project_memory", lambda repo_path: None)
+    monkeypatch.setattr(main_module, "_safe_ensure_project_memory", lambda repo_path, space_key="": None)
     def fake_run_codex_clarification(repo_path, payload):  # noqa: ANN001
         captured_payload.update(payload)
         return {
@@ -1343,7 +1371,7 @@ def test_run_workflow_passes_normalized_clarification_answers(monkeypatch) -> No
             return False
 
     monkeypatch.setattr(main_module.CredentialStore, "load", fake_load)
-    monkeypatch.setattr(main_module, "_safe_ensure_project_memory", lambda repo_path: None)
+    monkeypatch.setattr(main_module, "_safe_ensure_project_memory", lambda repo_path, space_key="": None)
     monkeypatch.setattr(main_module, "_find_codex_launcher", lambda: ["codex"])
     monkeypatch.setattr(main_module, "_resolve_commit_identity", lambda repo_path, payload: ({"name": "Codex Bot", "email": "codex@example.com"}, []))
     monkeypatch.setattr(main_module, "_execute_coding_workflow", fake_execute)
@@ -1828,8 +1856,8 @@ def test_run_workflow_batch_returns_batch_with_runs(monkeypatch, tmp_path) -> No
     (repo_path / ".git").mkdir()
     monkeypatch.setattr(main_module, "WORKFLOW_RUNS_DIR", tmp_path / "workflow-runs")
     monkeypatch.setattr(main_module, "WORKFLOW_BATCHES_DIR", tmp_path / "workflow-batches")
-    monkeypatch.setattr(main_module, "_safe_ensure_project_memory", lambda repo_path: None)
-    monkeypatch.setattr(main_module, "_safe_record_project_history", lambda repo_path, workflow_run: None)
+    monkeypatch.setattr(main_module, "_safe_ensure_project_memory", lambda repo_path, space_key="": None)
+    monkeypatch.setattr(main_module, "_safe_record_project_history", lambda repo_path, workflow_run, space_key="": None)
 
     def fake_load(self, provider: str):  # noqa: ANN001
         if provider == "github":
@@ -2007,8 +2035,8 @@ def test_answer_workflow_batch_run_requeues_and_completes(monkeypatch, tmp_path)
     (repo_path / ".git").mkdir()
     monkeypatch.setattr(main_module, "WORKFLOW_RUNS_DIR", tmp_path / "workflow-runs")
     monkeypatch.setattr(main_module, "WORKFLOW_BATCHES_DIR", tmp_path / "workflow-batches")
-    monkeypatch.setattr(main_module, "_safe_ensure_project_memory", lambda repo_path: None)
-    monkeypatch.setattr(main_module, "_safe_record_project_history", lambda repo_path, workflow_run: None)
+    monkeypatch.setattr(main_module, "_safe_ensure_project_memory", lambda repo_path, space_key="": None)
+    monkeypatch.setattr(main_module, "_safe_record_project_history", lambda repo_path, workflow_run, space_key="": None)
 
     clarification_calls: list[dict[str, object]] = []
 
@@ -2123,8 +2151,8 @@ def test_workflow_batch_persists_across_app_recreation(monkeypatch, tmp_path) ->
     (repo_path / ".git").mkdir()
     monkeypatch.setattr(main_module, "WORKFLOW_RUNS_DIR", tmp_path / "workflow-runs")
     monkeypatch.setattr(main_module, "WORKFLOW_BATCHES_DIR", tmp_path / "workflow-batches")
-    monkeypatch.setattr(main_module, "_safe_ensure_project_memory", lambda repo_path: None)
-    monkeypatch.setattr(main_module, "_safe_record_project_history", lambda repo_path, workflow_run: None)
+    monkeypatch.setattr(main_module, "_safe_ensure_project_memory", lambda repo_path, space_key="": None)
+    monkeypatch.setattr(main_module, "_safe_record_project_history", lambda repo_path, workflow_run, space_key="": None)
 
     def fake_load(self, provider: str):  # noqa: ANN001
         if provider == "github":
@@ -2264,14 +2292,72 @@ def test_list_workflow_batches_is_safe_under_concurrent_polling(monkeypatch, tmp
     assert all(payload and payload["ok"] is True for _, payload in responses)
 
 
+def test_list_workflow_logs_returns_recent_run_summaries(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(main_module, "WORKFLOW_RUNS_DIR", tmp_path / "workflow-runs")
+    run_dir = tmp_path / "workflow-runs"
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    first = {
+        "run_id": "run-1",
+        "batch_id": "batch-1",
+        "issue_key": "DEMO-1",
+        "issue_summary": "older run",
+        "resolved_space_key": "DEMO",
+        "resolved_repo_provider": "github",
+        "resolved_repo_ref": "demo/repo",
+        "status": "completed",
+        "message": "older",
+        "created_at": "2026-04-01T01:00:00+00:00",
+        "updated_at": "2026-04-01T01:30:00+00:00",
+        "request_payload": {"branch_name": "feature/DEMO-1", "commit_message": "DEMO-1: older"},
+        "result": {"model_intent": "older intent", "implementation_summary": "older implementation", "validation_summary": "older validation"},
+        "events": [{"timestamp": "2026-04-01T01:30:00+00:00", "phase": "completed", "message": "older"}],
+        "error": None,
+    }
+    second = {
+        "run_id": "run-2",
+        "batch_id": "batch-2",
+        "issue_key": "DEMO-2",
+        "issue_summary": "newer run",
+        "resolved_space_key": "SPACE2",
+        "resolved_repo_provider": "gitlab",
+        "resolved_repo_ref": "group/repo",
+        "status": "failed",
+        "message": "newer",
+        "created_at": "2026-04-02T01:00:00+00:00",
+        "updated_at": "2026-04-02T01:30:00+00:00",
+        "request_payload": {"branch_name": "feature/DEMO-2", "commit_message": "DEMO-2: newer"},
+        "result": {"model_intent": "newer intent", "implementation_summary": "newer implementation", "validation_summary": "newer validation"},
+        "events": [{"timestamp": "2026-04-02T01:30:00+00:00", "phase": "failed", "message": "newer"}],
+        "error": None,
+    }
+
+    (run_dir / "run-1.json").write_text(json.dumps(first), encoding="utf-8")
+    (run_dir / "run-2.json").write_text(json.dumps(second), encoding="utf-8")
+
+    app = create_app()
+    client = app.test_client()
+    response = client.get("/api/workflow/logs?limit=2")
+
+    assert response.status_code == 200
+    data = response.get_json()
+    assert data is not None
+    assert data["ok"] is True
+    assert len(data["logs"]) == 2
+    assert data["logs"][0]["run_id"] == "run-2"
+    assert data["logs"][0]["resolved_space_key"] == "SPACE2"
+    assert data["logs"][0]["branch_name"] == "feature/DEMO-2"
+    assert data["logs"][1]["run_id"] == "run-1"
+
+
 def test_batch_queue_serializes_same_repo_path(monkeypatch, tmp_path) -> None:
     repo_path = tmp_path / "repo"
     repo_path.mkdir()
     (repo_path / ".git").mkdir()
     monkeypatch.setattr(main_module, "WORKFLOW_RUNS_DIR", tmp_path / "workflow-runs")
     monkeypatch.setattr(main_module, "WORKFLOW_BATCHES_DIR", tmp_path / "workflow-batches")
-    monkeypatch.setattr(main_module, "_safe_ensure_project_memory", lambda repo_path: None)
-    monkeypatch.setattr(main_module, "_safe_record_project_history", lambda repo_path, workflow_run: None)
+    monkeypatch.setattr(main_module, "_safe_ensure_project_memory", lambda repo_path, space_key="": None)
+    monkeypatch.setattr(main_module, "_safe_record_project_history", lambda repo_path, workflow_run, space_key="": None)
 
     active = {"count": 0, "max": 0}
     active_lock = threading.Lock()
@@ -2345,8 +2431,8 @@ def test_batch_queue_runs_different_repo_paths_in_parallel(monkeypatch, tmp_path
     (repo_two / ".git").mkdir()
     monkeypatch.setattr(main_module, "WORKFLOW_RUNS_DIR", tmp_path / "workflow-runs")
     monkeypatch.setattr(main_module, "WORKFLOW_BATCHES_DIR", tmp_path / "workflow-batches")
-    monkeypatch.setattr(main_module, "_safe_ensure_project_memory", lambda repo_path: None)
-    monkeypatch.setattr(main_module, "_safe_record_project_history", lambda repo_path, workflow_run: None)
+    monkeypatch.setattr(main_module, "_safe_ensure_project_memory", lambda repo_path, space_key="": None)
+    monkeypatch.setattr(main_module, "_safe_record_project_history", lambda repo_path, workflow_run, space_key="": None)
 
     active = {"count": 0, "max": 0}
     active_lock = threading.Lock()

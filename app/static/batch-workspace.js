@@ -265,6 +265,64 @@
     return `<span class="status-badge is-${escapeHtml(normalized)}">${escapeHtml(labels[normalized] || normalized)}</span>`;
   }
 
+  function workflowLogSummary(label, value) {
+    const text = String(value || "").trim();
+    if (!text) {
+      return "";
+    }
+    return `<p class="workflow-log-item__summary"><strong>${escapeHtml(label)}</strong>${escapeHtml(text)}</p>`;
+  }
+
+  function renderWorkflowLogs(data) {
+    const logs = (data && data.logs) || [];
+    $("#workflow_log_section").prop("hidden", false);
+    $("#workflow_log_caption").text(logs.length ? `최근 처리된 작업 ${logs.length}건 요약` : "저장된 작업 로그가 없다.");
+    if (!logs.length) {
+      $("#workflow_log_list").html('<p class="batch-list__empty">저장된 작업 로그가 없다.</p>');
+      return;
+    }
+
+    const cards = logs.map((item) => `
+      <article class="workflow-log-item">
+        <div class="workflow-log-item__header">
+          <div class="workflow-log-item__headline">
+            <strong>${escapeHtml(item.issue_key || "-")}</strong>
+            <span>${escapeHtml(item.issue_summary || "제목 없음")}</span>
+          </div>
+          <div class="batch-list-item__pills">
+            ${statusBadge(item.status)}
+          </div>
+        </div>
+        <div class="workflow-log-item__meta">
+          <div>공간 ${escapeHtml(item.resolved_space_key || "-")}</div>
+          <div>저장소 ${escapeHtml(item.resolved_repo_ref || "-")}</div>
+          <div>브랜치 ${escapeHtml(item.branch_name || "-")}</div>
+          <div>업데이트 ${escapeHtml(formatTimestamp(item.updated_at || item.finished_at || item.created_at))}</div>
+        </div>
+        <p class="workflow-log-item__message">${escapeHtml(item.message || item.latest_phase_message || "-")}</p>
+        <div class="workflow-log-item__summaries">
+          ${workflowLogSummary("의도", item.intent_summary)}
+          ${workflowLogSummary("구현", item.implementation_summary)}
+          ${workflowLogSummary("검증", item.validation_summary)}
+        </div>
+      </article>
+    `).join("");
+    $("#workflow_log_list").html(cards);
+  }
+
+  function loadWorkflowLogs() {
+    $.getJSON("/api/workflow/logs?limit=40")
+      .done((data) => {
+        renderWorkflowLogs(data);
+      })
+      .fail((xhr) => {
+        $("#workflow_log_section").prop("hidden", false);
+        $("#workflow_log_caption").text("작업 로그를 불러오지 못했다.");
+        $("#workflow_log_list").html('<p class="batch-list__empty">작업 로그를 불러오지 못했다.</p>');
+        setResult("#workflow_result", xhr.responseJSON || { ok: false, error: xhr.responseText });
+      });
+  }
+
   function queueMetaBadge(run) {
     const state = String(run.queue_state || "").trim();
     if (!state || state === "idle") {
@@ -866,6 +924,7 @@
   function loadRecentBatches(preferredBatchId, preserveSelection) {
     $.getJSON("/api/workflow/batches?limit=12")
       .done((data) => {
+        loadWorkflowLogs();
         const batches = data.batches || [];
         batchWorkspaceState.recentBatches = batches;
         if (!batches.length) {
@@ -1006,9 +1065,11 @@
     $("#workflow_clarification_panel").prop("hidden", true);
     $("#automation_result_section").prop("hidden", true);
     $("#work_status_section").prop("hidden", true);
+    $("#workflow_log_section").prop("hidden", true);
 
     renderSelectionSummary();
     setBatchPreviewEmpty("이슈를 선택하면 미리보기를 표시한다.");
+    loadWorkflowLogs();
     loadRecentBatches("", true);
 
     $(document).on("change", "input[name='selected_issues']", function () {
@@ -1093,6 +1154,10 @@
 
     $("#focus_running_run").on("click", function () {
       focusPriorityRun();
+    });
+
+    $("#refresh_workflow_logs").on("click", function () {
+      loadWorkflowLogs();
     });
 
     $("#toggle_failed_runs").on("click", function () {
