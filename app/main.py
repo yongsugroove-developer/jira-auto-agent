@@ -4049,6 +4049,7 @@ def _run_claude_edit(repo_path: Path, payload: dict[str, Any], reporter: Any = N
         *launcher,
         "-p",
         prompt,
+        "--verbose",
         "--output-format",
         "stream-json",
         "--permission-mode",

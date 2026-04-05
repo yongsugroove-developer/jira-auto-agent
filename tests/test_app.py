@@ -435,6 +435,7 @@ def test_run_claude_edit_uses_subprocess_cwd_only(monkeypatch, tmp_path) -> None
     assert result["returncode"] == 0
     assert captured["cwd"] == repo_path
     assert "--cwd" not in captured["command"]
+    assert "--verbose" in captured["command"]
 
 
 def test_parse_claude_json_message_uses_structured_output() -> None:
