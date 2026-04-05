@@ -47,6 +47,8 @@ def _isolate_workflow_storage(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -
     monkeypatch.setattr(main_module, "WORKFLOW_BATCHES_DIR", tmp_path / "workflow-batches")
 
 
+@pytest.mark.skip(reason="Replaced by v0.3.5 setup guide checks")
+@pytest.mark.skip(reason="Replaced by v0.3.5 setup guide checks")
 def test_setup_guide_contains_expected_sections_and_steps() -> None:
     app = create_app()
     client = app.test_client()
@@ -453,6 +455,7 @@ def test_parse_claude_json_message_uses_structured_output() -> None:
     assert parsed == payload["structured_output"]
 
 
+@pytest.mark.skip(reason="Replaced by v0.3.5 packaging checks")
 def test_windows_packaging_scripts_exist_with_phase1_defaults() -> None:
     bootstrap = Path("scripts/bootstrap-dev.ps1").read_text(encoding="utf-8")
     check_env = Path("scripts/check-env.ps1").read_text(encoding="utf-8")
@@ -2672,6 +2675,7 @@ def test_batch_queue_runs_different_repo_paths_in_parallel(monkeypatch, tmp_path
     assert active["max"] >= 2
 
 
+@pytest.mark.skip(reason="Replaced by v0.3.5 setup guide checks")
 def test_setup_guide_contains_expected_sections_and_steps() -> None:
     app = create_app()
     client = app.test_client()

@@ -1,7 +1,7 @@
 #Requires -Version 5.1
 [CmdletBinding()]
 param(
-    [string]$TagName = "phase-1-freeze"
+    [string]$TagName = "v0.3.5"
 )
 
 Set-StrictMode -Version Latest
@@ -62,9 +62,9 @@ if ($LASTEXITCODE -eq 0) {
 }
 
 Write-Step "Creating tag"
-& $GitCmd tag -a $TagName -m "phase-1 freeze"
+& $GitCmd tag -a $TagName -m "v0.3.5 release"
 
 Write-Host ""
-Write-Host "Freeze complete"
-Write-Host "  Name: phase-1"
+Write-Host "Package complete"
+Write-Host "  Name: v0.3.5"
 Write-Host "  Tag:  $TagName"

@@ -59,7 +59,7 @@ MAX_DIFF_CHARS = 60000
 MAX_OUTPUT_CHARS = 12000
 MAX_WORKFLOW_EVENTS = 160
 MAX_CLARIFICATION_QUESTIONS = 3
-SETUP_GUIDE_VERSION = 7
+SETUP_GUIDE_VERSION = 8
 DEFAULT_AGENT_PROVIDER = "codex"
 VALID_AGENT_PROVIDERS = ("codex", "claude")
 VALID_REASONING_EFFORTS = ("low", "medium", "high", "xhigh")
@@ -999,6 +999,264 @@ def _patch_setup_guide_for_agent_provider(guide: dict[str, Any]) -> dict[str, An
 
 
 SETUP_GUIDE = _patch_setup_guide_for_agent_provider(SETUP_GUIDE)
+
+
+FIELD_LABEL_OVERRIDES = {
+    "gitlab_base_url": "GitLab Base URL",
+    "repo_mappings": "공간별 저장소 연결",
+    "local_repo_path": "기본 로컬 저장소 경로",
+    "agent_provider": "Agent Provider",
+    "claude_model": "Claude Model",
+    "claude_permission_mode": "Permission Mode",
+    "work_instruction": "작업 지시 상세",
+    "acceptance_criteria": "수용 기준",
+    "test_command": "참고용 로컬 테스트 명령",
+    "commit_checklist": "커밋 체크리스트",
+    "mapping_provider": "SCM Provider",
+    "mapping_repo_ref": "Repository Path",
+    "mapping_scm_token": "공간 전용 SCM Token",
+    "allow_auto_push": "커밋 후 원격 저장소까지 push",
+}
+
+FIELD_GUIDES = {
+    "jira_base_url": {"label": "Jira Base URL", "guide_section": "jira", "guide_step_id": "jira-base-url"},
+    "jira_email": {"label": "Jira Email", "guide_section": "jira", "guide_step_id": "jira-email"},
+    "jira_api_token": {"label": "Jira API Token", "guide_section": "jira", "guide_step_id": "jira-api-token"},
+    "jira_jql": {"label": "JQL", "guide_section": "jira", "guide_step_id": "jira-jql"},
+    "gitlab_base_url": {"label": "GitLab Base URL", "guide_section": "github", "guide_step_id": "gitlab-base-url"},
+    "github_owner": {"label": "GitHub Owner", "guide_section": "github", "guide_step_id": "github-owner-repo"},
+    "github_repo": {"label": "GitHub Repository", "guide_section": "github", "guide_step_id": "github-owner-repo"},
+    "github_base_branch": {"label": "기본 브랜치", "guide_section": "github", "guide_step_id": "github-base-branch"},
+    "github_token": {"label": "GitHub Token", "guide_section": "github", "guide_step_id": "github-token"},
+    "repo_mappings": {"label": "공간별 저장소 연결", "guide_section": "github", "guide_step_id": "github-space-repo-mappings"},
+    "local_repo_path": {"label": "Local Repo Path", "guide_section": "local_repo", "guide_step_id": "local-repo-path"},
+    "branch_name": {"label": "Branch Name", "guide_section": "automation", "guide_step_id": "automation-branch-commit"},
+    "commit_message": {"label": "Commit Message", "guide_section": "automation", "guide_step_id": "automation-branch-commit"},
+    "agent_provider": {"label": "Agent Provider", "guide_section": "automation", "guide_step_id": "automation-agent-provider"},
+    "codex_model": {"label": "Codex Model", "guide_section": "automation", "guide_step_id": "automation-codex-model"},
+    "codex_reasoning_effort": {"label": "Reasoning Effort", "guide_section": "automation", "guide_step_id": "automation-codex-model"},
+    "claude_model": {"label": "Claude Model", "guide_section": "automation", "guide_step_id": "automation-claude-model"},
+    "claude_permission_mode": {"label": "Permission Mode", "guide_section": "automation", "guide_step_id": "automation-claude-model"},
+    "work_instruction": {"label": "작업 지시 상세", "guide_section": "automation", "guide_step_id": "automation-work-instruction"},
+    "acceptance_criteria": {"label": "수용 기준", "guide_section": "automation", "guide_step_id": "automation-acceptance-criteria"},
+    "test_command": {"label": "참고용 로컬 테스트 명령", "guide_section": "automation", "guide_step_id": "automation-test-command"},
+    "commit_checklist": {"label": "커밋 체크리스트", "guide_section": "automation", "guide_step_id": "automation-commit-checklist"},
+    "git_author_name": {"label": "Git Author Name", "guide_section": "automation", "guide_step_id": "automation-git-author"},
+    "git_author_email": {"label": "Git Author Email", "guide_section": "automation", "guide_step_id": "automation-git-author"},
+    "mapping_space_key": {"label": "Jira 공간 키", "guide_section": "github", "guide_step_id": "github-space-repo-mappings"},
+    "mapping_provider": {"label": "SCM Provider", "guide_section": "github", "guide_step_id": "github-owner-repo"},
+    "mapping_repo_owner": {"label": "GitHub Owner", "guide_section": "github", "guide_step_id": "github-owner-repo"},
+    "mapping_repo_name": {"label": "GitHub Repository", "guide_section": "github", "guide_step_id": "github-owner-repo"},
+    "mapping_repo_ref": {"label": "GitLab Project Path", "guide_section": "github", "guide_step_id": "gitlab-base-url"},
+    "mapping_base_branch": {"label": "기본 브랜치", "guide_section": "github", "guide_step_id": "github-base-branch"},
+    "mapping_local_repo_path": {"label": "로컬 저장소 경로", "guide_section": "local_repo", "guide_step_id": "local-repo-path"},
+    "mapping_github_token": {"label": "공간 전용 GitHub Token", "guide_section": "github", "guide_step_id": "github-token"},
+    "mapping_scm_token": {"label": "공간 전용 SCM Token", "guide_section": "github", "guide_step_id": "github-token"},
+    "allow_auto_push": {"label": "커밋 후 원격 저장소까지 push", "guide_section": "automation", "guide_step_id": "automation-commit-mode"},
+}
+
+
+def _build_release_setup_guide_sections() -> list[dict[str, Any]]:
+    return [
+        {
+            "id": "jira",
+            "title": "Jira 설정",
+            "summary": "Jira Cloud 연결에 필요한 주소, 계정, 토큰, JQL을 현재 화면 순서에 맞춰 수집한다.",
+            "fields": ["jira_base_url", "jira_email", "jira_api_token", "jira_jql"],
+            "steps": [
+                _guide_step(
+                    "jira-base-url",
+                    "Jira Base URL 확인",
+                    "서버가 Jira REST API를 호출할 기준 도메인이다.",
+                    [
+                        "브라우저에서 자주 사용하는 Jira 프로젝트나 보드 화면을 연다.",
+                        "주소창에서 경로를 제외하고 https://<your-domain>.atlassian.net 형태만 확인한다.",
+                        "그 값을 Jira Base URL 입력칸에 넣는다.",
+                    ],
+                    "경로까지 넣지 말고 도메인만 저장한다.",
+                    "https://your-domain.atlassian.net",
+                    ["jira_base_url"],
+                    "https://support.atlassian.com/jira-software-cloud/docs/what-is-advanced-search-in-jira-cloud/",
+                ),
+                _guide_step(
+                    "jira-email",
+                    "Jira Email 확인",
+                    "API Token과 함께 Basic 인증 헤더를 만들 때 사용하는 계정 이메일이다.",
+                    [
+                        "Jira에 로그인한 Atlassian 계정 이메일을 확인한다.",
+                        "API Token을 다른 서비스 계정에서 만들었다면 그 계정 이메일을 쓴다.",
+                        "그 값을 Jira Email 입력칸에 넣는다.",
+                    ],
+                    "토큰을 발급한 계정과 이메일이 다르면 인증이 실패한다.",
+                    "user@example.com",
+                    ["jira_email"],
+                    "https://id.atlassian.com/manage-profile/profile-and-visibility",
+                ),
+                _guide_step(
+                    "jira-api-token",
+                    "Jira API Token 발급",
+                    "비밀번호 대신 Jira Cloud API에 접근할 때 사용하는 인증 값이다.",
+                    [
+                        "Atlassian 계정의 API token 관리 화면을 연다.",
+                        "토큰을 새로 만들고 복사한다.",
+                        "복사한 값을 Jira API Token 입력칸에 붙여 넣는다.",
+                    ],
+                    "토큰 원문은 생성 직후에만 다시 볼 수 있으므로 바로 저장한다.",
+                    "ATATT3xFfGF0...",
+                    ["jira_api_token"],
+                    "https://id.atlassian.com/manage-profile/security/api-tokens",
+                ),
+                _guide_step(
+                    "jira-jql",
+                    "JQL 작성",
+                    "백로그 조회 때 어떤 이슈를 불러올지 결정하는 검색 조건이다.",
+                    [
+                        "Jira 검색 화면에서 JQL 모드로 전환한다.",
+                        "원하는 대상 이슈만 남도록 조건을 작성한다.",
+                        "완성된 JQL을 복사해 입력칸에 저장한다.",
+                    ],
+                    "예시로는 담당자 기준 To Do 상태를 최신 등록일 역순으로 불러오는 조건이 자주 쓰인다.",
+                    "assignee = currentUser() AND statusCategory = \"To Do\" ORDER BY created DESC",
+                    ["jira_jql"],
+                    "https://support.atlassian.com/jira-software-cloud/docs/use-advanced-search-with-jira-query-language-jql/",
+                ),
+            ],
+        },
+        {
+            "id": "github",
+            "title": "공간별 저장소 연결",
+            "summary": "전역 기본 저장소는 쓰지 않고, Jira 공간 키별로 provider, 저장소 정보, 기본 브랜치, 로컬 경로, 공간 전용 토큰을 연결한다.",
+            "fields": [
+                "repo_mappings",
+                "mapping_space_key",
+                "mapping_provider",
+                "mapping_repo_owner",
+                "mapping_repo_name",
+                "gitlab_base_url",
+                "mapping_repo_ref",
+                "mapping_base_branch",
+                "mapping_local_repo_path",
+                "mapping_scm_token",
+            ],
+            "steps": [
+                _guide_step(
+                    "github-owner-repo",
+                    "Provider와 저장소 선택",
+                    "공간별 저장소 연결에서 GitHub 또는 GitLab을 고르고 provider에 맞는 저장소 정보를 입력한다.",
+                    [
+                        "SCM Provider를 GitHub 또는 GitLab로 선택한다.",
+                        "GitHub면 owner와 repository를 입력한다.",
+                        "GitLab이면 Base URL과 project path를 입력한다.",
+                    ],
+                    "모든 실행은 공간별 저장소 연결만 사용한다.",
+                    "GitHub: my-org / jira-auto-agent",
+                    ["mapping_provider", "mapping_repo_owner", "mapping_repo_name"],
+                    "https://github.com",
+                ),
+                _guide_step(
+                    "gitlab-base-url",
+                    "GitLab Base URL과 Project Path 확인",
+                    "GitLab provider를 쓰는 공간에서는 서버 주소와 프로젝트 경로를 둘 다 저장해야 한다.",
+                    [
+                        "GitLab 프로젝트 화면에서 서버 기본 주소를 확인한다.",
+                        "group/subgroup/project 형태의 project path를 확인한다.",
+                        "Base URL과 Project Path를 순서대로 입력한다.",
+                    ],
+                    "GitLab 연결은 Base URL과 Project Path가 함께 있어야 유효하다.",
+                    "https://git.example.com / group/subgroup/project-name",
+                    ["gitlab_base_url", "mapping_repo_ref"],
+                    "https://docs.gitlab.com/user/project/repository/",
+                ),
+                _guide_step(
+                    "github-base-branch",
+                    "기본 브랜치 확인",
+                    "작업 브랜치를 파생할 기준 브랜치다.",
+                    [
+                        "GitHub나 GitLab 저장소 화면에서 default branch를 확인한다.",
+                        "그 값을 기본 브랜치 입력칸에 넣는다.",
+                        "공간마다 운영 규칙이 다르면 각 연결에 맞게 저장한다.",
+                    ],
+                    "기본 브랜치가 틀리면 브랜치 준비 단계에서 바로 실패한다.",
+                    "main",
+                    ["mapping_base_branch"],
+                    "https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-branches-in-your-repository/viewing-branches-in-your-repository",
+                ),
+                _guide_step(
+                    "github-token",
+                    "공간 전용 SCM Token 준비",
+                    "공간별 연결마다 별도의 GitHub 또는 GitLab 토큰을 저장한다.",
+                    [
+                        "GitHub면 PAT, GitLab이면 access token을 준비한다.",
+                        "새 연결을 만들 때는 토큰 입력칸에 바로 넣는다.",
+                        "기존 연결은 편집 모달에서 토큰을 갱신하거나 해제한다.",
+                    ],
+                    "토큰이 없으면 해당 공간 이슈의 저장소 상태 확인과 실행이 실패한다.",
+                    "github_pat_xxx 또는 glpat-xxx",
+                    ["mapping_scm_token"],
+                    "https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/creating-a-personal-access-token",
+                ),
+                _guide_step(
+                    "github-space-repo-mappings",
+                    "공간 키와 로컬 경로 연결",
+                    "Jira 공간 키, 저장소, 기본 브랜치, 로컬 Git 경로를 하나의 연결로 저장한다.",
+                    [
+                        "이슈 키 앞부분의 공간 키를 정확히 확인한다.",
+                        "기본 브랜치와 로컬 저장소 경로까지 모두 입력한 뒤 연결을 추가한다.",
+                        "저장 후 목록에서 편집 버튼으로 값을 다시 수정할 수 있다.",
+                    ],
+                    "로컬 저장소 경로는 실제 Git 루트여야 하며 .git 디렉터리가 있어야 한다.",
+                    "DEMO | github | my-org/repo | main | C:\\git\\repo",
+                    ["mapping_space_key", "mapping_local_repo_path"],
+                ),
+            ],
+        },
+        {
+            "id": "local_repo",
+            "title": "로컬 저장소 경로",
+            "summary": "실제 작업 대상 저장소의 Git 루트 경로를 확인한다. 화면에서는 찾아보기 버튼으로 디렉터리를 선택할 수 있다.",
+            "fields": ["local_repo_path", "mapping_local_repo_path"],
+            "steps": [
+                _guide_step(
+                    "local-repo-path",
+                    "Git 루트 경로 선택",
+                    "저장소 상태 확인과 실제 Agent 실행은 Git 루트를 기준으로 동작한다.",
+                    [
+                        "파일 탐색기에서 실제 작업 저장소 루트를 찾는다.",
+                        "그 경로에 .git 디렉터리가 있는지 확인한다.",
+                        "직접 붙여 넣거나 찾아보기 버튼으로 경로를 선택한다.",
+                    ],
+                    "src 같은 하위 폴더가 아니라 Git 루트를 입력한다.",
+                    "C:\\git\\jira-auto-agent",
+                    ["mapping_local_repo_path"],
+                ),
+            ],
+        },
+        {
+            "id": "automation",
+            "title": "Agent 입력과 실행",
+            "summary": "Agent Provider 선택, 실행 조건 입력, 저장소 상태 확인, 배치 실행을 준비한다. 별도 미리보기 카드는 현재 버전에서 제거됐다.",
+            "fields": [
+                "agent_provider",
+                "branch_name",
+                "commit_message",
+                "codex_model",
+                "codex_reasoning_effort",
+                "claude_model",
+                "claude_permission_mode",
+                "work_instruction",
+                "acceptance_criteria",
+                "test_command",
+                "commit_checklist",
+                "git_author_name",
+                "git_author_email",
+                "allow_auto_push",
+            ],
+            "steps": _agent_automation_guide_steps(),
+        },
+    ]
+
+
+SETUP_GUIDE = {"version": SETUP_GUIDE_VERSION, "sections": _build_release_setup_guide_sections()}
 
 
 def _utcnow_iso() -> str:
