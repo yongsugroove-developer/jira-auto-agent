@@ -30,6 +30,7 @@ def test_setup_guide_v035_contains_current_sections_and_steps() -> None:
     assert "automation-agent-provider" in automation_steps
     assert "automation-codex-model" in automation_steps
     assert "automation-claude-model" in automation_steps
+    assert "automation-plan-review" in automation_steps
     assert "automation-test-command" in automation_steps
     assert "automation-git-author" in automation_steps
 
@@ -49,6 +50,7 @@ def test_setup_guide_v035_contains_current_sections_and_steps() -> None:
     provider_step = automation_steps["automation-agent-provider"]
     assert "Codex와 Claude Code" in provider_step["purpose"]
     assert provider_step["target_fields"] == ["agent_provider"]
+    assert automation_steps["automation-plan-review"]["target_fields"] == ["enable_plan_review"]
     assert automation_steps["automation-claude-model"]["target_fields"] == [
         "claude_model",
         "claude_permission_mode",

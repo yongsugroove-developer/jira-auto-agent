@@ -31,7 +31,7 @@
     { id: "done", label: "완료" },
   ];
 
-  const ACTIVE_RUN_STATUSES = ["queued", "running", "needs_input"];
+  const ACTIVE_RUN_STATUSES = ["queued", "running", "needs_input", "pending_plan_review"];
 
   function batchRunStorageKey(batchId) {
     return `jira-auto-agent.active-run.${String(batchId || "").trim()}`;
@@ -60,6 +60,14 @@
   function safeStorageSet(key, value) {
     try {
       window.localStorage.setItem(key, value);
+    } catch (error) {
+      return;
+    }
+  }
+
+  function safeStorageRemove(key) {
+    try {
+      window.localStorage.removeItem(key);
     } catch (error) {
       return;
     }
@@ -113,6 +121,7 @@
       git_author_email: String($("#git_author_email").val() || "").trim(),
       allow_auto_commit: $("#allow_auto_commit").is(":checked"),
       allow_auto_push: $("#allow_auto_push").is(":checked"),
+      enable_plan_review: $("#enable_plan_review").is(":checked"),
     };
   }
 
@@ -259,19 +268,26 @@
     return new Date(time).toLocaleString("ko-KR", { hour12: false });
   }
 
-  function statusBadge(status) {
+  function statusText(status) {
     const normalized = String(status || "").trim() || "idle";
     const labels = {
       queued: "대기",
       running: "실행",
       completed: "완료",
       failed: "실패",
+      cancelled: "취소됨",
       needs_input: "추가 확인",
+      pending_plan_review: "계획 확인",
       partially_completed: "부분 완료",
       idle: "대기",
       finished: "종료",
     };
-    return `<span class="status-badge is-${escapeHtml(normalized)}">${escapeHtml(labels[normalized] || normalized)}</span>`;
+    return labels[normalized] || normalized;
+  }
+
+  function statusBadge(status) {
+    const normalized = String(status || "").trim() || "idle";
+    return `<span class="status-badge is-${escapeHtml(normalized)}">${escapeHtml(statusText(normalized))}</span>`;
   }
 
   function workflowLogSummary(label, value) {
@@ -478,8 +494,10 @@
       queued: 0,
       running: 0,
       needs_input: 0,
+      pending_plan_review: 0,
       completed: 0,
       failed: 0,
+      cancelled: 0,
       partially_completed: 0,
       total: (runs || []).length,
     };
@@ -507,6 +525,12 @@
     }
     if (counts.needs_input > 0) {
       return { status: "needs_input", counts };
+    }
+    if (counts.pending_plan_review > 0) {
+      return { status: "pending_plan_review", counts };
+    }
+    if (counts.cancelled === counts.total) {
+      return { status: "cancelled", counts };
     }
     if (counts.completed === counts.total) {
       return { status: "completed", counts };
@@ -543,6 +567,7 @@
         agent_provider: agentProvider,
         issue_key: String(issue.issue_key || "").trim(),
         issue_summary: String(issue.issue_summary || "").trim(),
+        enable_plan_review: $("#enable_plan_review").is(":checked"),
       },
       created_at: timestamp,
       started_at: null,
@@ -620,11 +645,12 @@
     const counts = summarizeBatchRuns(currentRuns(batch));
     const cards = [
       setSummaryCard("배치 ID", String(batch.batch_id || "").slice(0, 10) || "-"),
-      setSummaryCard("상태", batch.status || "-"),
+      setSummaryCard("상태", statusText(batch.status || "-")),
       setSummaryCard("현재 이슈", `${counts.total || 0}건`),
       setSummaryCard("접수 대기", `${counts.queued || 0}건`),
       setSummaryCard("실행 중", `${counts.running || 0}건`),
       setSummaryCard("추가 확인", `${counts.needs_input || 0}건`),
+      setSummaryCard("계획 확인", `${counts.pending_plan_review || 0}건`),
       setSummaryCard("최근 갱신", formatTimestamp(batch.updated_at || batch.created_at)),
     ].join("");
     $("#batch_summary_cards").html(cards);
@@ -737,6 +763,9 @@
     if (status === "needs_input") {
       return "추가 확인 답변을 기다린다.";
     }
+    if (status === "pending_plan_review") {
+      return "실행 전에 작업 계획 확인 승인을 기다린다.";
+    }
     if (status === "failed" || status === "partially_completed") {
       return run.message || payload.message || "실패 또는 부분 완료 상태다.";
     }
@@ -763,6 +792,8 @@
 
     if (status === "needs_input") {
       activeStepId = "review";
+    } else if (status === "pending_plan_review") {
+      activeStepId = "prepare";
     } else if (["completed", "failed", "partially_completed"].includes(status)) {
       activeStepId = "done";
     } else if (["syntax_start", "syntax_end", "stage_changes", "stage_ready", "commit_start", "commit_end"].includes(phase)) {
@@ -813,7 +844,7 @@
     $("#batch_flow_panel").prop("hidden", false);
 
     const counts = summarizeBatchRuns(runs);
-    $("#batch_flow_caption").text(`접수 ${counts.queued}건 / 실행 ${counts.running}건 / 확인 ${counts.needs_input}건 / 완료 ${counts.completed}건 / 실패 ${counts.failed + counts.partially_completed}건`);
+    $("#batch_flow_caption").text(`접수 ${counts.queued}건 / 실행 ${counts.running}건 / 확인 ${counts.needs_input}건 / 계획 확인 ${counts.pending_plan_review}건 / 완료 ${counts.completed}건 / 실패 ${counts.failed + counts.partially_completed}건`);
 
     const rows = runs.map((run) => {
       const payload = runPayload(run);
@@ -855,7 +886,7 @@
     const syntaxReturncode = payload.syntax_check_returncode != null ? payload.syntax_check_returncode : payload.test_returncode;
     const syntaxFiles = payload.syntax_checked_files || [];
     const cards = [
-      setSummaryCard("상태", run.status || payload.status || "-", run.message || payload.message || ""),
+      setSummaryCard("상태", statusText(run.status || payload.status || "-")),
       setSummaryCard("현재 단계", latestEvent ? (phaseLabels[latestEvent.phase] || latestEvent.phase) : "-", latestEvent ? latestEvent.message : ""),
       setSummaryCard("경과 시간", typeof workflowElapsedLabel === "function" ? workflowElapsedLabel(run) : "-", payload.codex_elapsed_seconds != null ? `Codex ${payload.codex_elapsed_seconds}초` : ""),
       setSummaryCard("모델", payload.resolved_model || payload.requested_model || "-", payload.resolved_reasoning_effort ? `reasoning: ${payload.resolved_reasoning_effort}` : ""),
@@ -865,6 +896,125 @@
       setSummaryCard("업데이트", formatTimestamp(run.updated_at || run.finished_at || run.started_at || run.created_at)),
     ].join("");
     $("#batch_run_overview").html(cards);
+    renderPlanReviewSection(run, payload);
+  }
+
+  function renderPlanMarkdown(markdown) {
+    const html = [];
+    const lines = String(markdown || "").replace(/\r\n/g, "\n").split("\n");
+    let paragraph = [];
+    let listItems = [];
+
+    function flushParagraph() {
+      if (!paragraph.length) {
+        return;
+      }
+      html.push(`<p>${escapeHtml(paragraph.join(" ").trim())}</p>`);
+      paragraph = [];
+    }
+
+    function flushList() {
+      if (!listItems.length) {
+        return;
+      }
+      html.push(`<ul>${listItems.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>`);
+      listItems = [];
+    }
+
+    lines.forEach((line) => {
+      const trimmed = line.trim();
+      if (!trimmed) {
+        flushParagraph();
+        flushList();
+        return;
+      }
+      if (trimmed.startsWith("## ")) {
+        flushParagraph();
+        flushList();
+        html.push(`<h4>${escapeHtml(trimmed.slice(3).trim())}</h4>`);
+        return;
+      }
+      if (/^[-*]\s+/.test(trimmed)) {
+        flushParagraph();
+        listItems.push(trimmed.replace(/^[-*]\s+/, "").trim());
+        return;
+      }
+      if (/^\d+\.\s+/.test(trimmed)) {
+        flushParagraph();
+        listItems.push(trimmed.replace(/^\d+\.\s+/, "").trim());
+        return;
+      }
+      flushList();
+      paragraph.push(trimmed);
+    });
+
+    flushParagraph();
+    flushList();
+    return html.join("");
+  }
+
+  function buildPlanReviewMarkdown(planReview, run) {
+    const summary = String(planReview.plan_summary || run.message || "실행 전 계획을 검토해 주세요.").trim();
+    const steps = Array.isArray(planReview.implementation_steps) && planReview.implementation_steps.length
+      ? planReview.implementation_steps.map((item) => `- ${String(item || "").trim()}`).join("\n")
+      : "- 표시할 구현 단계가 없다.";
+    const risks = Array.isArray(planReview.risks) && planReview.risks.length
+      ? planReview.risks.map((item) => `- ${String(item || "").trim()}`).join("\n")
+      : "- 표시할 리스크가 없다.";
+    return {
+      markdown: [
+        "## 작업 요약",
+        summary,
+        "",
+        "## 구현 단계",
+        steps,
+        "",
+        "## 리스크 및 확인 사항",
+        risks,
+      ].join("\n"),
+    };
+  }
+
+  function ensurePlanReviewUi() {
+    const card = $("#batch_run_plan_review");
+    if (!card.length) {
+      return;
+    }
+    if (!card.find("#batch_run_plan_markdown").length) {
+      $('<div id="batch_run_plan_markdown" class="plan-review-markdown"></div>').insertAfter(card.find(".plan-review-card__header"));
+    }
+    let footer = card.find(".plan-review-card__footer");
+    if (!footer.length) {
+      footer = $('<div class="plan-review-card__footer"></div>');
+      card.append(footer);
+    }
+    if (!footer.find("#cancel_batch_run_plan").length) {
+      footer.append('<button id="cancel_batch_run_plan" type="button" class="secondary-button">계획 취소</button>');
+    }
+    const approveButton = $("#approve_batch_run_plan");
+    if (approveButton.length && !footer.find("#approve_batch_run_plan").length) {
+      footer.append(approveButton);
+    }
+    $("#batch_run_plan_summary").prop("hidden", true);
+    $(".plan-review-card__content").prop("hidden", true);
+  }
+
+  function renderPlanReviewSection(run, payload) {
+    ensurePlanReviewUi();
+    const planReview = run.plan_review || payload.plan_review || {};
+    const status = String(run.plan_review_status || "").trim();
+    const visible = status === "pending_approval" && String(run.status || "").trim() === "pending_plan_review";
+    $("#batch_run_plan_review").prop("hidden", !visible);
+    if (!visible) {
+      $("#batch_run_plan_markdown").html("<p>승인 대기 중인 계획이 없다.</p>");
+      $("#approve_batch_run_plan").data("runId", "");
+      $("#cancel_batch_run_plan").data("runId", "");
+      return;
+    }
+    const markdownInfo = buildPlanReviewMarkdown(planReview, run);
+    $("#batch_run_plan_markdown").html(renderPlanMarkdown(markdownInfo.markdown));
+    $("#approve_batch_run_plan").data("runId", run.run_id).prop("disabled", false).text("이 계획으로 실행");
+    $("#cancel_batch_run_plan").data("runId", run.run_id).prop("disabled", false).text("계획 취소");
   }
 
   function renderText(target, value, emptyText) {
@@ -1028,12 +1178,7 @@
     const activeDetailTab = preferredDetailTab(batch);
 
     if (!activeRun) {
-      $("#batch_run_tabs").html('<p class="batch-list__empty">표시할 실행 탭이 없다.</p>');
-      $("#batch_detail_tabs").empty();
-      $("#batch_run_meta").empty();
-      $("#batch_flow_panel").prop("hidden", true);
-      $("#batch_flow_board").empty();
-      $("#batch_flow_caption").text("");
+      clearActiveBatchView();
       return;
     }
 
@@ -1045,16 +1190,26 @@
   }
 
   function clearActiveBatchView() {
+    const previousBatchId = batchWorkspaceState.activeBatchId;
     batchWorkspaceState.activeBatch = null;
     batchWorkspaceState.activeBatchId = null;
     batchWorkspaceState.activeDetailTab = DETAIL_TABS[0].id;
+    safeStorageRemove(STORAGE_KEYS.activeBatchId);
+    if (previousBatchId) {
+      safeStorageRemove(batchRunStorageKey(previousBatchId));
+      safeStorageRemove(batchDetailStorageKey(previousBatchId));
+    }
     $("#work_status_hint").text("현재 진행 중인 작업이 없습니다.");
     $("#work_status_empty").prop("hidden", false);
     $("#work_status_content").prop("hidden", true);
     $("#batch_flow_panel").prop("hidden", true);
     $("#batch_flow_board").empty();
     $("#batch_flow_caption").text("");
+    $("#batch_run_tabs").empty();
     $("#batch_detail_tabs").empty();
+    $("#batch_run_meta").empty();
+    $("#batch_run_overview").empty();
+    $("#batch_run_plan_review").prop("hidden", true);
   }
 
   function loadBatch(batchId, options) {
@@ -1194,6 +1349,81 @@
       });
   }
 
+  function approveActiveRunPlan(button) {
+    const batch = batchWorkspaceState.activeBatch;
+    if (!batch) {
+      return;
+    }
+    const runId = String(button.data("runId") || "").trim();
+    if (!runId) {
+      return;
+    }
+    clearResultActions("#workflow_result_actions");
+    button.prop("disabled", true).text("실행 등록 중...");
+    $.ajax({
+      url: `/api/workflow/batch/${encodeURIComponent(batch.batch_id)}/runs/${encodeURIComponent(runId)}/plan/approve`,
+      method: "POST",
+      contentType: "application/json",
+      data: JSON.stringify({}),
+    })
+      .done((data) => {
+        setResult("#workflow_result", data);
+        if (data.batch) {
+          renderActiveBatch(data.batch, { preserveSelection: true });
+          if (currentBatchShouldPoll(data.batch)) {
+            scheduleBatchPoll(data.batch.batch_id);
+          }
+        } else {
+          loadBatch(batch.batch_id, { preserveSelection: true });
+        }
+      })
+      .fail((xhr) => {
+        button.prop("disabled", false).text("이 계획으로 실행");
+        setResult("#workflow_result", xhr.responseJSON || { ok: false, error: xhr.responseText });
+      });
+  }
+
+  function cancelActiveRunPlan(button) {
+    const batch = batchWorkspaceState.activeBatch;
+    if (!batch) {
+      return;
+    }
+    const runId = String(button.data("runId") || "").trim();
+    if (!runId) {
+      return;
+    }
+    clearResultActions("#workflow_result_actions");
+    button.prop("disabled", true).text("취소 처리 중...");
+    $.ajax({
+      url: `/api/workflow/batch/${encodeURIComponent(batch.batch_id)}/runs/${encodeURIComponent(runId)}/plan/cancel`,
+      method: "POST",
+      contentType: "application/json",
+      data: JSON.stringify({}),
+    })
+      .done((data) => {
+        setResult("#workflow_result", data);
+        loadWorkflowLogs();
+        if (data.batch) {
+          if (!isCurrentBatch(data.batch)) {
+            stopBatchPolling();
+            clearActiveBatchView();
+            loadRecentBatches("", true);
+            return;
+          }
+          renderActiveBatch(data.batch, { preserveSelection: true });
+          if (currentBatchShouldPoll(data.batch)) {
+            scheduleBatchPoll(data.batch.batch_id);
+          }
+        } else {
+          loadRecentBatches("", true);
+        }
+      })
+      .fail((xhr) => {
+        button.prop("disabled", false).text("계획 취소");
+        setResult("#workflow_result", xhr.responseJSON || { ok: false, error: xhr.responseText });
+      });
+  }
+
   function runBatchAutomation(button) {
     const payload = workflowCommonPayload();
     if (!payload.issues.length) {
@@ -1249,7 +1479,7 @@
     if (!batch || !runs.length) {
       return;
     }
-    const priority = { running: 0, needs_input: 1, queued: 2 };
+    const priority = { running: 0, needs_input: 1, pending_plan_review: 2, queued: 3 };
     const nextRun = runs.slice().sort((left, right) => {
       return (priority[left.status] || 9) - (priority[right.status] || 9);
     })[0];
@@ -1350,6 +1580,14 @@
       submitActiveRunAnswers();
     });
 
+    $("#approve_batch_run_plan").on("click", function () {
+      approveActiveRunPlan($(this));
+    });
+
+    $(document).on("click", "#cancel_batch_run_plan", function () {
+      cancelActiveRunPlan($(this));
+    });
+
     $("#refresh_batch_workspace").on("click", function () {
       if (batchWorkspaceState.activeBatchId) {
         loadRecentBatches(batchWorkspaceState.activeBatchId, true);
@@ -1391,6 +1629,7 @@
       setSummaryCard("업데이트", formatTimestamp(run.updated_at || run.finished_at || run.started_at || run.created_at)),
     ].join("");
     $("#batch_run_overview").html(cards);
+    renderPlanReviewSection(run, payload);
   };
 })(jQuery);
 

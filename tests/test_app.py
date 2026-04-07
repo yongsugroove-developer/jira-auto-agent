@@ -69,6 +69,7 @@ def test_setup_guide_contains_expected_sections_and_steps() -> None:
     assert "github-base-branch" in step_ids
     assert "local-repo-path" in step_ids
     assert "automation-codex-model" in step_ids
+    assert "automation-plan-review" in step_ids
     assert "automation-test-command" in step_ids
     assert "automation-git-author" in step_ids
 
@@ -79,9 +80,11 @@ def test_setup_guide_contains_expected_sections_and_steps() -> None:
     assert github_steps["github-space-repo-mappings"]["target_fields"] == ["mapping_space_key", "mapping_local_repo_path"]
 
     automation_steps = {step["id"]: step for step in sections_by_id["automation"]["steps"]}
+    assert automation_steps["automation-plan-review"]["target_fields"] == ["enable_plan_review"]
     assert "Codex와 Claude Code" in automation_steps["automation-agent-provider"]["purpose"]
     assert automation_steps["automation-agent-provider"]["target_fields"] == ["agent_provider"]
     assert automation_steps["automation-claude-model"]["target_fields"] == ["claude_model", "claude_permission_mode"]
+    assert automation_steps["automation-plan-review"]["target_fields"] == ["enable_plan_review"]
     assert "숨겨져 있지만" in automation_steps["automation-test-command"]["purpose"]
     assert automation_steps["automation-test-command"]["target_fields"] == ["allow_auto_commit", "commit_checklist"]
 
@@ -128,6 +131,7 @@ def test_index_page_renders_automation_fields() -> None:
     assert 'id="codex_reasoning_effort"' in html
     assert 'id="claude_model"' in html
     assert 'id="claude_permission_mode"' in html
+    assert 'id="enable_plan_review"' in html
     assert 'id="workflow_provider_panel_codex"' in html
     assert 'id="workflow_provider_panel_claude"' in html
     assert 'id="agent_provider_status"' in html
@@ -166,6 +170,8 @@ def test_index_page_renders_automation_fields() -> None:
     assert 'data-config-panel="repo"' in html
     assert 'id="workflow_log_section"' in html
     assert 'id="workflow_log_list"' in html
+    assert 'id="batch_run_plan_review"' in html
+    assert 'id="approve_batch_run_plan"' in html
     assert 'id="github_owner"' not in html
     assert 'id="github_repo"' not in html
     assert 'id="github_base_branch"' not in html
@@ -498,7 +504,7 @@ def test_jira_backlog_script_uses_inline_meta_without_click_helper_copy() -> Non
 def test_batch_workspace_script_limits_work_status_to_active_runs() -> None:
     batch_script = Path("app/static/batch-workspace.js").read_text(encoding="utf-8")
 
-    assert 'const ACTIVE_RUN_STATUSES = ["queued", "running", "needs_input"];' in batch_script
+    assert 'const ACTIVE_RUN_STATUSES = ["queued", "running", "needs_input", "pending_plan_review"];' in batch_script
     assert 'const batches = (data.batches || []).filter((batch) => isCurrentBatch(batch));' in batch_script
     assert '$("#toggle_failed_runs")' not in batch_script
 
@@ -2320,6 +2326,326 @@ def test_answer_workflow_batch_run_requeues_and_completes(monkeypatch, tmp_path)
     assert clarification_calls[-1]["answers"] == {"deploy_scope": "백엔드만 배포한다."}
 
 
+def test_run_workflow_batch_waits_for_plan_review_when_enabled(monkeypatch, tmp_path) -> None:
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+    (repo_path / ".git").mkdir()
+    monkeypatch.setattr(main_module, "WORKFLOW_RUNS_DIR", tmp_path / "workflow-runs")
+    monkeypatch.setattr(main_module, "WORKFLOW_BATCHES_DIR", tmp_path / "workflow-batches")
+    monkeypatch.setattr(main_module, "_safe_ensure_project_memory", lambda repo_path, space_key="": None)
+    monkeypatch.setattr(main_module, "_safe_record_project_history", lambda repo_path, workflow_run, space_key="": None)
+
+    execute_calls: list[str] = []
+
+    def fake_load(self, provider: str):  # noqa: ANN001
+        if provider == "github":
+            return _github_mapping_payload(_repo_mapping_line("DEMO", repo_path))
+        if provider == "jira":
+            return {
+                "base_url": "https://example.atlassian.net",
+                "email": "tester@example.com",
+                "api_token": "token",
+                "jql": "project = DEMO",
+            }
+        return None
+
+    def fake_run_codex_clarification(repo_path, payload):  # noqa: ANN001
+        return {"needs_input": False, "analysis_summary": "바로 진행 가능합니다.", "requested_information": []}
+
+    def fake_plan_review(repo_path, payload):  # noqa: ANN001
+        return {
+            "plan_summary": "API와 프런트 버튼 흐름을 먼저 정리한 뒤 검증합니다.",
+            "implementation_steps": ["엔드포인트 수정", "화면 상태 연결", "회귀 테스트 확인"],
+            "risks": ["기존 버튼 id 계약 유지 확인"],
+        }
+
+    def fake_execute(repo_path, github_config, payload, reporter=None):  # noqa: ANN001
+        execute_calls.append(str(payload.get("issue_key", "")))
+        return {
+            "ok": True,
+            "status": "ready_for_manual_commit",
+            "message": "완료",
+            "requested_model": "",
+            "requested_reasoning_effort": "",
+            "resolved_model": "gpt-5.4",
+            "resolved_reasoning_effort": "medium",
+            "codex_default_model": "gpt-5.4",
+            "codex_default_reasoning_effort": "medium",
+            "model_intent": "plan review",
+            "implementation_summary": "plan review",
+            "validation_summary": "ok",
+            "processed_files": ["app/main.py"],
+            "diff": "diff --git a/app/main.py b/app/main.py",
+            "test_output": "",
+            "execution_log_tail": "completed",
+            "risks": [],
+            "syntax_check_output": "ok",
+            "syntax_checked_files": ["app/main.py"],
+        }
+
+    class ImmediateThread:
+        def __init__(self, target=None, name=None, daemon=None, args=(), kwargs=None, **extra):  # noqa: ANN001
+            self._target = target
+            self._args = args
+            self._kwargs = kwargs or {}
+
+        def start(self) -> None:
+            if self._target is not None:
+                self._target(*self._args, **self._kwargs)
+
+        def join(self, timeout=None) -> None:  # noqa: ANN001
+            return None
+
+        def is_alive(self) -> bool:
+            return False
+
+    monkeypatch.setattr(main_module.CredentialStore, "load", fake_load)
+    monkeypatch.setattr(main_module, "_find_codex_launcher", lambda: ["codex"])
+    monkeypatch.setattr(main_module, "_resolve_commit_identity", lambda repo_path, payload: ({"name": "Codex Bot", "email": "codex@example.com"}, []))
+    monkeypatch.setattr(main_module, "_run_codex_clarification", fake_run_codex_clarification)
+    monkeypatch.setattr(main_module, "_run_agent_plan_review", fake_plan_review)
+    monkeypatch.setattr(main_module, "_execute_coding_workflow", fake_execute)
+    monkeypatch.setattr(main_module.threading, "Thread", ImmediateThread)
+
+    app = create_app()
+    client = app.test_client()
+    response = client.post(
+        "/api/workflow/batch/run",
+        json={
+            "issues": [{"issue_key": "DEMO-10", "issue_summary": "plan review"}],
+            "work_instruction": "실행 전 계획을 먼저 확인합니다.",
+            "enable_plan_review": True,
+            "allow_auto_commit": False,
+        },
+    )
+
+    assert response.status_code == 202
+    batch_id = response.get_json()["batch_id"]
+    batch_data = client.get(f"/api/workflow/batch/{batch_id}").get_json()
+    run = batch_data["runs"][0]
+    assert run["status"] == "pending_plan_review"
+    assert run["plan_review_status"] == "pending_approval"
+    assert run["plan_review"]["implementation_steps"] == ["엔드포인트 수정", "화면 상태 연결", "회귀 테스트 확인"]
+    assert execute_calls == []
+
+
+def test_approve_workflow_batch_run_plan_requeues_and_completes(monkeypatch, tmp_path) -> None:
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+    (repo_path / ".git").mkdir()
+    monkeypatch.setattr(main_module, "WORKFLOW_RUNS_DIR", tmp_path / "workflow-runs")
+    monkeypatch.setattr(main_module, "WORKFLOW_BATCHES_DIR", tmp_path / "workflow-batches")
+    monkeypatch.setattr(main_module, "_safe_ensure_project_memory", lambda repo_path, space_key="": None)
+    monkeypatch.setattr(main_module, "_safe_record_project_history", lambda repo_path, workflow_run, space_key="": None)
+
+    execute_calls: list[str] = []
+
+    def fake_load(self, provider: str):  # noqa: ANN001
+        if provider == "github":
+            return _github_mapping_payload(_repo_mapping_line("DEMO", repo_path))
+        if provider == "jira":
+            return {
+                "base_url": "https://example.atlassian.net",
+                "email": "tester@example.com",
+                "api_token": "token",
+                "jql": "project = DEMO",
+            }
+        return None
+
+    def fake_run_codex_clarification(repo_path, payload):  # noqa: ANN001
+        return {"needs_input": False, "analysis_summary": "바로 진행 가능합니다.", "requested_information": []}
+
+    def fake_plan_review(repo_path, payload):  # noqa: ANN001
+        return {
+            "plan_summary": "먼저 계획을 확인하고 승인 후 실행합니다.",
+            "implementation_steps": ["서버 수정", "UI 연결"],
+            "risks": ["회귀 테스트 필요"],
+        }
+
+    def fake_execute(repo_path, github_config, payload, reporter=None):  # noqa: ANN001
+        execute_calls.append(str(payload.get("issue_key", "")))
+        return {
+            "ok": True,
+            "status": "ready_for_manual_commit",
+            "message": "완료",
+            "requested_model": "",
+            "requested_reasoning_effort": "",
+            "resolved_model": "gpt-5.4",
+            "resolved_reasoning_effort": "medium",
+            "codex_default_model": "gpt-5.4",
+            "codex_default_reasoning_effort": "medium",
+            "model_intent": "approve plan",
+            "implementation_summary": "approve plan",
+            "validation_summary": "ok",
+            "processed_files": ["app/main.py"],
+            "diff": "diff --git a/app/main.py b/app/main.py",
+            "test_output": "",
+            "execution_log_tail": "completed",
+            "risks": [],
+            "syntax_check_output": "ok",
+            "syntax_checked_files": ["app/main.py"],
+        }
+
+    class ImmediateThread:
+        def __init__(self, target=None, name=None, daemon=None, args=(), kwargs=None, **extra):  # noqa: ANN001
+            self._target = target
+            self._args = args
+            self._kwargs = kwargs or {}
+
+        def start(self) -> None:
+            if self._target is not None:
+                self._target(*self._args, **self._kwargs)
+
+        def join(self, timeout=None) -> None:  # noqa: ANN001
+            return None
+
+        def is_alive(self) -> bool:
+            return False
+
+    monkeypatch.setattr(main_module.CredentialStore, "load", fake_load)
+    monkeypatch.setattr(main_module, "_find_codex_launcher", lambda: ["codex"])
+    monkeypatch.setattr(main_module, "_resolve_commit_identity", lambda repo_path, payload: ({"name": "Codex Bot", "email": "codex@example.com"}, []))
+    monkeypatch.setattr(main_module, "_run_codex_clarification", fake_run_codex_clarification)
+    monkeypatch.setattr(main_module, "_run_agent_plan_review", fake_plan_review)
+    monkeypatch.setattr(main_module, "_execute_coding_workflow", fake_execute)
+    monkeypatch.setattr(main_module.threading, "Thread", ImmediateThread)
+
+    app = create_app()
+    client = app.test_client()
+    response = client.post(
+        "/api/workflow/batch/run",
+        json={
+            "issues": [{"issue_key": "DEMO-11", "issue_summary": "approve plan"}],
+            "work_instruction": "계획 승인 후 실행합니다.",
+            "enable_plan_review": True,
+            "allow_auto_commit": False,
+        },
+    )
+    assert response.status_code == 202
+    batch_id = response.get_json()["batch_id"]
+    batch_data = client.get(f"/api/workflow/batch/{batch_id}").get_json()
+    run_id = batch_data["runs"][0]["run_id"]
+    assert batch_data["runs"][0]["status"] == "pending_plan_review"
+
+    approve_response = client.post(f"/api/workflow/batch/{batch_id}/runs/{run_id}/plan/approve", json={})
+
+    assert approve_response.status_code == 200
+    final_batch = client.get(f"/api/workflow/batch/{batch_id}").get_json()
+    final_run = final_batch["runs"][0]
+    assert final_run["status"] == "completed"
+    assert final_run["plan_review_status"] == "approved"
+    assert execute_calls == ["DEMO-11"]
+
+
+def test_cancel_workflow_batch_run_plan_marks_run_cancelled(monkeypatch, tmp_path) -> None:
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+    (repo_path / ".git").mkdir()
+    monkeypatch.setattr(main_module, "WORKFLOW_RUNS_DIR", tmp_path / "workflow-runs")
+    monkeypatch.setattr(main_module, "WORKFLOW_BATCHES_DIR", tmp_path / "workflow-batches")
+    monkeypatch.setattr(main_module, "_safe_ensure_project_memory", lambda repo_path, space_key="": None)
+    monkeypatch.setattr(main_module, "_safe_record_project_history", lambda repo_path, workflow_run, space_key="": None)
+
+    execute_calls: list[str] = []
+
+    def fake_load(self, provider: str):  # noqa: ANN001
+        if provider == "github":
+            return _github_mapping_payload(_repo_mapping_line("DEMO", repo_path))
+        if provider == "jira":
+            return {
+                "base_url": "https://example.atlassian.net",
+                "email": "tester@example.com",
+                "api_token": "token",
+                "jql": "project = DEMO",
+            }
+        return None
+
+    def fake_run_codex_clarification(repo_path, payload):  # noqa: ANN001
+        return {"needs_input": False, "analysis_summary": "바로 진행 가능합니다.", "requested_information": []}
+
+    def fake_plan_review(repo_path, payload):  # noqa: ANN001
+        return {
+            "plan_summary": "먼저 계획을 확인하고 승인 여부를 결정합니다.",
+            "implementation_steps": ["서버 수정", "UI 연결"],
+            "risks": ["추가 테스트 필요"],
+        }
+
+    def fake_execute(repo_path, github_config, payload, reporter=None):  # noqa: ANN001
+        execute_calls.append(str(payload.get("issue_key", "")))
+        return {
+            "ok": True,
+            "status": "ready_for_manual_commit",
+            "message": "완료",
+            "requested_model": "",
+            "requested_reasoning_effort": "",
+            "resolved_model": "gpt-5.4",
+            "resolved_reasoning_effort": "medium",
+            "codex_default_model": "gpt-5.4",
+            "codex_default_reasoning_effort": "medium",
+            "model_intent": "cancel plan",
+            "implementation_summary": "cancel plan",
+            "validation_summary": "ok",
+            "processed_files": ["app/main.py"],
+            "diff": "diff --git a/app/main.py b/app/main.py",
+            "test_output": "",
+            "execution_log_tail": "completed",
+            "risks": [],
+            "syntax_check_output": "ok",
+            "syntax_checked_files": ["app/main.py"],
+        }
+
+    class ImmediateThread:
+        def __init__(self, target=None, name=None, daemon=None, args=(), kwargs=None, **extra):  # noqa: ANN001
+            self._target = target
+            self._args = args
+            self._kwargs = kwargs or {}
+
+        def start(self) -> None:
+            if self._target is not None:
+                self._target(*self._args, **self._kwargs)
+
+        def join(self, timeout=None) -> None:  # noqa: ANN001
+            return None
+
+        def is_alive(self) -> bool:
+            return False
+
+    monkeypatch.setattr(main_module.CredentialStore, "load", fake_load)
+    monkeypatch.setattr(main_module, "_find_codex_launcher", lambda: ["codex"])
+    monkeypatch.setattr(main_module, "_resolve_commit_identity", lambda repo_path, payload: ({"name": "Codex Bot", "email": "codex@example.com"}, []))
+    monkeypatch.setattr(main_module, "_run_codex_clarification", fake_run_codex_clarification)
+    monkeypatch.setattr(main_module, "_run_agent_plan_review", fake_plan_review)
+    monkeypatch.setattr(main_module, "_execute_coding_workflow", fake_execute)
+    monkeypatch.setattr(main_module.threading, "Thread", ImmediateThread)
+
+    app = create_app()
+    client = app.test_client()
+    response = client.post(
+        "/api/workflow/batch/run",
+        json={
+            "issues": [{"issue_key": "DEMO-12", "issue_summary": "cancel plan"}],
+            "work_instruction": "계획을 보고 취소합니다.",
+            "enable_plan_review": True,
+            "allow_auto_commit": False,
+        },
+    )
+    assert response.status_code == 202
+    batch_id = response.get_json()["batch_id"]
+    batch_data = client.get(f"/api/workflow/batch/{batch_id}").get_json()
+    run_id = batch_data["runs"][0]["run_id"]
+    assert batch_data["runs"][0]["status"] == "pending_plan_review"
+
+    cancel_response = client.post(f"/api/workflow/batch/{batch_id}/runs/{run_id}/plan/cancel", json={})
+
+    assert cancel_response.status_code == 200
+    final_batch = client.get(f"/api/workflow/batch/{batch_id}").get_json()
+    final_run = final_batch["runs"][0]
+    assert final_run["status"] == "cancelled"
+    assert final_run["plan_review_status"] == "cancelled"
+    assert final_batch["status"] == "cancelled"
+    assert execute_calls == []
+
+
 def test_workflow_batch_persists_across_app_recreation(monkeypatch, tmp_path) -> None:
     repo_path = tmp_path / "repo"
     repo_path.mkdir()
@@ -2699,6 +3025,7 @@ def test_setup_guide_contains_expected_sections_and_steps() -> None:
     assert "automation-agent-provider" in step_ids
     assert "automation-codex-model" in step_ids
     assert "automation-claude-model" in step_ids
+    assert "automation-plan-review" in step_ids
     assert "automation-test-command" in step_ids
     assert "automation-git-author" in step_ids
 
