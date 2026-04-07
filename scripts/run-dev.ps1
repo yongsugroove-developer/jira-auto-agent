@@ -18,12 +18,12 @@ if (-not (Test-Path $LocalCodexCmd)) {
     throw "Repo-local Codex CLI is missing. Run scripts\\bootstrap-dev.ps1 first."
 }
 
-$env:AGENTATION_ENABLED = "0"
-$env:AGENTATION_AUTOSTART = "0"
+$env:AGENTATION_ENABLED = "1"
+$env:AGENTATION_AUTOSTART = "1"
 $env:CODEX_CLI_PATH = $LocalCodexCmd
 
-Write-Host "[run-dev] AGENTATION_ENABLED=0"
-Write-Host "[run-dev] AGENTATION_AUTOSTART=0"
+Write-Host "[run-dev] AGENTATION_ENABLED=1"
+Write-Host "[run-dev] AGENTATION_AUTOSTART=1"
 Write-Host "[run-dev] CODEX_CLI_PATH=$LocalCodexCmd"
 if ($env:CLAUDE_CLI_PATH) {
     Write-Host "[run-dev] CLAUDE_CLI_PATH=$($env:CLAUDE_CLI_PATH)"

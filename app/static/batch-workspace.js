@@ -7,18 +7,19 @@
     activeBatch: null,
     activeBatchId: null,
     activeDetailTab: "overview",
+    activeMonitorTab: "active",
     clarificationDrafts: {},
     clarificationSubmissionPending: {},
   };
 
   const STORAGE_KEYS = {
     activeBatchId: "jira-auto-agent.active-batch-id",
+    activeMonitorTab: "jira-auto-agent.monitor-tab",
   };
 
   const DETAIL_TABS = [
     { id: "overview", label: "실행 개요" },
     { id: "summary", label: "결과 요약" },
-    { id: "clarification", label: "질문과 코멘트" },
     { id: "artifacts", label: "산출물" },
     { id: "logs", label: "로그" },
   ];
@@ -71,6 +72,30 @@
     } catch (error) {
       return;
     }
+  }
+
+  function preferredMonitorTab() {
+    const stored = String(safeStorageGet(STORAGE_KEYS.activeMonitorTab) || "").trim();
+    return stored === "logs" ? "logs" : "active";
+  }
+
+  function renderMonitoringPanels() {
+    const activeMonitorTab = batchWorkspaceState.activeMonitorTab === "logs" ? "logs" : "active";
+    $("#work_status_section").prop("hidden", activeMonitorTab !== "active");
+    $("#workflow_log_section").prop("hidden", activeMonitorTab !== "logs");
+    $("#monitoring_tabs [data-monitor-tab]").each(function () {
+      const isActive = String($(this).attr("data-monitor-tab") || "").trim() === activeMonitorTab;
+      $(this)
+        .toggleClass("is-active", isActive)
+        .attr("aria-selected", isActive ? "true" : "false");
+    });
+  }
+
+  function setActiveMonitorTab(tab) {
+    const normalized = String(tab || "").trim() === "logs" ? "logs" : "active";
+    batchWorkspaceState.activeMonitorTab = normalized;
+    safeStorageSet(STORAGE_KEYS.activeMonitorTab, normalized);
+    renderMonitoringPanels();
   }
 
   function selectedIssues() {
@@ -232,27 +257,34 @@
 
   function renderIssueTable(data) {
     const issues = (data && data.issues) || [];
-    const rows = issues.map((issue) => {
-      if (typeof renderIssueAccordionItem === "function") {
-        return renderIssueAccordionItem(issue, {
-          inputType: "checkbox",
-          inputName: "selected_issues",
-        });
+    if (typeof window.populateIssueBacklog === "function") {
+      window.populateIssueBacklog({ issues }, {
+        inputType: "checkbox",
+        inputName: "selected_issues",
+      });
+    } else {
+      const rows = issues.map((issue) => {
+        if (typeof renderIssueAccordionItem === "function") {
+          return renderIssueAccordionItem(issue, {
+            inputType: "checkbox",
+            inputName: "selected_issues",
+          });
+        }
+        return "";
+      }).join("");
+      $("#issue_table").html(rows || '<p class="batch-preview-empty">조회된 이슈가 없습니다.</p>');
+      if (typeof syncIssueAccordionState === "function") {
+        syncIssueAccordionState();
       }
-      return "";
-    }).join("");
-    $("#issue_table").html(rows || '<p class="batch-preview-empty">조회된 이슈가 없습니다.</p>');
-    if (typeof syncIssueAccordionState === "function") {
-      syncIssueAccordionState();
+      const issue = primarySelectedIssue();
+      if (issue && typeof loadIssueDetail === "function") {
+        loadIssueDetail(issue.issue_key);
+      } else if (typeof resetIssueDetail === "function") {
+        resetIssueDetail();
+      }
     }
     syncPrimaryIssueFields();
     renderSelectionSummary();
-    const issue = primarySelectedIssue();
-    if (issue && typeof loadIssueDetail === "function") {
-      loadIssueDetail(issue.issue_key);
-    } else if (typeof resetIssueDetail === "function") {
-      resetIssueDetail();
-    }
     scheduleBatchPreview();
   }
 
@@ -300,10 +332,10 @@
 
   function renderWorkflowLogs(data) {
     const logs = (data && data.logs) || [];
-    $("#workflow_log_section").prop("hidden", false);
     $("#workflow_log_caption").text(logs.length ? `최근 처리된 작업 ${logs.length}건 요약` : "저장된 작업 로그가 없다.");
     if (!logs.length) {
       $("#workflow_log_list").html('<p class="batch-list__empty">저장된 작업 로그가 없다.</p>');
+      renderMonitoringPanels();
       return;
     }
 
@@ -336,6 +368,10 @@
       </article>
     `).join("");
     $("#workflow_log_list").html(cards);
+    renderMonitoringPanels();
+    if (typeof window.syncWorkspaceShellHeight === "function") {
+      window.syncWorkspaceShellHeight(false);
+    }
   }
 
   function loadWorkflowLogs() {
@@ -344,9 +380,9 @@
         renderWorkflowLogs(data);
       })
       .fail((xhr) => {
-        $("#workflow_log_section").prop("hidden", false);
         $("#workflow_log_caption").text("작업 로그를 불러오지 못했다.");
         $("#workflow_log_list").html('<p class="batch-list__empty">작업 로그를 불러오지 못했다.</p>');
+        renderMonitoringPanels();
         setResult("#workflow_result", xhr.responseJSON || { ok: false, error: xhr.responseText });
       });
   }
@@ -365,10 +401,10 @@
   }
 
   function showWorkStatusSection(message) {
-    $("#work_status_section").prop("hidden", false);
     if (message) {
       $("#work_status_hint").text(String(message));
     }
+    renderMonitoringPanels();
   }
 
   function clarificationFocusState() {
@@ -975,6 +1011,59 @@
     };
   }
 
+  function actionableRuns(batch) {
+    return visibleRuns(batch).filter((run) => {
+      const status = String(run.status || "").trim();
+      return status === "needs_input" || status === "pending_plan_review";
+    });
+  }
+
+  function renderActionCenterRunTabs(batch, activeRunId) {
+    const host = $("#action_center_run_tabs");
+    if (!host.length) {
+      return;
+    }
+    const runs = batch ? actionableRuns(batch) : [];
+    if (!runs.length) {
+      host.empty().prop("hidden", true);
+      return;
+    }
+    host.html(
+      runs.map((run) => {
+        const status = String(run.status || "").trim();
+        const issueKey = String(run.issue_key || run.run_id || "").trim() || "작업";
+        const isActive = String(run.run_id) === String(activeRunId);
+        return `
+          <button
+            type="button"
+            class="action-center-run-tab ${isActive ? "is-active" : ""}"
+            data-action-center-run-id="${escapeHtml(run.run_id)}"
+          >
+            <span class="action-center-run-tab__issue">${escapeHtml(issueKey)}</span>
+            <span class="action-center-run-tab__status">${escapeHtml(statusText(status))}</span>
+          </button>
+        `;
+      }).join("")
+    ).prop("hidden", false);
+  }
+
+  function syncActionCenterVisibility(batch, activeRunId) {
+    renderActionCenterRunTabs(batch, activeRunId);
+    const hasPlanReview = $("#batch_run_plan_review").length && !$("#batch_run_plan_review").prop("hidden");
+    const hasClarification = $("#batch_run_clarification_card").length && !$("#batch_run_clarification_card").prop("hidden");
+    const hasSyncStatus = $("#batch_run_sync_status_card").length && !$("#batch_run_sync_status_card").prop("hidden");
+    const hasContent = Boolean(hasPlanReview || hasClarification || hasSyncStatus);
+
+    $("#action_center_section").prop("hidden", false);
+    $("#action_center_content").prop("hidden", !hasContent);
+    $("#action_center_empty").prop("hidden", hasContent);
+    $("#action_center_hint").text(
+      hasContent
+        ? "지금 필요한 확인과 승인을 여기에서 바로 처리한다."
+        : "질문 응답이나 계획 승인이 필요한 경우 이 영역에 바로 표시된다."
+    );
+  }
+
   function ensurePlanReviewUi() {
     const card = $("#batch_run_plan_review");
     if (!card.length) {
@@ -1040,8 +1129,20 @@
     const displayedAnswers = pendingSubmission ? pendingSubmission.answers || {} : answers;
     const hasAnswers = Object.keys(displayedAnswers).length > 0;
     const editable = String(run.status || "").trim() === "needs_input" && requested.length > 0 && !pendingSubmission;
+    const visible = requested.length > 0 || pendingSubmission;
     const focusState = clarificationFocusState();
     const normalizedStatus = String(run.status || "").trim();
+
+    $("#batch_run_clarification_card").prop("hidden", !visible);
+    if (!visible) {
+      $("#batch_run_clarification_summary").text("추가 확인이 필요한 경우 이 영역에서 질문과 답변을 처리한다.");
+      $("#batch_run_clarification_state").empty();
+      $("#batch_run_clarification_questions").empty().prop("hidden", true);
+      $("#batch_run_clarification_answers").empty().prop("hidden", true);
+      $("#batch_run_clarification_actions").prop("hidden", true);
+      $("#submit_batch_run_answers").data("runId", "");
+      return;
+    }
 
     let stateVariant = "is-idle";
     let stateTitle = "추가 질문 없음";
@@ -1138,7 +1239,7 @@
     }
   }
 
-  function renderRunDetail(run, activeDetailTab) {
+  function renderRunDetail(run, activeDetailTab, batch) {
     const payload = runPayload(run);
     renderDetailTabs(activeDetailTab);
     renderRunMeta(run, payload);
@@ -1153,6 +1254,7 @@
     renderText("#batch_run_diff", payload.diff, "diff 없음");
     renderText("#batch_run_test_output", payload.syntax_check_output || payload.test_output, "문법 검사 출력이 없다.");
     renderText("#batch_run_log", typeof eventLogText === "function" ? eventLogText(run.events) : "실행 로그 없음", "실행 로그 없음");
+    syncActionCenterVisibility(batch, run.run_id);
   }
 
   function setActiveRun(batchId, runId) {
@@ -1167,6 +1269,7 @@
     batchWorkspaceState.activeBatchId = batch.batch_id;
     safeStorageSet(STORAGE_KEYS.activeBatchId, batch.batch_id);
     renderBatchSummary(batch);
+    renderMonitoringPanels();
     $("#work_status_empty").prop("hidden", true);
     $("#work_status_content").prop("hidden", false);
 
@@ -1174,7 +1277,11 @@
     const activeRunId = preserveSelection
       ? preferredRunId(batch)
       : (preferredRunId(batch) || (runs[0] && runs[0].run_id));
-    const activeRun = runs.find((run) => String(run.run_id) === String(activeRunId)) || runs[0] || null;
+    const actionRuns = actionableRuns(batch);
+    let activeRun = runs.find((run) => String(run.run_id) === String(activeRunId)) || runs[0] || null;
+    if (actionRuns.length && (!activeRun || !actionRuns.some((run) => String(run.run_id) === String(activeRun.run_id)))) {
+      activeRun = actionRuns[0];
+    }
     const activeDetailTab = preferredDetailTab(batch);
 
     if (!activeRun) {
@@ -1186,7 +1293,10 @@
     setActiveDetailTab(batch.batch_id, activeDetailTab);
     renderRunTabs(batch, activeRun.run_id);
     renderBatchFlowBoard(batch, activeRun.run_id);
-    renderRunDetail(activeRun, activeDetailTab);
+    renderRunDetail(activeRun, activeDetailTab, batch);
+    if (typeof window.syncWorkspaceShellHeight === "function") {
+      window.syncWorkspaceShellHeight(false);
+    }
   }
 
   function clearActiveBatchView() {
@@ -1210,6 +1320,21 @@
     $("#batch_run_meta").empty();
     $("#batch_run_overview").empty();
     $("#batch_run_plan_review").prop("hidden", true);
+    $("#batch_run_plan_markdown").html("<p>승인 대기 중인 계획이 없다.</p>");
+    $("#batch_run_clarification_card").prop("hidden", true);
+    $("#batch_run_clarification_state").empty();
+    $("#batch_run_clarification_questions").empty().prop("hidden", true);
+    $("#batch_run_clarification_answers").empty().prop("hidden", true);
+    $("#batch_run_clarification_actions").prop("hidden", true);
+    $("#submit_batch_run_answers").data("runId", "");
+    $("#batch_run_sync_status_card").prop("hidden", true);
+    $("#batch_run_sync_status_list").empty();
+    $("#action_center_run_tabs").empty().prop("hidden", true);
+    setActiveMonitorTab("active");
+    syncActionCenterVisibility(null, "");
+    if (typeof window.syncWorkspaceShellHeight === "function") {
+      window.syncWorkspaceShellHeight(false);
+    }
   }
 
   function loadBatch(batchId, options) {
@@ -1321,6 +1446,7 @@
     clearResultActions("#workflow_result_actions");
     setClarificationSubmissionPending(batch.batch_id, runId, answers);
     setActiveDetailTab(batch.batch_id, "overview");
+    setActiveMonitorTab("active");
     renderActiveBatch(buildOptimisticClarificationBatch(batch, runId, answers), { preserveSelection: true });
     setResult("#workflow_result", { ok: true, status: "queued", message: "답변을 제출했다. 작업 재개를 준비 중이다." });
     $.ajax({
@@ -1352,14 +1478,21 @@
   function approveActiveRunPlan(button) {
     const batch = batchWorkspaceState.activeBatch;
     if (!batch) {
+      setResult("#workflow_result", { ok: false, error: "active_batch_required", message: "현재 선택된 배치를 찾을 수 없다." });
       return;
     }
-    const runId = String(button.data("runId") || "").trim();
+    const runId = String(
+      button.data("runId")
+      || ((visibleRuns(batch).find((run) => String(run.status || "").trim() === "pending_plan_review") || {}).run_id)
+      || ""
+    ).trim();
     if (!runId) {
+      setResult("#workflow_result", { ok: false, error: "plan_review_run_required", message: "실행할 계획 승인 대기 작업을 찾을 수 없다." });
       return;
     }
     clearResultActions("#workflow_result_actions");
     button.prop("disabled", true).text("실행 등록 중...");
+    setActiveMonitorTab("active");
     $.ajax({
       url: `/api/workflow/batch/${encodeURIComponent(batch.batch_id)}/runs/${encodeURIComponent(runId)}/plan/approve`,
       method: "POST",
@@ -1386,10 +1519,16 @@
   function cancelActiveRunPlan(button) {
     const batch = batchWorkspaceState.activeBatch;
     if (!batch) {
+      setResult("#workflow_result", { ok: false, error: "active_batch_required", message: "현재 선택된 배치를 찾을 수 없다." });
       return;
     }
-    const runId = String(button.data("runId") || "").trim();
+    const runId = String(
+      button.data("runId")
+      || ((visibleRuns(batch).find((run) => String(run.status || "").trim() === "pending_plan_review") || {}).run_id)
+      || ""
+    ).trim();
     if (!runId) {
+      setResult("#workflow_result", { ok: false, error: "plan_review_run_required", message: "취소할 계획 승인 대기 작업을 찾을 수 없다." });
       return;
     }
     clearResultActions("#workflow_result_actions");
@@ -1446,6 +1585,7 @@
 
     clearResultActions("#workflow_result_actions");
     button.prop("disabled", true).text("배치 실행 중...");
+    setActiveMonitorTab("active");
     showWorkStatusSection("선택한 이슈 배치를 준비하고 있다.");
     setResult("#workflow_result", { ok: true, status: "queued", message: `선택한 이슈 ${payload.issues.length}건의 배치 실행을 접수했다.` });
     renderActiveBatch(buildPendingBatch(payload.issues, payload.agent_provider), { preserveSelection: false });
@@ -1486,6 +1626,7 @@
     if (!nextRun) {
       return;
     }
+    setActiveMonitorTab("active");
     setActiveRun(batch.batch_id, nextRun.run_id);
     renderActiveBatch(batch, { preserveSelection: true });
   }
@@ -1505,6 +1646,8 @@
 
     renderSelectionSummary();
     setBatchPreviewEmpty("이슈를 선택하면 미리보기를 표시한다.");
+    setActiveMonitorTab(preferredMonitorTab());
+    syncActionCenterVisibility(null, "");
     loadWorkflowLogs();
     loadRecentBatches("", true);
 
@@ -1537,6 +1680,17 @@
       renderActiveBatch(batch, { preserveSelection: true });
     });
 
+    $(document).on("click", "[data-action-center-run-id]", function () {
+      const batch = batchWorkspaceState.activeBatch;
+      const runId = String($(this).attr("data-action-center-run-id") || "").trim();
+      if (!batch || !runId) {
+        return;
+      }
+      setActiveMonitorTab("active");
+      setActiveRun(batch.batch_id, runId);
+      renderActiveBatch(batch, { preserveSelection: true });
+    });
+
     $(document).on("click", "[data-detail-tab]", function () {
       const batch = batchWorkspaceState.activeBatch;
       const detailTab = String($(this).attr("data-detail-tab") || "").trim();
@@ -1545,6 +1699,11 @@
       }
       setActiveDetailTab(batch.batch_id, detailTab);
       renderActiveBatch(batch, { preserveSelection: true });
+    });
+
+    $(document).on("click", "[data-monitor-tab]", function () {
+      const monitorTab = String($(this).attr("data-monitor-tab") || "").trim();
+      setActiveMonitorTab(monitorTab);
     });
 
     $(document).on("input", "[data-batch-clarification-answer]", function () {
@@ -1616,7 +1775,7 @@
     const executionValue = payload.resolved_agent_execution_mode || payload.resolved_reasoning_effort || payload.requested_agent_execution_mode || payload.requested_reasoning_effort || "";
     const elapsedSeconds = payload.agent_elapsed_seconds != null ? payload.agent_elapsed_seconds : payload.codex_elapsed_seconds;
     const cards = [
-      setSummaryCard("상태", run.status || payload.status || "-", run.message || payload.message || ""),
+      setSummaryCard("상태", statusText(run.status || payload.status || "-")),
       setSummaryCard("현재 단계", latestEvent ? (phaseLabels[latestEvent.phase] || latestEvent.phase) : "-", latestEvent ? latestEvent.message : ""),
       setSummaryCard("Agent", providerLabel, payload.provider_metadata && payload.provider_metadata.execution_mode_label ? payload.provider_metadata.execution_mode_label : ""),
       setSummaryCard("경과 시간", typeof workflowElapsedLabel === "function" ? workflowElapsedLabel(run) : "-", elapsedSeconds != null ? `${providerLabel} ${elapsedSeconds}초` : ""),
