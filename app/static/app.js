@@ -26,6 +26,7 @@ const FIELD_LABELS = {
   mapping_local_repo_path: "로컬 저장소 경로",
   mapping_github_token: "공간 전용 GitHub Token",
   allow_auto_commit: "로컬 테스트 없이 자동 커밋 허용",
+  enable_plan_review: "실행 전 계획 확인 사용",
 };
 
 const guideState = {
@@ -282,6 +283,7 @@ function collectWorkflow() {
     clarification_questions: workflowState.clarificationQuestions.map((item) => ({ ...item })),
     clarification_answers: { ...workflowState.clarificationAnswers },
     allow_auto_commit: $("#allow_auto_commit").is(":checked"),
+    enable_plan_review: $("#enable_plan_review").is(":checked"),
   };
 }
 
@@ -3245,6 +3247,7 @@ $(document).ready(function () {
 FIELD_LABELS.agent_provider = "Agent Provider";
 FIELD_LABELS.claude_model = "Claude Model";
 FIELD_LABELS.claude_permission_mode = "Permission Mode";
+FIELD_LABELS.enable_plan_review = "실행 전 계획 확인 사용";
 VISIBLE_WORKFLOW_PHASES.add("agent_start");
 VISIBLE_WORKFLOW_PHASES.add("agent_end");
 VISIBLE_WORKFLOW_PHASES.add("agent_timeout");
@@ -3347,6 +3350,7 @@ function collectWorkflow() {
     clarification_answers: { ...workflowState.clarificationAnswers },
     allow_auto_commit: $("#allow_auto_commit").is(":checked"),
     allow_auto_push: $("#allow_auto_push").is(":checked"),
+    enable_plan_review: $("#enable_plan_review").is(":checked"),
   };
 }
 
@@ -3361,6 +3365,7 @@ function requestedInfoForFields(fields) {
     claude_permission_mode: { guide_section: "automation", guide_step_id: "automation-claude-model" },
     work_instruction: { guide_section: "automation", guide_step_id: "automation-work-instruction" },
     acceptance_criteria: { guide_section: "automation", guide_step_id: "automation-acceptance-criteria" },
+    enable_plan_review: { guide_section: "automation", guide_step_id: "automation-plan-review" },
     commit_checklist: { guide_section: "automation", guide_step_id: "automation-commit-checklist" },
     git_author_name: { guide_section: "automation", guide_step_id: "automation-git-author" },
     git_author_email: { guide_section: "automation", guide_step_id: "automation-git-author" },

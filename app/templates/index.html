@@ -307,6 +307,7 @@
       <div class="actions">
         <label class="checkbox-row"><input id="allow_auto_commit" type="checkbox" checked> 로컬 테스트 없이 자동 커밋 허용</label>
         <label class="checkbox-row"><input id="allow_auto_push" type="checkbox" checked> 커밋 후 원격 저장소까지 push</label>
+        <label class="checkbox-row"><input id="enable_plan_review" type="checkbox"> 실행 전 계획 확인 사용</label>
       </div>
 
       <div id="workflow_batch_actions" class="actions workflow-batch-actions"></div>
@@ -361,6 +362,25 @@
                 <section class="detail-card">
                   <h3>실행 개요</h3>
                   <div id="batch_run_overview" class="summary-grid"></div>
+                  <div id="batch_run_plan_review" class="plan-review-card" hidden>
+                    <div class="plan-review-card__header">
+                      <div>
+                        <strong>실행 전 작업 계획</strong>
+                        <p id="batch_run_plan_summary" class="detail-copy">승인 대기 중인 계획이 없다.</p>
+                      </div>
+                      <button id="approve_batch_run_plan" type="button" class="primary-button">이 계획으로 실행</button>
+                    </div>
+                    <div class="detail-grid plan-review-card__content">
+                      <section class="detail-card">
+                        <h3>구현 단계</h3>
+                        <ul id="batch_run_plan_steps" class="file-list"></ul>
+                      </section>
+                      <section class="detail-card">
+                        <h3>리스크와 확인 포인트</h3>
+                        <ul id="batch_run_plan_risks" class="file-list"></ul>
+                      </section>
+                    </div>
+                  </div>
                 </section>
               </section>
 

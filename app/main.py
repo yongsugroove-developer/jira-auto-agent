@@ -59,7 +59,7 @@ MAX_DIFF_CHARS = 60000
 MAX_OUTPUT_CHARS = 12000
 MAX_WORKFLOW_EVENTS = 160
 MAX_CLARIFICATION_QUESTIONS = 3
-SETUP_GUIDE_VERSION = 8
+SETUP_GUIDE_VERSION = 9
 DEFAULT_AGENT_PROVIDER = "codex"
 VALID_AGENT_PROVIDERS = ("codex", "claude")
 VALID_REASONING_EFFORTS = ("low", "medium", "high", "xhigh")
@@ -106,6 +106,7 @@ FIELD_LABEL_OVERRIDES = {
     "claude_permission_mode": "Permission Mode",
     "work_instruction": "작업 지시 상세",
     "acceptance_criteria": "수용 기준",
+    "enable_plan_review": "실행 전 계획 확인 사용",
     "test_command": "참고용 로컬 테스트 명령",
     "commit_checklist": "커밋 체크리스트",
     "mapping_provider": "SCM Provider",
@@ -509,6 +510,7 @@ FIELD_GUIDES = {
     "claude_permission_mode": {"label": "Permission Mode", "guide_section": "automation", "guide_step_id": "automation-claude-model"},
     "work_instruction": {"label": "작업 지시 상세", "guide_section": "automation", "guide_step_id": "automation-work-instruction"},
     "acceptance_criteria": {"label": "수용 기준", "guide_section": "automation", "guide_step_id": "automation-acceptance-criteria"},
+    "enable_plan_review": {"label": "실행 전 계획 확인 사용", "guide_section": "automation", "guide_step_id": "automation-plan-review"},
     "test_command": {"label": "참고용 로컬 테스트 명령", "guide_section": "automation", "guide_step_id": "automation-test-command"},
     "commit_checklist": {"label": "커밋 체크리스트", "guide_section": "automation", "guide_step_id": "automation-commit-checklist"},
     "git_author_name": {"label": "Git Author Name", "guide_section": "automation", "guide_step_id": "automation-git-author"},
@@ -913,6 +915,19 @@ def _agent_automation_guide_steps() -> list[dict[str, Any]]:
             ["acceptance_criteria"],
         ),
         _guide_step(
+            "automation-plan-review",
+            "실행 전 계획 확인 옵션",
+            "필요한 경우에만 실행 전에 작업 계획을 한 번 더 검토하고 승인한 뒤 실제 수정 단계로 넘깁니다.",
+            [
+                "기본값은 꺼짐이며, 체크하지 않으면 기존처럼 clarification 이후 바로 실행합니다.",
+                "체크하면 clarification이 끝난 뒤 구현 요약, 단계, 리스크를 먼저 생성합니다.",
+                "계획을 승인해야만 실제 작업 큐에 들어갑니다.",
+            ],
+            "범위가 크거나 의도 오해 가능성이 높은 작업에서만 켜는 편이 효율적입니다.",
+            "체크박스: 실행 전 계획 확인 사용",
+            ["enable_plan_review"],
+        ),
+        _guide_step(
             "automation-test-command",
             "숨겨진 test_command 이해",
             "현재 화면에서는 test_command 입력칸이 보이지 않지만, hidden input으로 유지되며 저장된 값이 있으면 payload 호환성과 결과 요약에 함께 사용됩니다.",
@@ -987,10 +1002,12 @@ def _patch_setup_guide_for_agent_provider(guide: dict[str, Any]) -> dict[str, An
             "claude_permission_mode",
             "work_instruction",
             "acceptance_criteria",
+            "enable_plan_review",
             "test_command",
             "commit_checklist",
             "git_author_name",
             "git_author_email",
+            "allow_auto_commit",
             "allow_auto_push",
         ]
         patched_section["steps"] = _agent_automation_guide_steps()
@@ -1437,6 +1454,8 @@ def _workflow_run_snapshot(run: dict[str, Any]) -> dict[str, Any]:
         "queue_position": run.get("queue_position", 0),
         "clarification_status": run.get("clarification_status", "not_requested"),
         "clarification": run.get("clarification"),
+        "plan_review_status": run.get("plan_review_status", "not_requested"),
+        "plan_review": run.get("plan_review"),
         "request_payload": run.get("request_payload"),
         "resolved_repo_provider": run.get("resolved_repo_provider", ""),
         "resolved_repo_ref": run.get("resolved_repo_ref", ""),
@@ -1495,6 +1514,7 @@ def _workflow_batch_run_ref(run: dict[str, Any]) -> dict[str, Any]:
         "resolved_repo_provider": run.get("resolved_repo_provider", ""),
         "resolved_repo_ref": run.get("resolved_repo_ref", ""),
         "clarification_status": run.get("clarification_status", "not_requested"),
+        "plan_review_status": run.get("plan_review_status", "not_requested"),
         "updated_at": run.get("updated_at") or run.get("finished_at") or run.get("started_at") or run.get("created_at"),
     }
 
@@ -1639,7 +1659,17 @@ def _new_workflow_batch(issues: list[dict[str, str]]) -> dict[str, Any]:
 
 
 def _batch_status_counts(runs: list[dict[str, Any]]) -> dict[str, int]:
-    counts = {"queued": 0, "running": 0, "needs_input": 0, "completed": 0, "failed": 0, "partially_completed": 0, "total": len(runs)}
+    counts = {
+        "queued": 0,
+        "running": 0,
+        "needs_input": 0,
+        "pending_plan_review": 0,
+        "completed": 0,
+        "failed": 0,
+        "cancelled": 0,
+        "partially_completed": 0,
+        "total": len(runs),
+    }
     for run in runs:
         status = str(run.get("status", "")).strip()
         if status == "completed":
@@ -1648,8 +1678,12 @@ def _batch_status_counts(runs: list[dict[str, Any]]) -> dict[str, int]:
             counts["partially_completed"] += 1
         elif status == "failed":
             counts["failed"] += 1
+        elif status == "cancelled":
+            counts["cancelled"] += 1
         elif status == "needs_input":
             counts["needs_input"] += 1
+        elif status == "pending_plan_review":
+            counts["pending_plan_review"] += 1
         elif status == "running":
             counts["running"] += 1
         else:
@@ -1697,6 +1731,323 @@ def _batch_aggregate_status(runs: list[dict[str, Any]]) -> tuple[str, dict[str, 
         return "queued", counts
     if counts["needs_input"] > 0:
         return "needs_input", counts
+    if counts["completed"] == total:
+        return "completed", counts
+    if counts["partially_completed"] == total:
+        return "partially_completed", counts
+    if counts["failed"] == total:
+        return "failed", counts
+    return "partially_completed", counts
+
+
+def _batch_status_message(status: str, counts: dict[str, int]) -> str:
+    if status == "running":
+        return "배치 실행 중입니다."
+    if status == "needs_input":
+        return "일부 이슈는 추가 확인이 필요합니다."
+    if status == "pending_plan_review":
+        return "실행 전에 작업 계획 확인 승인을 기다립니다."
+    if status == "cancelled":
+        return "작업 계획 실행을 취소했습니다."
+    if status == "completed":
+        return "선택한 이슈 실행이 모두 완료됐습니다."
+    if status == "failed":
+        return "배치 내 모든 실행이 실패했습니다."
+    if status == "partially_completed":
+        return "일부 이슈는 완료됐고 일부 이슈는 실패했습니다."
+    queued = int(counts.get("queued", 0) or 0)
+    if queued:
+        return f"대기 중인 실행 {queued}건"
+    return "배치 실행 준비 중입니다."
+
+
+def _batch_suggested_active_run_id(runs: list[dict[str, Any]]) -> str | None:
+    priority = {
+        "running": 0,
+        "needs_input": 1,
+        "pending_plan_review": 2,
+        "partially_completed": 3,
+        "failed": 4,
+        "queued": 5,
+        "completed": 6,
+        "cancelled": 7,
+    }
+    ordered = sorted(
+        runs,
+        key=lambda run: (
+            priority.get(str(run.get("status", "")).strip(), 7),
+            str(run.get("created_at", "")),
+        ),
+    )
+    return str(ordered[0].get("run_id", "")).strip() if ordered else None
+
+
+def _batch_aggregate_status(runs: list[dict[str, Any]]) -> tuple[str, dict[str, int]]:
+    counts = _batch_status_counts(runs)
+    total = counts["total"]
+    if total == 0:
+        return "queued", counts
+    if counts["running"] > 0:
+        return "running", counts
+    if counts["queued"] > 0:
+        return "queued", counts
+    if counts["needs_input"] > 0:
+        return "needs_input", counts
+    if counts["pending_plan_review"] > 0:
+        return "pending_plan_review", counts
+    if counts["cancelled"] == total:
+        return "cancelled", counts
+    if counts["completed"] == total:
+        return "completed", counts
+    if counts["partially_completed"] == total:
+        return "partially_completed", counts
+    if counts["failed"] == total:
+        return "failed", counts
+    return "partially_completed", counts
+
+
+def _batch_status_message(status: str, counts: dict[str, int]) -> str:
+    if status == "running":
+        return "배치 실행 중입니다."
+    if status == "needs_input":
+        return "일부 이슈는 추가 확인이 필요합니다."
+    if status == "pending_plan_review":
+        return "실행 전에 작업 계획 확인 승인을 기다립니다."
+    if status == "cancelled":
+        return "작업 계획 실행을 취소했습니다."
+    if status == "completed":
+        return "선택한 이슈 실행이 모두 완료됐습니다."
+    if status == "failed":
+        return "배치 내 모든 실행이 실패했습니다."
+    if status == "partially_completed":
+        return "일부 이슈는 완료됐고 일부 이슈는 실패했습니다."
+    queued = int(counts.get("queued", 0) or 0)
+    if queued:
+        return f"대기 중인 실행 {queued}건"
+    return "배치 실행 준비 중입니다."
+
+
+def _batch_suggested_active_run_id(runs: list[dict[str, Any]]) -> str | None:
+    priority = {
+        "running": 0,
+        "needs_input": 1,
+        "pending_plan_review": 2,
+        "partially_completed": 3,
+        "failed": 4,
+        "queued": 5,
+        "completed": 6,
+        "cancelled": 7,
+    }
+    ordered = sorted(
+        runs,
+        key=lambda run: (
+            priority.get(str(run.get("status", "")).strip(), 7),
+            str(run.get("created_at", "")),
+        ),
+    )
+    return str(ordered[0].get("run_id", "")).strip() if ordered else None
+
+
+def _batch_aggregate_status(runs: list[dict[str, Any]]) -> tuple[str, dict[str, int]]:
+    counts = _batch_status_counts(runs)
+    total = counts["total"]
+    if total == 0:
+        return "queued", counts
+    if counts["running"] > 0:
+        return "running", counts
+    if counts["queued"] > 0:
+        return "queued", counts
+    if counts["needs_input"] > 0:
+        return "needs_input", counts
+    if counts["pending_plan_review"] > 0:
+        return "pending_plan_review", counts
+    if counts["cancelled"] == total:
+        return "cancelled", counts
+    if counts["completed"] == total:
+        return "completed", counts
+    if counts["partially_completed"] == total:
+        return "partially_completed", counts
+    if counts["failed"] == total:
+        return "failed", counts
+    return "partially_completed", counts
+
+
+def _batch_status_message(status: str, counts: dict[str, int]) -> str:
+    if status == "running":
+        return "배치 실행 중입니다."
+    if status == "needs_input":
+        return "일부 이슈는 추가 확인이 필요합니다."
+    if status == "pending_plan_review":
+        return "실행 전에 작업 계획 확인 승인을 기다립니다."
+    if status == "cancelled":
+        return "작업 계획 실행을 취소했습니다."
+    if status == "completed":
+        return "선택한 이슈 실행이 모두 완료됐습니다."
+    if status == "failed":
+        return "배치 내 모든 실행이 실패했습니다."
+    if status == "partially_completed":
+        return "일부 이슈는 완료됐고 일부 이슈는 실패했습니다."
+    queued = int(counts.get("queued", 0) or 0)
+    if queued:
+        return f"대기 중인 실행 {queued}건"
+    return "배치 실행 준비 중입니다."
+
+
+def _batch_suggested_active_run_id(runs: list[dict[str, Any]]) -> str | None:
+    priority = {
+        "running": 0,
+        "needs_input": 1,
+        "pending_plan_review": 2,
+        "partially_completed": 3,
+        "failed": 4,
+        "queued": 5,
+        "completed": 6,
+        "cancelled": 7,
+    }
+    ordered = sorted(
+        runs,
+        key=lambda run: (
+            priority.get(str(run.get("status", "")).strip(), 7),
+            str(run.get("created_at", "")),
+        ),
+    )
+    return str(ordered[0].get("run_id", "")).strip() if ordered else None
+
+
+def _batch_aggregate_status(runs: list[dict[str, Any]]) -> tuple[str, dict[str, int]]:
+    counts = _batch_status_counts(runs)
+    total = counts["total"]
+    if total == 0:
+        return "queued", counts
+    if counts["running"] > 0:
+        return "running", counts
+    if counts["queued"] > 0:
+        return "queued", counts
+    if counts["needs_input"] > 0:
+        return "needs_input", counts
+    if counts["pending_plan_review"] > 0:
+        return "pending_plan_review", counts
+    if counts["cancelled"] == total:
+        return "cancelled", counts
+    if counts["completed"] == total:
+        return "completed", counts
+    if counts["partially_completed"] == total:
+        return "partially_completed", counts
+    if counts["failed"] == total:
+        return "failed", counts
+    return "partially_completed", counts
+
+
+def _batch_status_message(status: str, counts: dict[str, int]) -> str:
+    if status == "running":
+        return "배치 실행 중입니다."
+    if status == "needs_input":
+        return "일부 이슈에 추가 확인이 필요합니다."
+    if status == "pending_plan_review":
+        return "실행 전에 작업 계획 확인 승인을 기다립니다."
+    if status == "completed":
+        return "선택한 이슈 실행이 모두 완료됐습니다."
+    if status == "failed":
+        return "배치 내 모든 실행이 실패했습니다."
+    if status == "partially_completed":
+        return "일부 이슈는 완료됐고 일부 이슈는 실패했습니다."
+    queued = int(counts.get("queued", 0) or 0)
+    if queued:
+        return f"대기 중인 실행 {queued}건"
+    return "배치 실행 준비 중입니다."
+
+
+def _batch_suggested_active_run_id(runs: list[dict[str, Any]]) -> str | None:
+    priority = {"running": 0, "needs_input": 1, "pending_plan_review": 2, "partially_completed": 3, "failed": 4, "queued": 5, "completed": 6}
+    ordered = sorted(
+        runs,
+        key=lambda run: (
+            priority.get(str(run.get("status", "")).strip(), 6),
+            str(run.get("created_at", "")),
+        ),
+    )
+    return str(ordered[0].get("run_id", "")).strip() if ordered else None
+
+
+def _batch_aggregate_status(runs: list[dict[str, Any]]) -> tuple[str, dict[str, int]]:
+    counts = _batch_status_counts(runs)
+    total = counts["total"]
+    if total == 0:
+        return "queued", counts
+    if counts["running"] > 0:
+        return "running", counts
+    if counts["queued"] > 0:
+        return "queued", counts
+    if counts["needs_input"] > 0:
+        return "needs_input", counts
+    if counts["pending_plan_review"] > 0:
+        return "pending_plan_review", counts
+    if counts["completed"] == total:
+        return "completed", counts
+    if counts["partially_completed"] == total:
+        return "partially_completed", counts
+    if counts["failed"] == total:
+        return "failed", counts
+    return "partially_completed", counts
+
+
+def _batch_status_message(status: str, counts: dict[str, int]) -> str:
+    if status == "running":
+        return "배치 실행 중입니다."
+    if status == "needs_input":
+        return "일부 이슈는 추가 확인이 필요합니다."
+    if status == "pending_plan_review":
+        return "실행 전에 작업 계획 확인 승인을 기다립니다."
+    if status == "cancelled":
+        return "작업 계획 실행을 취소했습니다."
+    if status == "completed":
+        return "선택한 이슈 실행이 모두 완료됐습니다."
+    if status == "failed":
+        return "배치 내 모든 실행이 실패했습니다."
+    if status == "partially_completed":
+        return "일부 이슈는 완료됐고 일부 이슈는 실패했습니다."
+    queued = int(counts.get("queued", 0) or 0)
+    if queued:
+        return f"대기 중인 실행 {queued}건"
+    return "배치 실행 준비 중입니다."
+
+
+def _batch_suggested_active_run_id(runs: list[dict[str, Any]]) -> str | None:
+    priority = {
+        "running": 0,
+        "needs_input": 1,
+        "pending_plan_review": 2,
+        "partially_completed": 3,
+        "failed": 4,
+        "queued": 5,
+        "completed": 6,
+        "cancelled": 7,
+    }
+    ordered = sorted(
+        runs,
+        key=lambda run: (
+            priority.get(str(run.get("status", "")).strip(), 7),
+            str(run.get("created_at", "")),
+        ),
+    )
+    return str(ordered[0].get("run_id", "")).strip() if ordered else None
+
+
+def _batch_aggregate_status(runs: list[dict[str, Any]]) -> tuple[str, dict[str, int]]:
+    counts = _batch_status_counts(runs)
+    total = counts["total"]
+    if total == 0:
+        return "queued", counts
+    if counts["running"] > 0:
+        return "running", counts
+    if counts["queued"] > 0:
+        return "queued", counts
+    if counts["needs_input"] > 0:
+        return "needs_input", counts
+    if counts["pending_plan_review"] > 0:
+        return "pending_plan_review", counts
+    if counts["cancelled"] == total:
+        return "cancelled", counts
     if counts["completed"] == total:
         return "completed", counts
     if counts["partially_completed"] == total:
@@ -1799,6 +2150,8 @@ def _new_workflow_run(
         "queue_position": 0,
         "clarification_status": "not_requested",
         "clarification": None,
+        "plan_review_status": "not_requested",
+        "plan_review": None,
         "request_payload": dict(request_payload or {}),
         "resolved_repo_provider": resolved_repo_provider,
         "resolved_repo_ref": resolved_repo_ref,
@@ -2242,6 +2595,7 @@ def _normalize_workflow_agent_payload(payload: dict[str, Any]) -> dict[str, Any]
     payload["codex_reasoning_effort"] = _normalize_reasoning_effort(payload.get("codex_reasoning_effort"))
     payload["claude_model"] = str(payload.get("claude_model", "")).strip()
     payload["claude_permission_mode"] = _normalize_claude_permission_mode(payload.get("claude_permission_mode"))
+    payload["enable_plan_review"] = bool(payload.get("enable_plan_review"))
     return payload
 
 
@@ -4062,6 +4416,234 @@ def _codex_output_schema() -> dict[str, Any]:
     }
 
 
+def _build_agent_plan_review_prompt(payload: dict[str, Any], repo_path: Path) -> str:
+    project_memory_block = _safe_build_project_memory_block(
+        repo_path,
+        max_history=5,
+        space_key=str(payload.get("resolved_space_key", "")).strip(),
+    )
+    acceptance = str(payload.get("acceptance_criteria", "")).strip() or "No explicit acceptance criteria provided."
+    checklist = str(payload.get("commit_checklist", "")).strip() or "No explicit commit checklist provided."
+    issue_description = _prompt_text(payload.get("issue_description", ""), 6000) or "No Jira issue description provided."
+    issue_comments = _prompt_text(payload.get("issue_comments_text", ""), 3000) or "No Jira comments provided."
+    clarification_answers = _format_clarification_answers(payload.get("clarification_answers"))
+    return textwrap.dedent(
+        f"""
+        Repository path: {repo_path}
+        Project memory:
+        {project_memory_block or "Project memory unavailable"}
+
+        Issue key: {str(payload.get("issue_key", "")).strip().upper()}
+        Issue summary: {str(payload.get("issue_summary", "")).strip()}
+        Target branch: {str(payload.get("branch_name", "")).strip()}
+        Planned commit message: {str(payload.get("commit_message", "")).strip()}
+
+        Jira issue description:
+        {issue_description}
+
+        Jira recent comments:
+        {issue_comments}
+
+        User instruction:
+        {str(payload.get("work_instruction", "")).strip()}
+
+        Acceptance criteria:
+        {acceptance}
+
+        Commit checklist:
+        {checklist}
+
+        Clarification answers already provided:
+        {clarification_answers}
+
+        Task:
+        - You are still before implementation.
+        - Summarize the work intent in Korean.
+        - Propose a concise implementation plan that the user can review before execution.
+        - List only the practical implementation steps that would actually be executed.
+        - List the main risks or open checks.
+        - Do not edit files.
+        - Do not ask new questions in this step. Clarification is already complete.
+        - Keep the output concise and specific to this repository.
+        """
+    ).strip()
+
+
+def _agent_plan_review_schema() -> dict[str, Any]:
+    return {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "properties": {
+            "plan_summary": {"type": "string"},
+            "implementation_steps": {"type": "array", "items": {"type": "string"}},
+            "risks": {"type": "array", "items": {"type": "string"}},
+        },
+        "required": ["plan_summary", "implementation_steps", "risks"],
+        "additionalProperties": False,
+    }
+
+
+def _normalize_plan_review_response(value: Any) -> dict[str, Any]:
+    payload = value if isinstance(value, dict) else {}
+    plan_summary = str(payload.get("plan_summary", "")).strip()
+    steps = [
+        " ".join(str(item or "").split())[:300]
+        for item in list(payload.get("implementation_steps") or [])
+        if str(item or "").strip()
+    ][:8]
+    risks = [
+        " ".join(str(item or "").split())[:300]
+        for item in list(payload.get("risks") or [])
+        if str(item or "").strip()
+    ][:8]
+    if not plan_summary:
+        if steps:
+            plan_summary = "실행 전에 검토할 작업 계획을 생성했습니다."
+        else:
+            plan_summary = "실행 계획 요약을 생성하지 못했습니다."
+    return {
+        "plan_summary": plan_summary,
+        "implementation_steps": steps,
+        "risks": risks,
+    }
+
+
+def _run_codex_plan_review(repo_path: Path, payload: dict[str, Any]) -> dict[str, Any]:
+    launcher = _find_codex_launcher()
+    prompt = _build_agent_plan_review_prompt(payload, repo_path)
+    codex_settings = _resolve_codex_execution_settings(payload)
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="codex-plan-", dir=DATA_DIR) as temp_dir_name:
+        temp_dir = Path(temp_dir_name)
+        schema_path = temp_dir / "plan-schema.json"
+        output_path = temp_dir / "plan-last-message.json"
+        schema_path.write_text(json.dumps(_agent_plan_review_schema(), indent=2), encoding="utf-8")
+
+        command = [
+            *launcher,
+            "exec",
+            "-c",
+            'approval_policy="never"',
+            "-s",
+            "workspace-write",
+        ]
+        if codex_settings["resolved_model"]:
+            command.extend(["-m", codex_settings["resolved_model"]])
+        if codex_settings["resolved_reasoning_effort"]:
+            command.extend(["-c", f'model_reasoning_effort="{codex_settings["resolved_reasoning_effort"]}"'])
+        command.extend(
+            [
+                "--json",
+                "--output-schema",
+                str(schema_path),
+                "--output-last-message",
+                str(output_path),
+                "--color",
+                "never",
+                "-",
+            ]
+        )
+        result = _run_codex_command(
+            command,
+            cwd=repo_path,
+            timeout=CLARIFICATION_TIMEOUT_SECONDS,
+            input_text=prompt,
+            reporter=None,
+        )
+        final_message = output_path.read_text(encoding="utf-8") if output_path.exists() else ""
+        if not final_message.strip():
+            final_message = str(result.get("last_agent_message", "")).strip()
+
+    parsed: dict[str, Any] = {}
+    if final_message.strip():
+        try:
+            parsed = json.loads(final_message)
+        except json.JSONDecodeError:
+            parsed = {}
+
+    normalized = _normalize_plan_review_response(parsed)
+    normalized.update(
+        {
+            "codex_returncode": result["returncode"],
+            "codex_timed_out": bool(result["timed_out"]),
+            "codex_elapsed_seconds": result["elapsed_seconds"],
+            "codex_last_progress_message": str(result.get("last_progress_message", "")).strip(),
+            "codex_progress_event_count": int(result.get("progress_event_count", 0) or 0),
+        }
+    )
+    if result["timed_out"]:
+        raise RuntimeError("plan_review_timeout")
+    if result["returncode"] not in {0, None}:
+        raise RuntimeError("plan_review_failed")
+    return normalized
+
+
+def _run_claude_plan_review(repo_path: Path, payload: dict[str, Any]) -> dict[str, Any]:
+    launcher = _find_claude_launcher()
+    prompt = _build_agent_plan_review_prompt(payload, repo_path)
+    claude_settings = _resolve_claude_execution_settings(payload)
+    command = [
+        *launcher,
+        "-p",
+        prompt,
+        "--output-format",
+        "json",
+        "--permission-mode",
+        "plan",
+        "--json-schema",
+        json.dumps(_agent_plan_review_schema(), ensure_ascii=False),
+        "--tools",
+        "",
+    ]
+    if claude_settings["resolved_model"]:
+        command.extend(["--model", claude_settings["resolved_model"]])
+    result = _run_claude_command(command, cwd=repo_path, timeout=CLARIFICATION_TIMEOUT_SECONDS, reporter=None)
+    parsed = _parse_claude_json_message(str(result.get("stdout", "")).strip())
+    normalized = _normalize_plan_review_response(parsed)
+    normalized.update(
+        {
+            "claude_returncode": result["returncode"],
+            "claude_timed_out": bool(result["timed_out"]),
+            "claude_elapsed_seconds": result["elapsed_seconds"],
+            "claude_last_progress_message": str(result.get("last_progress_message", "")).strip(),
+            "claude_progress_event_count": int(result.get("progress_event_count", 0) or 0),
+        }
+    )
+    if result["timed_out"]:
+        raise RuntimeError("plan_review_timeout")
+    if result["returncode"] not in {0, None}:
+        raise RuntimeError("plan_review_failed")
+    return normalized
+
+
+def _run_agent_plan_review(repo_path: Path, payload: dict[str, Any]) -> dict[str, Any]:
+    provider = _normalize_agent_provider(payload.get("agent_provider"))
+    if provider == "claude":
+        return _run_claude_plan_review(repo_path, payload)
+    return _run_codex_plan_review(repo_path, payload)
+
+
+def _plan_review_payload(payload: dict[str, Any], plan_review: dict[str, Any]) -> dict[str, Any]:
+    agent_settings = _resolve_agent_execution_settings(payload)
+    provider = str(agent_settings.get("agent_provider", _normalize_agent_provider(payload.get("agent_provider")))).strip() or DEFAULT_AGENT_PROVIDER
+    return {
+        "ok": True,
+        "status": "pending_plan_review",
+        "plan_summary": str(plan_review.get("plan_summary", "")).strip(),
+        "implementation_steps": list(plan_review.get("implementation_steps") or []),
+        "risks": list(plan_review.get("risks") or []),
+        "agent_provider": provider,
+        "resolved_agent_label": str(agent_settings.get("agent_label", AGENT_PROVIDER_LABELS.get(provider, "Agent"))).strip() or "Agent",
+        "resolved_agent_model": str(agent_settings.get("resolved_agent_model", "")).strip(),
+        "resolved_agent_execution_mode": str(agent_settings.get("resolved_agent_execution_mode", "")).strip(),
+        "provider_metadata": {
+            "provider": provider,
+            "label": str(agent_settings.get("agent_label", AGENT_PROVIDER_LABELS.get(provider, "Agent"))).strip() or "Agent",
+            "execution_mode_label": str(agent_settings.get("execution_mode_label", AGENT_EXECUTION_MODE_LABELS.get(provider, "Execution Mode"))).strip() or "Execution Mode",
+        },
+    }
+
+
 def _run_codex_edit(repo_path: Path, payload: dict[str, Any], reporter: Any = None) -> dict[str, Any]:
     launcher = _find_codex_launcher()
     prompt = _build_codex_prompt(payload, repo_path)
@@ -4403,6 +4985,22 @@ def _run_agent_clarification(repo_path: Path, payload: dict[str, Any]) -> dict[s
     if provider == "claude":
         return _run_claude_clarification(repo_path, payload)
     return _run_codex_clarification(repo_path, payload)
+
+
+def _set_run_pending_plan_review(target_run: dict[str, Any], plan_review: dict[str, Any], result_payload: dict[str, Any]) -> None:
+    target_run["status"] = "pending_plan_review"
+    target_run["message"] = str(plan_review.get("plan_summary", "")).strip() or "실행 전에 작업 계획 확인 승인을 기다립니다."
+    target_run["queue_state"] = "idle"
+    target_run["queue_position"] = 0
+    target_run["plan_review_status"] = "pending_approval"
+    target_run["plan_review"] = {
+        "plan_summary": str(plan_review.get("plan_summary", "")).strip(),
+        "implementation_steps": list(plan_review.get("implementation_steps") or []),
+        "risks": list(plan_review.get("risks") or []),
+    }
+    target_run["result"] = result_payload
+    target_run["error"] = None
+    _append_workflow_event(target_run, "pending_plan_review", target_run["message"])
 
 
 def _stage_changes(repo_path: Path) -> None:
@@ -6074,6 +6672,7 @@ def create_app() -> Flask:
             "codex_reasoning_effort": payload["codex_reasoning_effort"],
             "claude_model": payload["claude_model"],
             "claude_permission_mode": payload["claude_permission_mode"],
+            "enable_plan_review": bool(payload.get("enable_plan_review")),
             "work_instruction": str(payload.get("work_instruction", "")).strip(),
             "acceptance_criteria": str(payload.get("acceptance_criteria", "")).strip(),
             "test_command": str(payload.get("test_command", "")).strip(),
@@ -6190,6 +6789,35 @@ def create_app() -> Flask:
                     ),
                 ),
             )
+            if bool(run_payload.get("enable_plan_review")):
+                try:
+                    plan_review = _run_agent_plan_review(repo_path, run_payload)
+                except RuntimeError as exc:
+                    error_payload = {
+                        "ok": False,
+                        "status": str(exc),
+                        "message": "실행 계획 확인 단계를 완료하지 못했습니다.",
+                    }
+                    update_run(
+                        run["run_id"],
+                        lambda target_run, payload=error_payload: (
+                            target_run.__setitem__("queue_state", "finished"),
+                            target_run.__setitem__("plan_review_status", "failed"),
+                            _finish_workflow_run(target_run, "failed", payload["message"], result=None, error=payload),
+                        ),
+                    )
+                    continue
+
+                plan_payload = _plan_review_payload(run_payload, plan_review)
+                update_run(
+                    run["run_id"],
+                    lambda target_run, review=plan_review, result_payload=plan_payload: _set_run_pending_plan_review(
+                        target_run,
+                        review,
+                        result_payload,
+                    ),
+                )
+                continue
             enqueue_workflow_run(
                 PendingWorkflowJob(
                     run_id=run["run_id"],
@@ -6332,6 +6960,23 @@ def create_app() -> Flask:
                 _append_workflow_event(target_run, "queued", "추가 답변을 반영해 실행 큐에 다시 등록했습니다."),
             ),
         )
+        if bool(request_payload.get("enable_plan_review")):
+            try:
+                plan_review = _run_agent_plan_review(repo_path, request_payload)
+            except RuntimeError as exc:
+                return jsonify({"ok": False, "error": str(exc), "message": "실행 계획 확인 단계를 완료하지 못했습니다."}), 502
+            plan_payload = _plan_review_payload(request_payload, plan_review)
+            updated_run = update_run(
+                run_id,
+                lambda target_run, review=plan_review, result_payload=plan_payload, sync_data=jira_comment_sync: (
+                    target_run.__setitem__("request_payload", request_payload),
+                    target_run.__setitem__("clarification_status", "ready"),
+                    target_run.__setitem__("jira_comment_sync", sync_data),
+                    _set_run_pending_plan_review(target_run, review, result_payload),
+                ),
+            )
+            batch_snapshot = get_batch(batch_id)
+            return jsonify({"ok": True, "status": "pending_plan_review", "run": updated_run, "batch": batch_snapshot})
         enqueue_workflow_run(
             PendingWorkflowJob(
                 run_id=run_id,
@@ -6342,6 +6987,102 @@ def create_app() -> Flask:
         )
         batch_snapshot = get_batch(batch_id)
         return jsonify({"ok": True, "status": "queued", "run": updated_run, "batch": batch_snapshot})
+
+    @app.post("/api/workflow/batch/<batch_id>/runs/<run_id>/plan/approve")
+    def approve_workflow_batch_run_plan(batch_id: str, run_id: str) -> Any:
+        run = get_run(run_id)
+        if run is None or str(run.get("batch_id", "")).strip() != batch_id:
+            return jsonify({"ok": False, "error": "workflow_run_not_found"}), 404
+        if str(run.get("status", "")).strip() != "pending_plan_review":
+            return jsonify({"ok": False, "error": "workflow_run_not_waiting_for_plan_review"}), 400
+
+        repo_path = Path(str(run.get("local_repo_path", "")).strip())
+        if not repo_path.exists() or not (repo_path / ".git").exists():
+            return jsonify({"ok": False, "error": "local_repo_not_found"}), 400
+
+        request_payload = dict(run.get("request_payload") or {})
+        scm_payload = _load_scm_payload(store)
+        if not scm_payload:
+            return jsonify({"ok": False, "error": "scm_config_not_found"}), 400
+        try:
+            scm_config, _, _ = _load_repo_context(scm_payload, run.get("issue_key", ""))
+        except KeyError as exc:
+            error_code = str(exc.args[0])
+            requested_fields = _repo_context_requested_fields(error_code)
+            return (
+                jsonify(
+                    {
+                        "ok": False,
+                        "error": error_code,
+                        "fields": requested_fields,
+                        "requested_information": _build_requested_information(requested_fields),
+                    }
+                ),
+                400,
+            )
+        except ValueError as exc:
+            return jsonify({"ok": False, "error": str(exc), "fields": ["repo_mappings"]}), 400
+
+        updated_run = update_run(
+            run_id,
+            lambda target_run: (
+                target_run.__setitem__("status", "queued"),
+                target_run.__setitem__("queue_state", "queued"),
+                target_run.__setitem__("queue_position", 0),
+                target_run.__setitem__("plan_review_status", "approved"),
+                target_run.__setitem__(
+                    "plan_review",
+                    {
+                        **dict(target_run.get("plan_review") or {}),
+                        "approved_at": _utcnow_iso(),
+                    },
+                ),
+                target_run.__setitem__("result", None),
+                target_run.__setitem__("error", None),
+                _append_workflow_event(target_run, "queued", "작업 계획을 승인했고 실행 큐에 등록했습니다."),
+            ),
+        )
+        enqueue_workflow_run(
+            PendingWorkflowJob(
+                run_id=run_id,
+                repo_path=repo_path,
+                scm_config=scm_config,
+                payload=request_payload,
+            )
+        )
+        batch_snapshot = get_batch(batch_id)
+        return jsonify({"ok": True, "status": "queued", "run": updated_run, "batch": batch_snapshot})
+
+    @app.post("/api/workflow/batch/<batch_id>/runs/<run_id>/plan/cancel")
+    def cancel_workflow_batch_run_plan(batch_id: str, run_id: str) -> Any:
+        run = get_run(run_id)
+        if run is None or str(run.get("batch_id", "")).strip() != batch_id:
+            return jsonify({"ok": False, "error": "workflow_run_not_found"}), 404
+        if str(run.get("status", "")).strip() != "pending_plan_review":
+            return jsonify({"ok": False, "error": "workflow_run_not_waiting_for_plan_review"}), 400
+
+        message = "작업 계획 실행을 취소했습니다."
+        result_payload = {
+            "ok": False,
+            "status": "cancelled",
+            "message": message,
+        }
+        updated_run = update_run(
+            run_id,
+            lambda target_run, payload=result_payload: (
+                target_run.__setitem__("plan_review_status", "cancelled"),
+                target_run.__setitem__(
+                    "plan_review",
+                    {
+                        **dict(target_run.get("plan_review") or {}),
+                        "cancelled_at": _utcnow_iso(),
+                    },
+                ),
+                _finish_workflow_run(target_run, "cancelled", message, result=payload, error=None),
+            ),
+        )
+        batch_snapshot = get_batch(batch_id)
+        return jsonify({"ok": True, "status": "cancelled", "run": updated_run, "batch": batch_snapshot})
 
     @app.post("/api/workflow/clarify")
     def clarify_workflow() -> Any:
@@ -6465,37 +7206,56 @@ def create_app() -> Flask:
                 clarification["requested_information"],
             )
 
-        return jsonify(
-            {
-                "ok": True,
-                "status": "needs_input" if clarification["needs_input"] else "ready",
-                "analysis_summary": clarification["analysis_summary"],
-                "requested_information": clarification["requested_information"],
-                "jira_comment_sync": jira_comment_sync,
-                "agent_provider": str(payload.get("agent_provider", DEFAULT_AGENT_PROVIDER)),
-                "resolved_agent_label": AGENT_PROVIDER_LABELS.get(
+        response_payload = {
+            "ok": True,
+            "status": "needs_input" if clarification["needs_input"] else "ready",
+            "analysis_summary": clarification["analysis_summary"],
+            "requested_information": clarification["requested_information"],
+            "jira_comment_sync": jira_comment_sync,
+            "agent_provider": str(payload.get("agent_provider", DEFAULT_AGENT_PROVIDER)),
+            "resolved_agent_label": AGENT_PROVIDER_LABELS.get(
+                str(payload.get("agent_provider", DEFAULT_AGENT_PROVIDER)),
+                AGENT_PROVIDER_LABELS[DEFAULT_AGENT_PROVIDER],
+            ),
+            "resolved_space_key": resolved_space_key,
+            "resolved_repo_provider": scm_config.provider,
+            "resolved_repo_ref": scm_config.repo_ref,
+            "resolved_repo_owner": scm_config.repo_owner,
+            "resolved_repo_name": scm_config.repo_name,
+            "resolved_base_branch": scm_config.base_branch,
+            "provider_metadata": {
+                "provider": str(payload.get("agent_provider", DEFAULT_AGENT_PROVIDER)),
+                "label": AGENT_PROVIDER_LABELS.get(
                     str(payload.get("agent_provider", DEFAULT_AGENT_PROVIDER)),
                     AGENT_PROVIDER_LABELS[DEFAULT_AGENT_PROVIDER],
                 ),
-                "resolved_space_key": resolved_space_key,
-                "resolved_repo_provider": scm_config.provider,
-                "resolved_repo_ref": scm_config.repo_ref,
-                "resolved_repo_owner": scm_config.repo_owner,
-                "resolved_repo_name": scm_config.repo_name,
-                "resolved_base_branch": scm_config.base_branch,
-                "provider_metadata": {
-                    "provider": str(payload.get("agent_provider", DEFAULT_AGENT_PROVIDER)),
-                    "label": AGENT_PROVIDER_LABELS.get(
-                        str(payload.get("agent_provider", DEFAULT_AGENT_PROVIDER)),
-                        AGENT_PROVIDER_LABELS[DEFAULT_AGENT_PROVIDER],
-                    ),
-                    "execution_mode_label": AGENT_EXECUTION_MODE_LABELS.get(
-                        str(payload.get("agent_provider", DEFAULT_AGENT_PROVIDER)),
-                        AGENT_EXECUTION_MODE_LABELS[DEFAULT_AGENT_PROVIDER],
-                    ),
-                },
-            }
-        )
+                "execution_mode_label": AGENT_EXECUTION_MODE_LABELS.get(
+                    str(payload.get("agent_provider", DEFAULT_AGENT_PROVIDER)),
+                    AGENT_EXECUTION_MODE_LABELS[DEFAULT_AGENT_PROVIDER],
+                ),
+            },
+        }
+        if not clarification["needs_input"] and bool(payload.get("enable_plan_review")):
+            try:
+                plan_review = _run_agent_plan_review(
+                    repo_path,
+                    {
+                        **payload,
+                        "resolved_space_key": resolved_space_key,
+                        "resolved_repo_provider": scm_config.provider,
+                        "resolved_repo_ref": scm_config.repo_ref,
+                        "resolved_repo_owner": scm_config.repo_owner,
+                        "resolved_repo_name": scm_config.repo_name,
+                        "resolved_base_branch": scm_config.base_branch,
+                    },
+                )
+            except FileNotFoundError as exc:
+                return jsonify(_agent_cli_missing_error(str(payload.get("agent_provider", DEFAULT_AGENT_PROVIDER)), exc)), 400
+            except RuntimeError as exc:
+                return jsonify({"ok": False, "error": str(exc), "message": "실행 계획 확인 단계를 완료하지 못했습니다."}), 502
+            response_payload.update(_plan_review_payload(payload, plan_review))
+            response_payload["status"] = "pending_plan_review"
+        return jsonify(response_payload)
 
     @app.post("/api/workflow/run")
     def run_workflow() -> Any:
