@@ -12,11 +12,17 @@
 </head>
 <body>
   <main class="container">
-    <section class="hero">
+    <section class="hero hero--workspace">
       <p class="eyebrow">Jira x GitHub PoC</p>
+      <button id="open_setup_guide" type="button" class="secondary-button floating-guide-button">설정 가이드 보기</button>
     </section>
 
-    <section class="card">
+    <div id="workspace_shell" class="workspace-shell workspace-shell--prepare">
+      <div id="workspace_view_track" class="workspace-view-track">
+      <section id="workspace_prepare_view" class="workspace-view workspace-view--prepare is-active" aria-hidden="false">
+        <div class="prepare-stage-grid">
+
+    <section id="setup_section" class="card sidebar-stage sidebar-stage--setup prepare-stage-card">
       <div class="card-header">
         <div class="card-header__copy">
           <p class="section-kicker">Setup</p>
@@ -26,31 +32,13 @@
           <button id="load_config" type="button">저장값 불러오기</button>
           <button id="validate_config" type="button">필수값 검사</button>
           <button id="save_config" type="button">암호화 저장</button>
-          <button id="open_setup_guide" type="button" class="secondary-button">설정 가이드 보기</button>
         </div>
       </div>
 
+      <div class="sidebar-stage__body sidebar-stage__body--setup">
       <section class="config-sticky-group">
-        <p class="config-group-kicker">공통 정보</p>
-        <div class="config-step-pills" aria-label="설정 단계">
-          <button type="button" class="config-step-pill is-active" data-config-flow-step="jira">
-            <span class="config-step-pill__index">1</span>
-            <span class="config-step-pill__text">
-              <strong>Jira 입력</strong>
-              <small>연결에 필요한 4개 값</small>
-            </span>
-          </button>
-          <button type="button" class="config-step-pill" data-config-flow-step="repo">
-            <span class="config-step-pill__index">2</span>
-            <span class="config-step-pill__text">
-              <strong>공간별 저장소 연결</strong>
-              <small>공간마다 별도 설정 필수</small>
-            </span>
-          </button>
-        </div>
-
         <div class="config-flow">
-          <details class="config-panel config-panel--jira" data-config-panel="jira" open>
+          <details class="config-panel config-panel--jira" data-config-panel="jira">
             <summary class="config-panel__summary">
               <div class="config-panel__track">1</div>
               <div class="config-panel__copy">
@@ -61,6 +49,13 @@
             </summary>
             <div class="config-panel__body">
               <div class="config-panel__body-inner">
+                <div class="config-panel__sheet-header">
+                  <div class="config-panel__sheet-copy">
+                    <p class="config-panel__eyebrow">Jira</p>
+                    <h3>Jira 연결 정보</h3>
+                  </div>
+                  <button type="button" class="ghost-button config-panel__close" data-close-config-panel="jira">닫기</button>
+                </div>
                 <div class="grid">
                   <label>Jira Base URL<input id="jira_base_url" type="text" placeholder="https://your-domain.atlassian.net"></label>
                   <label>Jira Email<input id="jira_email" type="email" placeholder="user@example.com"></label>
@@ -82,6 +77,13 @@
             </summary>
             <div class="config-space-panel__body config-panel__body">
               <div class="config-panel__body-inner">
+                <div class="config-panel__sheet-header">
+                  <div class="config-panel__sheet-copy">
+                    <p class="config-panel__eyebrow">Repo Mapping</p>
+                    <h3>공간별 저장소 연결</h3>
+                  </div>
+                  <button type="button" class="ghost-button config-panel__close" data-close-config-panel="repo">닫기</button>
+                </div>
                 <label class="wide repo-mapping-panel-host">
                   공간별 저장소 연결
                   <textarea id="repo_mappings" rows="1" hidden></textarea>
@@ -198,12 +200,11 @@
             </div>
           </details>
         </div>
-        <pre id="config_result" class="result"></pre>
-        <div id="config_result_actions" class="result-actions"></div>
       </section>
+      </div>
     </section>
 
-    <section class="card">
+    <section id="backlog_section" class="card sidebar-stage sidebar-stage--backlog prepare-stage-card prepare-stage-card--backlog">
       <div class="card-header">
         <div class="card-header__copy">
           <p class="section-kicker">Jira</p>
@@ -214,25 +215,32 @@
         </div>
       </div>
 
-      <div id="jira_backlog_table_shell" class="jira-backlog-shell">
-        <div id="issue_table" class="jira-backlog-list">
-          <p class="batch-preview-empty">백로그 조회를 실행하면 이슈 목록을 표시한다.</p>
+      <div class="sidebar-stage__body sidebar-stage__body--backlog">
+        <div id="jira_backlog_table_shell" class="jira-backlog-shell">
+          <div class="jira-backlog-carousel">
+            <div class="jira-backlog-carousel__viewport">
+              <div id="issue_table" class="jira-backlog-list">
+                <p class="batch-preview-empty">백로그 조회를 실행하면 이슈 목록을 표시한다.</p>
+              </div>
+            </div>
+          </div>
+          <div id="jira_backlog_pagination" class="jira-backlog-pagination" hidden></div>
         </div>
-      </div>
 
-      <section id="jira_selection_summary" class="selection-summary">
-        <div class="selection-summary__copy">
-          <strong id="selected_issue_count">선택한 이슈 0건</strong>
-          <p id="selected_issue_keys" class="grid-note" hidden></p>
-        </div>
-        <div class="selection-summary__actions">
-          <button id="clear_issue_selection" type="button" class="secondary-button">선택 해제</button>
-        </div>
-      </section>
+        <section id="jira_selection_summary" class="selection-summary">
+          <div class="selection-summary__copy">
+            <strong id="selected_issue_count">선택한 이슈 0건</strong>
+            <p id="selected_issue_keys" class="grid-note" hidden></p>
+          </div>
+          <div class="selection-summary__actions">
+            <button id="clear_issue_selection" type="button" class="secondary-button">선택 해제</button>
+          </div>
+        </section>
+      </div>
 
     </section>
 
-    <section class="card">
+    <section id="workflow_prepare_section" class="card sidebar-stage sidebar-stage--workflow prepare-stage-card">
       <div class="card-header">
         <div class="card-header__copy">
           <p class="section-kicker">Workflow</p>
@@ -245,6 +253,7 @@
         </div>
       </div>
 
+      <div class="sidebar-stage__body sidebar-stage__body--workflow">
       <div class="workflow-hidden-inputs" hidden>
         <input id="issue_key" type="hidden">
         <input id="issue_summary" type="hidden">
@@ -294,6 +303,7 @@
               </select>
             </label>
           </div>
+          <p class="grid-note">Claude Model을 비우면 이 앱의 고정 모델이 아니라 로그인된 Claude Code 로컬 환경 기본값을 사용한다.</p>
         </section>
         <label class="wide">작업 지시 상세<textarea id="work_instruction" rows="4" placeholder="예) 승인 버튼 클릭 시 /api/approve를 호출하고, 기존 테이블 구조와 DOM id는 유지한다."></textarea></label>
         <label class="wide">수용 기준<textarea id="acceptance_criteria" rows="4" placeholder="예) 승인 버튼 클릭 시 API가 1회 호출된다.&#10;예) 성공 시 완료 메시지가 표시된다.&#10;예) 기존 배치 실행 흐름은 깨지지 않는다."></textarea></label>
@@ -314,167 +324,240 @@
 
       <pre id="workflow_result" class="result"></pre>
       <div id="workflow_result_actions" class="result-actions"></div>
-    </section>
-
-    <section id="work_status_section" class="card">
-      <div class="card-header">
-        <div class="card-header__copy">
-          <p class="section-kicker">Workspace</p>
-          <h2>4. 작업 현황</h2>
-          <p id="work_status_hint" class="card-header__note">현재 진행 중인 작업이 없습니다.</p>
-        </div>
-        <div class="card-header__actions">
-          <button id="refresh_batch_workspace" type="button" class="secondary-button">새로고침</button>
-          <button id="focus_running_run" type="button" class="secondary-button">진행 중 탭으로 이동</button>
-        </div>
       </div>
+    </section>
+        </div>
+      </section>
 
-      <div class="work-status-layout">
-        <section class="work-status-main">
-          <section id="work_status_empty" class="detail-card work-status-empty">
-            <h3>현재 진행 중인 작업이 없습니다.</h3>
-            <p class="detail-copy">배치 실행을 시작하면 여기에서 이슈별 작업 현황을 확인할 수 있습니다.</p>
+      <section id="workspace_operations_view" class="workspace-view workspace-view--operations" aria-hidden="true" inert>
+        <div class="operations-stage-grid">
+          <section id="action_center_section" class="card">
+            <div class="card-header">
+              <div class="card-header__copy">
+                <p class="section-kicker">Action Center</p>
+                <h2>확인 및 승인</h2>
+                <p id="action_center_hint" class="card-header__note">사용자 확인이 필요한 작업을 여기에서 바로 처리한다.</p>
+              </div>
+            </div>
+
+            <div id="action_center_run_tabs" class="action-center-run-tabs" hidden></div>
+
+            <section id="action_center_empty" class="detail-card work-status-empty">
+              <h3>확인이나 승인이 필요한 작업이 없습니다.</h3>
+              <p class="detail-copy">질문 응답이나 계획 승인이 필요한 경우 이 영역에 바로 표시됩니다.</p>
+            </section>
+
+            <div id="action_center_content" hidden>
+              <div id="batch_run_plan_review" class="plan-review-card" hidden>
+                <div class="plan-review-card__header">
+                  <div>
+                    <strong>실행 전 작업 계획</strong>
+                    <p id="batch_run_plan_summary" class="detail-copy">승인 대기 중인 계획이 없다.</p>
+                  </div>
+                </div>
+                <div id="batch_run_plan_markdown" class="plan-review-markdown">승인 대기 중인 계획이 없다.</div>
+                <div class="plan-review-card__footer">
+                  <button id="cancel_batch_run_plan" type="button" class="secondary-button">계획 취소</button>
+                  <button id="approve_batch_run_plan" type="button" class="primary-button">이 계획으로 실행</button>
+                </div>
+              </div>
+
+              <section id="batch_run_clarification_card" class="detail-card" hidden>
+                <h3>질문 응답</h3>
+                <p id="batch_run_clarification_summary" class="detail-copy">추가 확인이 필요한 경우 이 영역에서 질문과 답변을 처리한다.</p>
+                <div id="batch_run_clarification_state" class="clarification-state-banner"></div>
+                <div id="batch_run_clarification_questions" class="clarification-question-list"></div>
+                <div id="batch_run_clarification_answers" class="clarification-answer-list"></div>
+                <div id="batch_run_clarification_actions" class="actions" hidden>
+                  <button id="submit_batch_run_answers" type="button" class="primary-button">답변 반영 후 실행 계속</button>
+                </div>
+              </section>
+
+              <section id="batch_run_sync_status_card" class="detail-card sync-status-panel" hidden>
+                <div class="sync-status-panel__header">
+                  <h3>Jira 코멘트</h3>
+                  <p>사전 질문과 사용자 답변이 Jira 이슈 코멘트에 반영되는지 확인한다.</p>
+                </div>
+                <div id="batch_run_sync_status_list" class="sync-status-list"></div>
+              </section>
+            </div>
           </section>
 
-          <div id="work_status_content" hidden>
-            <div id="batch_summary_cards" class="summary-grid"></div>
-            <section id="batch_flow_panel" class="detail-card work-flow-panel">
-              <div class="work-flow-panel__header">
-                <div>
-                  <h3>진행 플로우</h3>
+          <section class="card monitoring-shell">
+            <div class="card-header">
+              <div class="card-header__copy">
+                <p class="section-kicker">Monitoring</p>
+                <h2>관제</h2>
+                <p class="card-header__note">진행 중 작업과 작업 로그를 한 영역에서 전환해 확인한다.</p>
+              </div>
+            </div>
+
+            <div id="monitoring_tabs" class="workspace-tabs workspace-tabs--monitoring" role="tablist" aria-label="관제 탭">
+              <button type="button" class="workspace-tab workspace-tab--detail is-active" data-monitor-tab="active" aria-selected="true">
+                <span class="workspace-tab__meta"><strong>진행 중 작업</strong></span>
+              </button>
+              <button type="button" class="workspace-tab workspace-tab--detail" data-monitor-tab="logs" aria-selected="false">
+                <span class="workspace-tab__meta"><strong>작업 로그</strong></span>
+              </button>
+            </div>
+
+            <section id="work_status_section" class="monitoring-panel">
+              <div class="card-header">
+                <div class="card-header__copy">
+                  <p class="section-kicker">Active Runs</p>
+                  <h2>진행 중 작업</h2>
+                  <p id="work_status_hint" class="card-header__note">현재 진행 중인 작업이 없습니다.</p>
                 </div>
-                <p id="batch_flow_caption" class="work-flow-panel__caption">배치를 선택하면 전체 진행 흐름을 표시한다.</p>
-              </div>
-              <div id="batch_flow_board" class="batch-flow-board">
-                <p class="batch-preview-empty">배치를 선택하면 각 일감의 현재 위치를 플로우차트로 표시한다.</p>
-              </div>
-            </section>
-
-            <div id="batch_run_tabs" class="workspace-tabs workspace-tabs--runs" role="tablist" aria-label="작업 탭"></div>
-
-            <section class="work-run-shell">
-              <div class="work-run-shell__header">
-                <div id="batch_run_meta" class="issue-meta"></div>
-                <div id="batch_detail_tabs" class="workspace-tabs workspace-tabs--detail" role="tablist" aria-label="작업 상세 탭"></div>
+                <div class="card-header__actions">
+                  <button id="refresh_batch_workspace" type="button" class="secondary-button">새로고침</button>
+                  <button id="focus_running_run" type="button" class="secondary-button">진행 중 탭으로 이동</button>
+                </div>
               </div>
 
-              <section id="batch_detail_panel_overview" class="workspace-detail-panel" data-detail-panel="overview">
-                <section class="detail-card">
-                  <h3>실행 개요</h3>
-                  <div id="batch_run_overview" class="summary-grid"></div>
-                  <div id="batch_run_plan_review" class="plan-review-card" hidden>
-                    <div class="plan-review-card__header">
-                      <div>
-                        <strong>실행 전 작업 계획</strong>
-                        <p id="batch_run_plan_summary" class="detail-copy">승인 대기 중인 계획이 없다.</p>
+              <div class="work-status-layout">
+                <section class="work-status-main">
+                  <section id="work_status_empty" class="detail-card work-status-empty">
+                    <h3>현재 진행 중인 작업이 없습니다.</h3>
+                    <p class="detail-copy">배치 실행을 시작하면 여기에서 이슈별 작업 현황을 확인할 수 있습니다.</p>
+                  </section>
+
+                  <div id="work_status_content" hidden>
+                    <div id="batch_summary_cards" class="summary-grid"></div>
+                    <section id="batch_flow_panel" class="detail-card work-flow-panel">
+                      <div class="work-flow-panel__header">
+                        <div>
+                          <h3>진행 플로우</h3>
+                        </div>
+                        <p id="batch_flow_caption" class="work-flow-panel__caption">배치를 선택하면 전체 진행 흐름을 표시한다.</p>
                       </div>
-                      <button id="approve_batch_run_plan" type="button" class="primary-button">이 계획으로 실행</button>
-                    </div>
-                    <div class="detail-grid plan-review-card__content">
-                      <section class="detail-card">
-                        <h3>구현 단계</h3>
-                        <ul id="batch_run_plan_steps" class="file-list"></ul>
+                      <div id="batch_flow_board" class="batch-flow-board">
+                        <p class="batch-preview-empty">배치를 선택하면 각 일감의 현재 위치를 플로우차트로 표시한다.</p>
+                      </div>
+                    </section>
+
+                    <div id="batch_run_tabs" class="workspace-tabs workspace-tabs--runs" role="tablist" aria-label="작업 탭"></div>
+
+                    <section class="work-run-shell">
+                      <div class="work-run-shell__header">
+                        <div id="batch_run_meta" class="issue-meta"></div>
+                        <div id="batch_detail_tabs" class="workspace-tabs workspace-tabs--detail" role="tablist" aria-label="작업 상세 탭"></div>
+                      </div>
+
+                      <section id="batch_detail_panel_overview" class="workspace-detail-panel" data-detail-panel="overview">
+                        <section class="detail-card">
+                          <h3>실행 개요</h3>
+                          <div id="batch_run_overview" class="summary-grid"></div>
+                        </section>
                       </section>
-                      <section class="detail-card">
-                        <h3>리스크와 확인 포인트</h3>
-                        <ul id="batch_run_plan_risks" class="file-list"></ul>
+
+                      <section id="batch_detail_panel_summary" class="workspace-detail-panel" data-detail-panel="summary" hidden>
+                        <div class="detail-grid">
+                          <section class="detail-card">
+                            <h3>요청 의도</h3>
+                            <p id="batch_run_intent" class="detail-copy">실행 후 표시한다.</p>
+                          </section>
+                          <section class="detail-card">
+                            <h3>구현 요약</h3>
+                            <p id="batch_run_implementation" class="detail-copy">실행 후 표시한다.</p>
+                          </section>
+                          <section class="detail-card">
+                            <h3>검증 요약</h3>
+                            <p id="batch_run_validation" class="detail-copy">실행 후 표시한다.</p>
+                          </section>
+                          <section class="detail-card">
+                            <h3>잔여 리스크</h3>
+                            <ul id="batch_run_risks" class="file-list"></ul>
+                          </section>
+                        </div>
                       </section>
-                    </div>
+
+                      <section id="batch_detail_panel_artifacts" class="workspace-detail-panel" data-detail-panel="artifacts" hidden>
+                        <section class="detail-card">
+                          <h3>처리 파일</h3>
+                          <ul id="batch_run_files" class="file-list"></ul>
+                        </section>
+
+                        <section class="detail-card">
+                          <h3>Diff</h3>
+                          <pre id="batch_run_diff" class="result result-tall"></pre>
+                        </section>
+                      </section>
+
+                      <section id="batch_detail_panel_logs" class="workspace-detail-panel" data-detail-panel="logs" hidden>
+                        <div class="detail-grid">
+                          <section class="detail-card">
+                            <h3>문법 검사 출력</h3>
+                            <pre id="batch_run_test_output" class="result"></pre>
+                          </section>
+                          <section class="detail-card">
+                            <h3>실행 로그</h3>
+                            <pre id="batch_run_log" class="result result-scroll"></pre>
+                          </section>
+                        </div>
+                      </section>
+                    </section>
                   </div>
                 </section>
-              </section>
-
-              <section id="batch_detail_panel_summary" class="workspace-detail-panel" data-detail-panel="summary" hidden>
-                <div class="detail-grid">
-                  <section class="detail-card">
-                    <h3>요청 의도</h3>
-                    <p id="batch_run_intent" class="detail-copy">실행 후 표시한다.</p>
-                  </section>
-                  <section class="detail-card">
-                    <h3>구현 요약</h3>
-                    <p id="batch_run_implementation" class="detail-copy">실행 후 표시한다.</p>
-                  </section>
-                  <section class="detail-card">
-                    <h3>검증 요약</h3>
-                    <p id="batch_run_validation" class="detail-copy">실행 후 표시한다.</p>
-                  </section>
-                  <section class="detail-card">
-                    <h3>잔여 리스크</h3>
-                    <ul id="batch_run_risks" class="file-list"></ul>
-                  </section>
-                </div>
-              </section>
-
-              <section id="batch_detail_panel_clarification" class="workspace-detail-panel" data-detail-panel="clarification" hidden>
-                <section class="detail-card">
-                  <h3>질문과 답변</h3>
-                  <p id="batch_run_clarification_summary" class="detail-copy">추가 확인이 필요한 경우 이슈 탭 안에서 질문과 답변을 처리한다.</p>
-                  <div id="batch_run_clarification_state" class="clarification-state-banner"></div>
-                  <div id="batch_run_clarification_questions" class="clarification-question-list"></div>
-                  <div id="batch_run_clarification_answers" class="clarification-answer-list"></div>
-                  <div id="batch_run_clarification_actions" class="actions" hidden>
-                    <button id="submit_batch_run_answers" type="button" class="primary-button">답변 반영 후 실행 계속</button>
-                  </div>
-                </section>
-
-                <section id="batch_run_sync_status_card" class="detail-card sync-status-panel" hidden>
-                  <div class="sync-status-panel__header">
-                    <h3>Jira 코멘트</h3>
-                    <p>사전 질문과 사용자 답변이 Jira 이슈 코멘트에 남았는지 확인한다.</p>
-                  </div>
-                  <div id="batch_run_sync_status_list" class="sync-status-list"></div>
-                </section>
-              </section>
-
-              <section id="batch_detail_panel_artifacts" class="workspace-detail-panel" data-detail-panel="artifacts" hidden>
-                <section class="detail-card">
-                  <h3>처리 파일</h3>
-                  <ul id="batch_run_files" class="file-list"></ul>
-                </section>
-
-                <section class="detail-card">
-                  <h3>Diff</h3>
-                  <pre id="batch_run_diff" class="result result-tall"></pre>
-                </section>
-              </section>
-
-              <section id="batch_detail_panel_logs" class="workspace-detail-panel" data-detail-panel="logs" hidden>
-                <div class="detail-grid">
-                  <section class="detail-card">
-                    <h3>문법 검사 출력</h3>
-                    <pre id="batch_run_test_output" class="result"></pre>
-                  </section>
-                  <section class="detail-card">
-                    <h3>실행 로그</h3>
-                    <pre id="batch_run_log" class="result result-scroll"></pre>
-                  </section>
-                </div>
-              </section>
+              </div>
             </section>
-          </div>
+
+            <section id="workflow_log_section" class="monitoring-panel" hidden>
+              <div class="card-header">
+                <div class="card-header__copy">
+                  <p class="section-kicker">History</p>
+                  <h2>작업 로그</h2>
+                </div>
+                <div class="card-header__actions">
+                  <button id="refresh_workflow_logs" type="button" class="secondary-button">새로고침</button>
+                </div>
+              </div>
+
+              <div class="workflow-log-shell">
+                <p id="workflow_log_caption" class="detail-copy">최근 처리된 작업 요약을 시간순으로 확인한다.</p>
+                <div id="workflow_log_list" class="workflow-log-list">
+                  <p class="batch-list__empty">저장된 작업 로그가 없다.</p>
+                </div>
+              </div>
+            </section>
+          </section>
+        </div>
+      </section>
+      </div>
+
+      <button id="show_operations_view" type="button" class="workspace-view-toggle workspace-view-toggle--to-operations" aria-controls="workspace_operations_view">
+        <span class="workspace-view-toggle__label">작업 현황 보기</span>
+        <span class="workspace-view-toggle__icon" aria-hidden="true">&gt;</span>
+      </button>
+      <button id="show_prepare_view" type="button" class="workspace-view-toggle workspace-view-toggle--to-prepare" aria-controls="workspace_prepare_view" hidden>
+        <span class="workspace-view-toggle__icon" aria-hidden="true">&lt;</span>
+        <span class="workspace-view-toggle__label">설정 및 준비로</span>
+      </button>
+    </div>
+  </main>
+
+  <div id="jira_issue_modal" class="modal-shell" aria-hidden="true">
+    <div class="modal-backdrop" data-close-jira-issue="true"></div>
+    <section class="issue-detail-modal" role="dialog" aria-modal="true" aria-labelledby="jira_issue_modal_title">
+      <div class="issue-detail-modal__header">
+        <div>
+          <p class="section-kicker">Jira</p>
+          <h2 id="jira_issue_modal_title">이슈 상세</h2>
+          <div id="jira_issue_modal_meta" class="issue-meta"></div>
+        </div>
+        <button type="button" class="ghost-button" data-close-jira-issue="true">닫기</button>
+      </div>
+      <div class="issue-detail-modal__body">
+        <section class="detail-card">
+          <h3>선택 이슈 상세</h3>
+          <pre id="jira_issue_modal_description" class="result result-medium">이슈를 선택하면 상세 설명을 표시한다.</pre>
+        </section>
+        <section class="detail-card">
+          <h3>최근 코멘트</h3>
+          <pre id="jira_issue_modal_comments" class="result result-medium">이슈를 선택하면 최근 코멘트를 표시한다.</pre>
         </section>
       </div>
     </section>
-
-    <section id="workflow_log_section" class="card" hidden>
-      <div class="card-header">
-        <div class="card-header__copy">
-          <p class="section-kicker">History</p>
-          <h2>5. 작업 로그</h2>
-        </div>
-        <div class="card-header__actions">
-          <button id="refresh_workflow_logs" type="button" class="secondary-button">새로고침</button>
-        </div>
-      </div>
-
-      <div class="workflow-log-shell">
-        <p id="workflow_log_caption" class="detail-copy">최근 처리된 작업 요약을 시간순으로 확인한다.</p>
-        <div id="workflow_log_list" class="workflow-log-list">
-          <p class="batch-list__empty">저장된 작업 로그가 없다.</p>
-        </div>
-      </div>
-    </section>
-  </main>
+  </div>
 
   <div id="setup_guide_modal" class="modal-shell" aria-hidden="true">
     <div class="modal-backdrop" data-close-guide="true"></div>

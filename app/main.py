@@ -5953,10 +5953,18 @@ def create_app() -> Flask:
         snapshot: dict[str, Any] | None = None
         with workflow_runs_lock:
             run = workflow_runs.get(run_id)
-            if run is not None:
-                updater(run)
-                _save_workflow_run(run)
-                snapshot = _workflow_run_snapshot(run)
+            if run is None:
+                persisted_run = _load_workflow_run(run_id)
+                if persisted_run is None:
+                    return None
+                persisted_run, changed = _mark_workflow_run_stale(persisted_run)
+                run = persisted_run
+                workflow_runs[run_id] = run
+                if changed:
+                    _save_workflow_run(run)
+            updater(run)
+            _save_workflow_run(run)
+            snapshot = _workflow_run_snapshot(run)
         if snapshot is not None:
             _sync_batch_from_run_snapshot(snapshot)
         return snapshot

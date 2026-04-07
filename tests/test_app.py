@@ -131,6 +131,7 @@ def test_index_page_renders_automation_fields() -> None:
     assert 'id="codex_reasoning_effort"' in html
     assert 'id="claude_model"' in html
     assert 'id="claude_permission_mode"' in html
+    assert "Claude Code 로컬 환경 기본값" in html
     assert 'id="enable_plan_review"' in html
     assert 'id="workflow_provider_panel_codex"' in html
     assert 'id="workflow_provider_panel_claude"' in html
@@ -152,11 +153,19 @@ def test_index_page_renders_automation_fields() -> None:
     assert 'id="batch_flow_caption"' in html
     assert 'id="jira_backlog_table_shell"' in html
     assert 'class="jira-backlog-list"' in html
+    assert 'id="jira_backlog_pagination"' in html
+    assert 'id="jira_issue_modal"' in html
+    assert 'id="jira_issue_modal_meta"' in html
+    assert 'id="jira_issue_modal_description"' in html
+    assert 'id="jira_issue_modal_comments"' in html
     assert 'id="mapping_github_token"' in html
     assert 'id="browse_mapping_local_repo_path"' in html
     assert 'id="repo_mapping_settings_panel"' in html
     assert 'id="repo_mapping_settings_summary"' in html
+    assert 'id="config_result"' not in html
+    assert 'id="config_result_actions"' not in html
     assert 'id="test_command" type="hidden"' in html
+    assert 'class="secondary-button floating-guide-button"' in html
     assert 'id="repo_mapping_edit_form"' in html
     assert 'id="repo_mapping_edit_toggle_token"' in html
     assert 'id="browse_repo_mapping_edit_local_repo_path"' in html
@@ -164,12 +173,19 @@ def test_index_page_renders_automation_fields() -> None:
     assert 'id="repo_mapping_edit_settings_summary"' in html
     assert 'data-provider-panel="gitlab"' in html
     assert 'data-provider-panel="github"' in html
-    assert 'data-config-flow-step="jira"' in html
-    assert 'data-config-flow-step="repo"' in html
     assert 'data-config-panel="jira"' in html
     assert 'data-config-panel="repo"' in html
+    assert 'id="setup_guide_modal" class="modal-shell"' in html
     assert 'id="workflow_log_section"' in html
     assert 'id="workflow_log_list"' in html
+    assert 'id="action_center_section"' in html
+    assert 'id="workspace_prepare_view"' in html
+    assert 'id="workspace_operations_view"' in html
+    assert 'id="show_operations_view"' in html
+    assert 'id="show_prepare_view"' in html
+    assert 'id="action_center_empty"' in html
+    assert 'id="action_center_content"' in html
+    assert 'id="action_center_run_tabs"' in html
     assert 'id="batch_run_plan_review"' in html
     assert 'id="approve_batch_run_plan"' in html
     assert 'id="github_owner"' not in html
@@ -184,10 +200,12 @@ def test_index_page_renders_automation_fields() -> None:
     assert 'id="batch_list"' not in html
     assert 'id="batch_run_tabs"' in html
     assert 'id="batch_detail_tabs"' in html
+    assert 'id="monitoring_tabs"' in html
     assert 'id="toggle_failed_runs"' not in html
+    assert 'data-monitor-tab="active"' in html
+    assert 'data-monitor-tab="logs"' in html
     assert 'data-detail-panel="overview"' in html
     assert 'data-detail-panel="summary"' in html
-    assert 'data-detail-panel="clarification"' in html
     assert 'data-detail-panel="artifacts"' in html
     assert 'data-detail-panel="logs"' in html
     assert 'id="batch_run_clarification_state"' in html
@@ -214,7 +232,8 @@ def test_index_page_renders_automation_fields() -> None:
     assert html.index('id="load_backlog"') < html.index('id="issue_table"')
     assert html.index('id="jira_backlog_table_shell"') < html.index('id="jira_selection_summary"')
     assert html.index('id="workflow_batch_actions"') < html.index('id="workflow_result"')
-    assert html.index('id="work_status_section"') > html.index('id="workflow_result_actions"')
+    assert html.index('id="action_center_section"') > html.index('id="workflow_result_actions"')
+    assert html.index('id="monitoring_tabs"') < html.index('id="work_status_section"')
     assert html.index('id="mapping_provider"') < html.index('id="repo_mapping_settings_panel"')
     assert html.index('id="gitlab_base_url"') < html.index('id="mapping_repo_ref"')
 
@@ -497,6 +516,41 @@ def test_jira_backlog_script_uses_inline_meta_without_click_helper_copy() -> Non
     assert '최근 코멘트가 없습니다.' in script
     assert '클릭하면 이슈 상세와 최근 코멘트를 펼친다.' not in script
     assert 'data-jira-issue-meta></div>' not in script
+    assert 'checked: idx === 0' not in script
+    assert 'checked: index === 0' not in batch_script
+
+
+def test_jira_backlog_script_uses_inline_meta_without_click_helper_copy() -> None:
+    script = Path("app/static/app.js").read_text(encoding="utf-8")
+    batch_script = Path("app/static/batch-workspace.js").read_text(encoding="utf-8")
+
+    assert 'data-jira-issue-meta-inline' in script
+    assert 'issueAccordionCollapsed' in script
+    assert 'label class="jira-backlog-item__selector" aria-label="?좏깮"' in script
+    assert '<button type="button" class="jira-backlog-item__trigger"' not in script
+    assert '<div class="jira-backlog-item__trigger"' in script
+    assert 'data-jira-issue-modal-open' in script
+    assert 'renderIssueModal' in script
+    assert 'openIssueModal' in script
+    assert 'closeIssueModal' in script
+    assert 'checked: idx === 0' not in script
+    assert 'checked: index === 0' not in batch_script
+
+
+def test_jira_backlog_script_uses_inline_meta_without_click_helper_copy() -> None:
+    script = Path("app/static/app.js").read_text(encoding="utf-8")
+    batch_script = Path("app/static/batch-workspace.js").read_text(encoding="utf-8")
+
+    assert 'data-jira-issue-meta-inline' in script
+    assert 'issueAccordionCollapsed' in script
+    assert 'jira-backlog-item__selector' in script
+    assert 'aria-label=' in script
+    assert '<button type="button" class="jira-backlog-item__trigger"' not in script
+    assert '<div class="jira-backlog-item__trigger"' in script
+    assert 'data-jira-issue-modal-open' in script
+    assert 'renderIssueModal' in script
+    assert 'openIssueModal' in script
+    assert 'closeIssueModal' in script
     assert 'checked: idx === 0' not in script
     assert 'checked: index === 0' not in batch_script
 
@@ -2644,6 +2698,96 @@ def test_cancel_workflow_batch_run_plan_marks_run_cancelled(monkeypatch, tmp_pat
     assert final_run["plan_review_status"] == "cancelled"
     assert final_batch["status"] == "cancelled"
     assert execute_calls == []
+
+
+def test_cancel_workflow_batch_run_plan_updates_persisted_run_after_app_recreation(monkeypatch, tmp_path) -> None:
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+    (repo_path / ".git").mkdir()
+    monkeypatch.setattr(main_module, "WORKFLOW_RUNS_DIR", tmp_path / "workflow-runs")
+    monkeypatch.setattr(main_module, "WORKFLOW_BATCHES_DIR", tmp_path / "workflow-batches")
+    monkeypatch.setattr(main_module, "_safe_ensure_project_memory", lambda repo_path, space_key="": None)
+    monkeypatch.setattr(main_module, "_safe_record_project_history", lambda repo_path, workflow_run, space_key="": None)
+
+    def fake_load(self, provider: str):  # noqa: ANN001
+        if provider == "github":
+            return _github_mapping_payload(_repo_mapping_line("DEMO", repo_path))
+        if provider == "jira":
+            return {
+                "base_url": "https://example.atlassian.net",
+                "email": "tester@example.com",
+                "api_token": "token",
+                "jql": "project = DEMO",
+            }
+        return None
+
+    def fake_run_codex_clarification(repo_path, payload):  # noqa: ANN001
+        return {"needs_input": False, "analysis_summary": "ready", "requested_information": []}
+
+    def fake_plan_review(repo_path, payload):  # noqa: ANN001
+        return {
+            "plan_summary": "먼저 계획을 확인한 뒤 취소한다.",
+            "implementation_steps": ["설계 확인", "취소 처리"],
+            "risks": ["실행 전 중단"],
+        }
+
+    class ImmediateThread:
+        def __init__(self, target=None, name=None, daemon=None, args=(), kwargs=None, **extra):  # noqa: ANN001
+            self._target = target
+            self._args = args
+            self._kwargs = kwargs or {}
+
+        def start(self) -> None:
+            if self._target is not None:
+                self._target(*self._args, **self._kwargs)
+
+        def join(self, timeout=None) -> None:  # noqa: ANN001
+            return None
+
+        def is_alive(self) -> bool:
+            return False
+
+    monkeypatch.setattr(main_module.CredentialStore, "load", fake_load)
+    monkeypatch.setattr(main_module, "_find_codex_launcher", lambda: ["codex"])
+    monkeypatch.setattr(main_module, "_resolve_commit_identity", lambda repo_path, payload: ({"name": "Codex Bot", "email": "codex@example.com"}, []))
+    monkeypatch.setattr(main_module, "_run_codex_clarification", fake_run_codex_clarification)
+    monkeypatch.setattr(main_module, "_run_agent_plan_review", fake_plan_review)
+    monkeypatch.setattr(main_module.threading, "Thread", ImmediateThread)
+
+    app = create_app()
+    client = app.test_client()
+    response = client.post(
+        "/api/workflow/batch/run",
+        json={
+            "issues": [{"issue_key": "DEMO-13", "issue_summary": "cancel after reload"}],
+            "work_instruction": "계획 확인 후 서버 재시작 상태에서도 취소한다.",
+            "enable_plan_review": True,
+            "allow_auto_commit": False,
+        },
+    )
+
+    assert response.status_code == 202
+    batch_id = response.get_json()["batch_id"]
+    batch_data = client.get(f"/api/workflow/batch/{batch_id}").get_json()
+    run_id = batch_data["runs"][0]["run_id"]
+    assert batch_data["runs"][0]["status"] == "pending_plan_review"
+
+    recreated_app = create_app()
+    recreated_client = recreated_app.test_client()
+    cancel_response = recreated_client.post(f"/api/workflow/batch/{batch_id}/runs/{run_id}/plan/cancel", json={})
+
+    assert cancel_response.status_code == 200
+    cancel_payload = cancel_response.get_json()
+    assert cancel_payload is not None
+    assert cancel_payload["status"] == "cancelled"
+    assert cancel_payload["run"]["status"] == "cancelled"
+    assert cancel_payload["run"]["plan_review_status"] == "cancelled"
+    assert cancel_payload["batch"]["status"] == "cancelled"
+
+    final_batch = recreated_client.get(f"/api/workflow/batch/{batch_id}").get_json()
+    assert final_batch["runs"][0]["status"] == "cancelled"
+    assert final_batch["runs"][0]["plan_review_status"] == "cancelled"
+    assert final_batch["status"] == "cancelled"
 
 
 def test_workflow_batch_persists_across_app_recreation(monkeypatch, tmp_path) -> None:

@@ -42,6 +42,13 @@ const jiraState = {
   pendingIssueKey: null,
   expandedIssueKey: null,
   issueAccordionCollapsed: false,
+  issueModalKey: null,
+  backlogIssues: [],
+  backlogInputType: "radio",
+  backlogInputName: "selected_issue",
+  backlogPageIndex: 0,
+  backlogColumns: 1,
+  backlogItemsPerPage: 1,
 };
 
 const workflowState = {
@@ -61,6 +68,15 @@ const repoMappingState = {
 
 const configFlowState = {
   repoSuggested: false,
+};
+
+const workspaceState = {
+  view: "prepare",
+  backlogResizeTimer: null,
+  shellHeightTimer: null,
+  shellHeightRaf: 0,
+  heightObserver: null,
+  isTransitioning: false,
 };
 
 const DEFAULT_AUTOMATION_RESULT_HINT = "Codex 자동 작업을 실행하면 결과를 여기에 표시합니다.";
@@ -325,7 +341,15 @@ function escapeHtml(value) {
 }
 
 function setResult(id, payload) {
-  $(id).text(JSON.stringify(payload, null, 2));
+  const targetId = String(id || "").trim();
+  if (targetId === "#config_result") {
+    console.info("[config]", payload);
+  }
+  const target = $(targetId);
+  if (!target.length) {
+    return;
+  }
+  target.text(JSON.stringify(payload, null, 2));
 }
 
 function clearResultActions(targetId) {
@@ -692,6 +716,333 @@ function selectedIssue() {
   return { issue_key: issueKey, issue_summary: issueSummary };
 }
 
+function normalizeWorkspaceView(view) {
+  return String(view || "").trim() === "operations" ? "operations" : "prepare";
+}
+
+function workspaceViewElement(view) {
+  return normalizeWorkspaceView(view) === "operations"
+    ? $("#workspace_operations_view")
+    : $("#workspace_prepare_view");
+}
+
+function activeWorkspaceViewElement() {
+  return workspaceViewElement(workspaceState.view);
+}
+
+function workspaceIsMobileLayout() {
+  return window.matchMedia("(max-width: 900px)").matches;
+}
+
+function setWorkspaceViewInteractivity(view, isActive) {
+  view.attr("aria-hidden", String(!isActive));
+  if (view.length && view[0]) {
+    view[0].inert = !isActive;
+  }
+}
+
+function clearWorkspaceViewInlineStyle(view) {
+  view.css({
+    position: "",
+    top: "",
+    left: "",
+    width: "",
+    transform: "",
+    opacity: "",
+    visibility: "",
+    pointerEvents: "",
+  });
+}
+
+function syncWorkspaceViewButtons(view) {
+  const normalized = normalizeWorkspaceView(view);
+  $("#show_operations_view").prop("hidden", normalized !== "prepare");
+  $("#show_prepare_view").prop("hidden", normalized !== "operations");
+}
+
+function finalizeWorkspaceViewState(view) {
+  const normalized = normalizeWorkspaceView(view);
+  const shell = $("#workspace_shell");
+  const prepareView = $("#workspace_prepare_view");
+  const operationsView = $("#workspace_operations_view");
+  const activeView = workspaceViewElement(normalized);
+  const inactiveView = normalized === "operations" ? prepareView : operationsView;
+
+  workspaceState.view = normalized;
+  workspaceState.isTransitioning = false;
+
+  shell
+    .toggleClass("workspace-shell--prepare", normalized === "prepare")
+    .toggleClass("workspace-shell--operations", normalized === "operations");
+
+  activeView.addClass("is-active").removeClass("is-transitioning");
+  inactiveView.removeClass("is-active is-transitioning");
+  clearWorkspaceViewInlineStyle(activeView);
+  clearWorkspaceViewInlineStyle(inactiveView);
+  setWorkspaceViewInteractivity(activeView, true);
+  setWorkspaceViewInteractivity(inactiveView, false);
+  syncWorkspaceViewButtons(normalized);
+}
+
+function requestWorkspaceShellHeightSync(animated = false) {
+  if (workspaceState.shellHeightRaf) {
+    window.cancelAnimationFrame(workspaceState.shellHeightRaf);
+  }
+  workspaceState.shellHeightRaf = window.requestAnimationFrame(() => {
+    workspaceState.shellHeightRaf = 0;
+    syncWorkspaceShellHeight(animated);
+  });
+}
+
+function syncWorkspaceShellHeight(animated = false) {
+  return;
+}
+
+function bindWorkspaceShellHeightObserver() {
+  return;
+}
+
+function setWorkspaceView(view) {
+  const normalized = normalizeWorkspaceView(view);
+  const shell = $("#workspace_shell");
+  const prepareView = $("#workspace_prepare_view");
+  const operationsView = $("#workspace_operations_view");
+
+  if (!shell.length || !prepareView.length || !operationsView.length) {
+    return;
+  }
+
+  if (workspaceState.view === normalized || workspaceIsMobileLayout()) {
+    finalizeWorkspaceViewState(normalized);
+    if (normalized === "prepare") {
+      window.requestAnimationFrame(() => {
+        refreshBacklogLayout();
+      });
+    }
+    return;
+  }
+  finalizeWorkspaceViewState(normalized);
+  if (normalized === "prepare") {
+    window.requestAnimationFrame(() => {
+      refreshBacklogLayout();
+    });
+  }
+}
+
+function currentCheckedIssueKeys() {
+  return $("input[name='selected_issue']:checked, input[name='selected_issues']:checked")
+    .map(function () {
+      return String($(this).data("key") || "").trim();
+    })
+    .get()
+    .filter(Boolean);
+}
+
+function preferredBacklogIssueKey() {
+  const checkedKeys = currentCheckedIssueKeys();
+  if (checkedKeys.length) {
+    return checkedKeys[0];
+  }
+  const expandedKey = String(jiraState.expandedIssueKey || jiraState.pendingIssueKey || "").trim();
+  if (expandedKey) {
+    return expandedKey;
+  }
+  const hiddenKey = String($("#issue_key").val() || "").trim();
+  return hiddenKey;
+}
+
+function backlogColumnCount() {
+  const shellWidth = $("#jira_backlog_table_shell").innerWidth() || 0;
+  if (shellWidth >= 1500) {
+    return 3;
+  }
+  if (shellWidth >= 980) {
+    return 2;
+  }
+  return 1;
+}
+
+function backlogItemsPerPage(columns) {
+  return Math.max((Number(columns) || 1) * 2, 1);
+}
+
+function backlogPageCount() {
+  if (!jiraState.backlogIssues.length) {
+    return 0;
+  }
+  return Math.max(Math.ceil(jiraState.backlogIssues.length / jiraState.backlogItemsPerPage), 1);
+}
+
+function setBacklogPage(index) {
+  const totalPages = backlogPageCount();
+  const normalized = Math.min(Math.max(Number(index) || 0, 0), Math.max(totalPages - 1, 0));
+  jiraState.backlogPageIndex = normalized;
+  $("#issue_table").css("transform", `translateX(-${normalized * 100}%)`);
+  renderBacklogPagination(totalPages, normalized);
+  $("#jira_backlog_pagination [data-jira-backlog-page]").each(function () {
+    const isActive = Number($(this).attr("data-jira-backlog-page")) === normalized;
+    $(this)
+      .toggleClass("is-active", isActive)
+      .attr("aria-current", isActive ? "page" : "false");
+  });
+}
+
+function renderBacklogPagination(totalPages) {
+  const pagination = $("#jira_backlog_pagination");
+  if (totalPages <= 1) {
+    pagination.empty().prop("hidden", true);
+    return;
+  }
+  const dots = Array.from({ length: totalPages }, (_, index) => `
+    <button
+      type="button"
+      class="jira-backlog-pagination__dot"
+      data-jira-backlog-page="${index}"
+      aria-label="${index + 1}페이지 보기"
+    >
+      ${index + 1}
+    </button>
+  `).join("");
+  pagination.html(dots).prop("hidden", false);
+}
+
+function renderBacklogPagination(totalPages, activePage) {
+  const pagination = $("#jira_backlog_pagination");
+  if (totalPages <= 1) {
+    pagination.empty().prop("hidden", true);
+    return;
+  }
+  const current = Math.min(Math.max(Number(activePage) || 0, 0), Math.max(totalPages - 1, 0));
+  const windowSize = Math.min(5, totalPages);
+  const half = Math.floor(windowSize / 2);
+  let start = Math.max(current - half, 0);
+  let end = start + windowSize;
+  if (end > totalPages) {
+    end = totalPages;
+    start = Math.max(end - windowSize, 0);
+  }
+  const dots = Array.from({ length: end - start }, (_, offset) => start + offset)
+    .map((index) => `
+      <button
+        type="button"
+        class="jira-backlog-pagination__dot"
+        data-jira-backlog-page="${index}"
+        aria-label="${index + 1}페이지 보기"
+      >
+        ${index + 1}
+      </button>
+    `)
+    .join("");
+  pagination.html(dots).prop("hidden", false);
+}
+
+function renderBacklogIssueTable(issues, options) {
+  const settings = options || {};
+  const items = Array.isArray(issues) ? issues : [];
+  const checkedKeys = new Set(currentCheckedIssueKeys());
+  const columns = backlogColumnCount();
+  const itemsPerPage = backlogItemsPerPage(columns);
+  const preferredKey = preferredBacklogIssueKey();
+  const preferredIndex = preferredKey
+    ? items.findIndex((issue) => String(issue.issue_key || issue.key || "").trim() === preferredKey)
+    : -1;
+
+  jiraState.backlogIssues = items.slice();
+  jiraState.backlogInputType = settings.inputType || "radio";
+  jiraState.backlogInputName = settings.inputName || "selected_issue";
+  jiraState.backlogColumns = columns;
+  jiraState.backlogItemsPerPage = itemsPerPage;
+
+  if (preferredIndex >= 0) {
+    jiraState.backlogPageIndex = Math.floor(preferredIndex / itemsPerPage);
+  } else {
+    jiraState.backlogPageIndex = 0;
+  }
+
+  if (!items.length) {
+    $("#issue_table")
+      .removeClass("jira-backlog-list--pages")
+      .html('<p class="batch-preview-empty">조회된 이슈가 없습니다.</p>')
+      .css("transform", "");
+    $("#jira_backlog_pagination").empty().prop("hidden", true);
+    return;
+  }
+
+  const pages = [];
+  for (let index = 0; index < items.length; index += itemsPerPage) {
+    pages.push(items.slice(index, index + itemsPerPage));
+  }
+
+  const pageHtml = pages
+    .map((pageItems) => `
+      <section class="jira-backlog-page" style="--jira-backlog-columns: ${columns};">
+        ${pageItems
+          .map((issue) => renderIssueAccordionItem(issue, {
+            checked: checkedKeys.has(String(issue.issue_key || issue.key || "").trim()),
+            inputType: jiraState.backlogInputType,
+            inputName: jiraState.backlogInputName,
+          }))
+          .join("")}
+      </section>
+    `)
+    .join("");
+
+  $("#issue_table")
+    .addClass("jira-backlog-list--pages")
+    .html(pageHtml)
+    .css("transform", "");
+  setBacklogPage(jiraState.backlogPageIndex);
+}
+
+function populateIssueBacklog(data, options) {
+  renderBacklogIssueTable((data && data.issues) || [], options);
+  syncIssueAccordionState();
+  const issue = selectedIssue();
+  if (issue) {
+    fillWorkflow(issue);
+    loadIssueDetail(issue.issue_key);
+  } else {
+    resetIssueDetail();
+  }
+  syncWorkspaceShellHeight(false);
+}
+
+window.renderBacklogIssueTable = renderBacklogIssueTable;
+window.populateIssueBacklog = populateIssueBacklog;
+window.syncWorkspaceShellHeight = syncWorkspaceShellHeight;
+setupIssueTable = function setupIssueTablePatched(data) {
+  populateIssueBacklog(data, {
+    inputType: "radio",
+    inputName: "selected_issue",
+  });
+};
+window.setupIssueTable = setupIssueTable;
+
+function ensureBacklogIssuePage(issueKey) {
+  const key = String(issueKey || "").trim();
+  if (!key || !jiraState.backlogIssues.length || !jiraState.backlogItemsPerPage) {
+    return;
+  }
+  const issueIndex = jiraState.backlogIssues.findIndex((issue) => String(issue.issue_key || issue.key || "").trim() === key);
+  if (issueIndex < 0) {
+    return;
+  }
+  setBacklogPage(Math.floor(issueIndex / jiraState.backlogItemsPerPage));
+}
+
+function refreshBacklogLayout() {
+  if (!jiraState.backlogIssues.length) {
+    return;
+  }
+  renderBacklogIssueTable(jiraState.backlogIssues, {
+    inputType: jiraState.backlogInputType,
+    inputName: jiraState.backlogInputName,
+  });
+  if (typeof syncIssueAccordionState === "function") {
+    syncIssueAccordionState();
+  }
+}
+
 function prefersReducedMotion() {
   return window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 }
@@ -764,24 +1115,22 @@ function syncModalBodyState() {
 }
 
 function openConfigPanel(panelKey) {
-  const panel = $(`[data-config-panel="${panelKey}"]`);
-  if (panel.length) {
-    panel.prop("open", true);
+  const normalized = String(panelKey || "").trim();
+  if (!normalized) {
+    return;
   }
+  $("[data-config-panel]").each(function () {
+    const isTarget = String($(this).attr("data-config-panel") || "").trim() === normalized;
+    $(this).prop("open", isTarget);
+  });
 }
 
-function updateConfigStepPills(activeStep, jiraComplete, repoComplete) {
-  const stepMap = {
-    jira: jiraComplete,
-    repo: repoComplete,
-  };
-
-  $("[data-config-flow-step]").each(function () {
-    const step = String($(this).attr("data-config-flow-step") || "").trim();
-    $(this)
-      .toggleClass("is-active", step === activeStep)
-      .toggleClass("is-complete", Boolean(stepMap[step]));
-  });
+function closeConfigPanel(panelKey) {
+  const normalized = String(panelKey || "").trim();
+  if (!normalized) {
+    return;
+  }
+  $(`[data-config-panel="${normalized}"]`).prop("open", false);
 }
 
 function isJiraConfigComplete() {
@@ -791,28 +1140,17 @@ function isJiraConfigComplete() {
 
 function updateConfigFlowState() {
   const jiraComplete = isJiraConfigComplete();
-  const repoComplete = currentRepoMappings().length > 0;
-  const activeStep = repoComplete || $('[data-config-panel="repo"]').prop("open") ? "repo" : "jira";
+  const repoCount = currentRepoMappings().length;
+  const repoComplete = repoCount > 0;
 
   $("#jira_config_status")
     .text(jiraComplete ? "입력 완료" : "4개 입력 필요")
     .toggleClass("is-complete", jiraComplete);
   $("#repo_mapping_status")
-    .text(repoComplete ? `${currentRepoMappings().length}개 공간 연결됨` : "공간 연결 필요")
+    .text(repoComplete ? `공간 ${repoCount}개 연결됨` : "공간 연결 필요")
     .toggleClass("is-complete", repoComplete);
-
-  updateConfigStepPills(activeStep, jiraComplete, repoComplete);
-
-  if (jiraComplete && !configFlowState.repoSuggested) {
-    openConfigPanel("repo");
-    configFlowState.repoSuggested = true;
-    updateConfigStepPills("repo", jiraComplete, repoComplete);
-    return;
-  }
-
-  if (!jiraComplete) {
-    configFlowState.repoSuggested = false;
-  }
+  $('[data-config-panel="jira"]').toggleClass("is-complete", jiraComplete);
+  $('[data-config-panel="repo"]').toggleClass("is-complete", repoComplete);
 }
 
 function targetFieldBadges(fields) {
@@ -975,8 +1313,25 @@ function focusFields(fieldIds) {
   if (!ids.length) {
     return;
   }
-
-  closeGuide();
+  const jiraFields = ["jira_base_url", "jira_email", "jira_api_token", "jira_jql"];
+  const repoFields = [
+    "repo_mappings",
+    "mapping_space_key",
+    "mapping_provider",
+    "mapping_repo_owner",
+    "mapping_repo_name",
+    "gitlab_base_url",
+    "mapping_repo_ref",
+    "mapping_base_branch",
+    "mapping_local_repo_path",
+    "mapping_scm_token",
+  ];
+  if (ids.some((fieldId) => jiraFields.includes(fieldId))) {
+    openConfigPanel("jira");
+  }
+  if (ids.some((fieldId) => repoFields.includes(fieldId))) {
+    openConfigPanel("repo");
+  }
 
   window.setTimeout(() => {
     let firstInput = null;
@@ -1157,7 +1512,7 @@ function renderIssueAccordionItem(issue, options) {
   return `
     <article class="jira-backlog-item ${settings.checked ? "is-selected" : ""}" data-issue-key="${safeKey}" data-issue-status="${safeStatus}">
       <div class="jira-backlog-item__row">
-        <div class="jira-backlog-item__trigger" data-jira-accordion-trigger="${safeKey}" aria-expanded="${settings.checked ? "true" : "false"}">
+        <div class="jira-backlog-item__trigger" data-jira-issue-modal-open="${safeKey}" data-issue-summary="${safeSummary}" role="button" tabindex="0" aria-pressed="${settings.checked ? "true" : "false"}">
           <div class="jira-backlog-item__heading">
             <div class="jira-backlog-item__title">
               <strong>${safeKey}</strong>
@@ -1206,6 +1561,44 @@ function issueAccordionItem(issueKey) {
   }).first();
 }
 
+function renderIssueModal(detail, options) {
+  const settings = options || {};
+  const issueKey = String(detail.issue_key || settings.issue_key || "").trim();
+  const summary = String(detail.summary || detail.issue_summary || settings.issue_summary || "").trim() || "제목 없음";
+  const title = issueKey ? `${issueKey} ${summary}` : summary;
+  const metaHtml = renderIssueMetaPills(detail, { includeKey: false }) || '<span class="field-pill">상세 정보를 불러오는 중</span>';
+  const description = settings.description || detail.description || "이슈 상세를 불러오는 중이다.";
+  const comments = settings.comments || detail.comments_text || "최근 코멘트를 불러오는 중이다.";
+
+  $("#jira_issue_modal_title").text(title || "이슈 상세");
+  $("#jira_issue_modal_meta").html(metaHtml);
+  $("#jira_issue_modal_description").text(description);
+  $("#jira_issue_modal_comments").text(comments);
+}
+
+function openIssueModal(issueKey, issueSummary) {
+  const key = String(issueKey || "").trim();
+  if (!key) {
+    return;
+  }
+  jiraState.issueModalKey = key;
+  const detail = jiraState.selectedIssueDetail && String(jiraState.selectedIssueDetail.issue_key || "").trim() === key
+    ? jiraState.selectedIssueDetail
+    : { issue_key: key, summary: issueSummary || "" };
+  renderIssueModal(detail, {
+    issue_key: key,
+    issue_summary: issueSummary || "",
+  });
+  $("#jira_issue_modal").addClass("is-open").attr("aria-hidden", "false");
+  syncModalBodyState();
+}
+
+function closeIssueModal() {
+  jiraState.issueModalKey = null;
+  $("#jira_issue_modal").removeClass("is-open").attr("aria-hidden", "true");
+  syncModalBodyState();
+}
+
 function syncIssueAccordionState() {
   const checkedInputs = $("input[name='selected_issue']:checked, input[name='selected_issues']:checked");
   const selectedInput = checkedInputs.first();
@@ -1234,13 +1627,10 @@ function syncIssueAccordionState() {
 
   issueAccordionItems().each(function () {
     const item = $(this);
-    const key = String(item.attr("data-issue-key") || "").trim();
     const checked = item.find("input[name='selected_issue'], input[name='selected_issues']").is(":checked");
-    const expanded = checked && !jiraState.issueAccordionCollapsed && jiraState.expandedIssueKey === key;
     item.toggleClass("is-selected", checked);
     item.find(".jira-backlog-item__selector").toggleClass("is-checked", checked);
-    item.find("[data-jira-accordion-trigger]").attr("aria-expanded", expanded ? "true" : "false");
-    item.find("[data-jira-accordion-body]").prop("hidden", !expanded);
+    item.find("[data-jira-issue-modal-open]").attr("aria-pressed", checked ? "true" : "false");
   });
 }
 
@@ -1297,6 +1687,7 @@ function loadIssueDetail(issueKey) {
     resetIssueDetail();
     return;
   }
+  ensureBacklogIssuePage(key);
 
   if (jiraState.issueDetailRequest && typeof jiraState.issueDetailRequest.abort === "function") {
     jiraState.issueDetailRequest.abort();
@@ -1440,6 +1831,199 @@ function renderIssueDetail(detail) {
   jiraState.expandedIssueKey = String(detail.issue_key || "").trim();
   jiraState.issueAccordionCollapsed = false;
   syncIssueAccordionState();
+}
+
+function renderIssueModal(detail, options) {
+  const settings = options || {};
+  const issueKey = String(detail.issue_key || settings.issue_key || "").trim();
+  const summary = String(detail.summary || detail.issue_summary || settings.issue_summary || "").trim() || "제목 없음";
+  const title = issueKey ? `${issueKey} ${summary}` : summary;
+  const metaHtml = renderIssueMetaPills(detail, { includeKey: false }) || '<span class="field-pill">상세 정보를 불러오는 중</span>';
+  const description = settings.description || detail.description || "이슈 상세를 불러오는 중이다.";
+  const comments = settings.comments || detail.comments_text || "최근 코멘트를 불러오는 중이다.";
+
+  $("#jira_issue_modal_title").text(title || "이슈 상세");
+  $("#jira_issue_modal_meta").html(metaHtml);
+  $("#jira_issue_modal_description").text(description);
+  $("#jira_issue_modal_comments").text(comments);
+}
+
+function openIssueModal(issueKey, issueSummary) {
+  const key = String(issueKey || "").trim();
+  if (!key) {
+    return;
+  }
+  jiraState.issueModalKey = key;
+  const detail = jiraState.selectedIssueDetail && String(jiraState.selectedIssueDetail.issue_key || "").trim() === key
+    ? jiraState.selectedIssueDetail
+    : { issue_key: key, summary: issueSummary || "" };
+  renderIssueModal(detail, {
+    issue_key: key,
+    issue_summary: issueSummary || "",
+  });
+  $("#jira_issue_modal").addClass("is-open").attr("aria-hidden", "false");
+  syncModalBodyState();
+}
+
+function closeIssueModal() {
+  jiraState.issueModalKey = null;
+  $("#jira_issue_modal").removeClass("is-open").attr("aria-hidden", "true");
+  syncModalBodyState();
+}
+
+function renderIssueAccordionItem(issue, options) {
+  const settings = options || {};
+  const checked = settings.checked ? 'checked="checked"' : "";
+  const inputName = settings.inputName || "selected_issue";
+  const inputType = settings.inputType || "radio";
+  const safeKey = escapeHtml(issue.issue_key || issue.key || "");
+  const safeSummary = escapeHtml(issue.issue_summary || issue.summary || "");
+  const safeStatus = escapeHtml(issue.status || "");
+  const metaHtml = renderIssueStatusPill({ status: issue.status || "" });
+  return `
+    <article class="jira-backlog-item ${settings.checked ? "is-selected" : ""}" data-issue-key="${safeKey}" data-issue-status="${safeStatus}">
+      <div class="jira-backlog-item__row">
+        <div class="jira-backlog-item__trigger" data-jira-issue-modal-open="${safeKey}" data-issue-summary="${safeSummary}" role="button" tabindex="0" aria-pressed="${settings.checked ? "true" : "false"}">
+          <div class="jira-backlog-item__heading">
+            <div class="jira-backlog-item__title">
+              <strong>${safeKey}</strong>
+              <span>${safeSummary}</span>
+            </div>
+            <div class="jira-backlog-item__meta" data-jira-issue-meta-inline ${metaHtml ? "" : "hidden"}>${metaHtml}</div>
+          </div>
+        </div>
+        <label class="jira-backlog-item__selector" aria-label="선택">
+          <input
+            type="${inputType}"
+            name="${inputName}"
+            ${checked}
+            data-key="${safeKey}"
+            data-summary="${safeSummary}"
+            aria-label="선택"
+          >
+        </label>
+      </div>
+    </article>
+  `;
+}
+
+function syncIssueAccordionState() {
+  const checkedInputs = $("input[name='selected_issue']:checked, input[name='selected_issues']:checked");
+  const selectedInput = checkedInputs.first();
+  const selectedKey = String(selectedInput.data("key") || "").trim();
+  if (!selectedKey) {
+    jiraState.expandedIssueKey = null;
+    jiraState.issueAccordionCollapsed = false;
+  } else {
+    jiraState.expandedIssueKey = selectedKey;
+    jiraState.issueAccordionCollapsed = false;
+  }
+
+  issueAccordionItems().each(function () {
+    const item = $(this);
+    const checked = item.find("input[name='selected_issue'], input[name='selected_issues']").is(":checked");
+    item.toggleClass("is-selected", checked);
+    item.find(".jira-backlog-item__selector").toggleClass("is-checked", checked);
+    item.find("[data-jira-issue-modal-open]").attr("aria-pressed", checked ? "true" : "false");
+  });
+}
+
+function resetIssueDetail(message) {
+  jiraState.selectedIssueDetail = null;
+  jiraState.pendingIssueKey = null;
+  jiraState.expandedIssueKey = null;
+  jiraState.issueAccordionCollapsed = false;
+  issueAccordionItems().each(function () {
+    resetIssueMetaInline($(this));
+  });
+  if (jiraState.issueModalKey) {
+    renderIssueModal({ issue_key: jiraState.issueModalKey }, {
+      description: message || "이슈를 선택하면 상세 설명을 표시한다.",
+      comments: message || "이슈를 선택하면 최근 코멘트를 표시한다.",
+    });
+  }
+  syncIssueAccordionState();
+}
+
+function renderIssueDetail(detail) {
+  const item = issueAccordionItem(detail.issue_key);
+  if (!item.length) {
+    return;
+  }
+  item.attr("data-issue-status", String(detail.status || "").trim());
+  item.find("[data-jira-issue-meta-inline]").html(renderIssueStatusPill(detail)).prop("hidden", false);
+  jiraState.expandedIssueKey = String(detail.issue_key || "").trim();
+  jiraState.issueAccordionCollapsed = false;
+  if (jiraState.issueModalKey && jiraState.issueModalKey === jiraState.expandedIssueKey) {
+    renderIssueModal(detail);
+  }
+  syncIssueAccordionState();
+}
+
+function loadIssueDetail(issueKey) {
+  const key = String(issueKey || "").trim();
+  if (!key) {
+    resetIssueDetail();
+    return;
+  }
+  ensureBacklogIssuePage(key);
+
+  if (jiraState.issueDetailRequest && typeof jiraState.issueDetailRequest.abort === "function") {
+    jiraState.issueDetailRequest.abort();
+  }
+
+  jiraState.expandedIssueKey = key;
+  jiraState.issueAccordionCollapsed = false;
+  syncIssueAccordionState();
+  jiraState.pendingIssueKey = key;
+
+  if (jiraState.issueModalKey === key) {
+    renderIssueModal({ issue_key: key, summary: "" }, {
+      issue_key: key,
+      description: `${key} 상세를 불러오는 중이다.`,
+      comments: `${key} 최근 코멘트를 불러오는 중이다.`,
+    });
+  }
+
+  jiraState.issueDetailRequest = $.ajax({
+    url: "/api/jira/issue-detail",
+    method: "POST",
+    contentType: "application/json",
+    data: JSON.stringify({
+      issue_key: key,
+      mock_mode: $("#mock_mode").is(":checked"),
+    }),
+  })
+    .done((data) => {
+      if (jiraState.pendingIssueKey !== key) {
+        return;
+      }
+      jiraState.selectedIssueDetail = data;
+      fillWorkflow({
+        issue_key: data.issue_key,
+        issue_summary: data.summary,
+      });
+      renderIssueDetail(data);
+    })
+    .fail((xhr) => {
+      if (xhr.statusText === "abort") {
+        return;
+      }
+      jiraState.selectedIssueDetail = null;
+      if (jiraState.issueModalKey === key) {
+        renderIssueModal({ issue_key: key, summary: "" }, {
+          issue_key: key,
+          description: "이슈 상세를 불러오지 못했다.",
+          comments: (xhr.responseJSON && xhr.responseJSON.error) || xhr.responseText || "오류",
+        });
+      }
+    })
+    .always(() => {
+      if (jiraState.pendingIssueKey === key) {
+        jiraState.pendingIssueKey = null;
+      }
+      jiraState.issueDetailRequest = null;
+    });
 }
 
 function setSummaryCard(title, value, detail) {
@@ -1979,7 +2563,6 @@ $(document).ready(function () {
   $("#mapping_github_token").attr("placeholder", "공간 전용 GitHub Token");
   $("#add_repo_mapping").text("연결 추가");
   $(".card-header__copy h2").first().text("1. Jira와 공간 설정");
-  $(".config-group-kicker").first().text("입력 흐름");
   $("#allow_auto_commit").closest("label").contents().last()[0].textContent = " 로컬 테스트 없이 자동 커밋 허용";
   $("#repo_mappings").closest("label").contents().first()[0].textContent = "공간별 저장소 연결";
   if (!$(".repo-mapping-section-title").length) {
@@ -1998,24 +2581,45 @@ $(document).ready(function () {
     setSavedSecretState("#jira_api_token", hasSavedSecret("#jira_api_token"), "현재 저장된 토큰이 있습니다.", "Jira API Token");
     updateConfigFlowState();
   });
-  $(document).on("click", "[data-config-flow-step]", function () {
-    const panelKey = String($(this).attr("data-config-flow-step") || "").trim();
-    openConfigPanel(panelKey);
-    updateConfigStepPills(
-      panelKey,
-      isJiraConfigComplete(),
-      currentRepoMappings().length > 0,
-    );
-  });
   $(document).on("toggle", "[data-config-panel]", function () {
     const panelKey = String($(this).attr("data-config-panel") || "").trim();
-    updateConfigStepPills(
-      panelKey || "jira",
-      isJiraConfigComplete(),
-      currentRepoMappings().length > 0,
-    );
+    if ($(this).prop("open")) {
+      $("[data-config-panel]").not(this).prop("open", false);
+    }
+    updateConfigFlowState();
+    requestWorkspaceShellHeightSync(false);
+  });
+  $(document).on("toggle", "#repo_mapping_settings_panel, #repo_mapping_edit_settings_panel", function () {
+    requestWorkspaceShellHeightSync(false);
   });
   updateConfigFlowState();
+  bindWorkspaceShellHeightObserver();
+  setWorkspaceView("prepare");
+  window.setTimeout(() => {
+    requestWorkspaceShellHeightSync(false);
+  }, 0);
+
+  $("#show_operations_view").on("click", function () {
+    setWorkspaceView("operations");
+  });
+
+  $("#show_prepare_view").on("click", function () {
+    setWorkspaceView("prepare");
+  });
+
+  $(document).on("click", "[data-jira-backlog-page]", function () {
+    setBacklogPage(Number($(this).attr("data-jira-backlog-page")));
+  });
+
+  $(window).on("resize", function () {
+    if (workspaceState.backlogResizeTimer) {
+      window.clearTimeout(workspaceState.backlogResizeTimer);
+    }
+    workspaceState.backlogResizeTimer = window.setTimeout(() => {
+      refreshBacklogLayout();
+      requestWorkspaceShellHeightSync(false);
+    }, 140);
+  });
 
   $("#open_setup_guide").on("click", function () {
     openGuide("jira", "jira-base-url");
@@ -2027,6 +2631,10 @@ $(document).ready(function () {
 
   $("#close_repo_mapping_modal, #cancel_repo_mapping_edit").on("click", function () {
     closeRepoMappingModal();
+  });
+
+  $(document).on("click", "[data-close-config-panel]", function () {
+    closeConfigPanel($(this).attr("data-close-config-panel"));
   });
 
   $("#toggle_automation_result").on("click", function () {
@@ -2106,6 +2714,15 @@ $(document).ready(function () {
       closeRepoMappingModal();
       return;
     }
+    if ($("#jira_issue_modal").hasClass("is-open")) {
+      closeIssueModal();
+      return;
+    }
+    const openConfigPanelElement = $("[data-config-panel][open]").first();
+    if (openConfigPanelElement.length) {
+      closeConfigPanel(openConfigPanelElement.attr("data-config-panel"));
+      return;
+    }
     if ($("#setup_guide_modal").hasClass("is-open")) {
       closeGuide();
     }
@@ -2122,27 +2739,37 @@ $(document).ready(function () {
     }
   });
 
-  $(document).on("click", "[data-jira-accordion-trigger]", function () {
+  $(document).on("click", "[data-jira-issue-modal-open]", function () {
     const item = $(this).closest(".jira-backlog-item");
     const input = item.find("input[name='selected_issue'], input[name='selected_issues']").first();
     if (!input.length) {
       return;
     }
+    const issue = {
+      issue_key: String($(this).attr("data-jira-issue-modal-open") || input.data("key") || "").trim(),
+      issue_summary: String($(this).attr("data-issue-summary") || input.data("summary") || "").trim(),
+    };
     if (!input.is(":checked")) {
       input.prop("checked", true).trigger("change");
+    } else if (issue.issue_key) {
+      fillWorkflow(issue);
+    }
+    if (issue.issue_key) {
+      openIssueModal(issue.issue_key, issue.issue_summary);
+      loadIssueDetail(issue.issue_key);
+    }
+  });
+
+  $(document).on("keydown", "[data-jira-issue-modal-open]", function (event) {
+    if (event.key !== "Enter" && event.key !== " ") {
       return;
     }
-    const key = String(input.data("key") || "").trim();
-    if (jiraState.expandedIssueKey === key && !jiraState.issueAccordionCollapsed) {
-      jiraState.expandedIssueKey = key;
-      jiraState.issueAccordionCollapsed = true;
-      syncIssueAccordionState();
-      return;
-    }
-    jiraState.expandedIssueKey = key;
-    jiraState.issueAccordionCollapsed = false;
-    syncIssueAccordionState();
-    loadIssueDetail(jiraState.expandedIssueKey);
+    event.preventDefault();
+    $(this).trigger("click");
+  });
+
+  $(document).on("click", "[data-close-jira-issue]", function () {
+    closeIssueModal();
   });
 
   $("#add_repo_mapping").on("click", function () {
@@ -3296,6 +3923,8 @@ function renderAgentProviderStatus() {
   }
   if (option.default_model) {
     lines.push(`<span>기본 모델 ${escapeHtml(option.default_model)}</span>`);
+  } else if (String(option.provider || "").trim() === "claude") {
+    lines.push("<span>기본 모델 Claude Code 로컬 기본값</span>");
   }
   if (option.default_execution_mode) {
     lines.push(`<span>${escapeHtml(option.execution_mode_label || "Execution Mode")} ${escapeHtml(option.default_execution_mode)}</span>`);

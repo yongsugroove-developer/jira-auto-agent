@@ -74,7 +74,7 @@ def test_packaging_scripts_reference_v035_defaults() -> None:
     assert "Invoke-ExternalCommandWithTimeout" in check_env
     assert "Claude Code install" in bootstrap
     assert "CLAUDE_CLI_PATH" in run_dev
-    assert 'AGENTATION_ENABLED = "0"' in run_dev
+    assert 'AGENTATION_ENABLED = "1"' in run_dev
     assert 'TagName = "v0.3.5"' in freeze
     assert 'Name: v0.3.5' in freeze
 
