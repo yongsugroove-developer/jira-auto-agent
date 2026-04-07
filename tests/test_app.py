@@ -699,6 +699,35 @@ def test_build_codex_prompt_includes_clarification_answers(monkeypatch) -> None:
     assert "- deploy_scope: 백엔드만 수정한다." in prompt
 
 
+def test_build_codex_clarification_prompt_includes_prior_question_fields(monkeypatch) -> None:
+    monkeypatch.setattr(main_module, "_safe_build_project_memory_block", lambda repo_path, max_history=5, space_key="": "cached project memory")
+    prompt = main_module._build_codex_clarification_prompt(
+        {
+            "issue_key": "DEMO-13",
+            "issue_summary": "clarification reuse",
+            "branch_name": "feature/DEMO-13-clarification",
+            "commit_message": "DEMO-13: clarification reuse",
+            "work_instruction": "기존 질문과 답변을 재사용한다.",
+            "clarification_questions": [
+                {
+                    "field": "manual_override_mode",
+                    "label": "수동 입력 유지 여부",
+                    "question": "기존 수동 입력을 유지할지 정해 달라.",
+                }
+            ],
+            "clarification_answers": {
+                "manual_override_mode": "완전 대체한다.",
+            },
+        },
+        main_module.BASE_DIR,
+    )
+
+    assert "Prior clarification question fields:" in prompt
+    assert "- manual_override_mode (수동 입력 유지 여부): 기존 수동 입력을 유지할지 정해 달라." in prompt
+    assert "Reuse the existing clarification field names whenever you are asking about the same unresolved topic." in prompt
+    assert "manual_override_mode_scope" in prompt
+
+
 def test_build_codex_prompt_uses_resolved_space_key_for_project_memory(monkeypatch) -> None:
     captured = {}
 
@@ -2289,7 +2318,7 @@ def test_answer_workflow_batch_run_requeues_and_completes(monkeypatch, tmp_path)
 
     def fake_run_codex_clarification(repo_path, payload):  # noqa: ANN001
         clarification_calls.append({"issue_key": payload["issue_key"], "answers": dict(payload.get("clarification_answers", {}))})
-        if payload.get("clarification_answers"):
+        if dict(payload.get("clarification_answers", {})).get("deploy_scope"):
             return {"needs_input": False, "analysis_summary": "바로 진행할 수 있습니다.", "requested_information": []}
         return {
             "needs_input": True,
@@ -2378,6 +2407,125 @@ def test_answer_workflow_batch_run_requeues_and_completes(monkeypatch, tmp_path)
     final_batch = client.get(f"/api/workflow/batch/{batch_id}").get_json()
     assert final_batch["runs"][0]["status"] == "completed"
     assert clarification_calls[-1]["answers"] == {"deploy_scope": "백엔드만 배포한다."}
+
+
+def test_answer_workflow_batch_run_merges_existing_clarification_answers(monkeypatch, tmp_path) -> None:
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+    (repo_path / ".git").mkdir()
+    monkeypatch.setattr(main_module, "WORKFLOW_RUNS_DIR", tmp_path / "workflow-runs")
+    monkeypatch.setattr(main_module, "WORKFLOW_BATCHES_DIR", tmp_path / "workflow-batches")
+    monkeypatch.setattr(main_module, "_safe_ensure_project_memory", lambda repo_path, space_key="": None)
+    monkeypatch.setattr(main_module, "_safe_record_project_history", lambda repo_path, workflow_run, space_key="": None)
+
+    clarification_calls: list[dict[str, object]] = []
+
+    def fake_load(self, provider: str):  # noqa: ANN001
+        if provider == "github":
+            return _github_mapping_payload(_repo_mapping_line("DEMO", repo_path))
+        if provider == "jira":
+            return {
+                "base_url": "https://example.atlassian.net",
+                "email": "tester@example.com",
+                "api_token": "token",
+                "jql": "project = DEMO",
+            }
+        return None
+
+    def fake_run_codex_clarification(repo_path, payload):  # noqa: ANN001
+        captured_answers = dict(payload.get("clarification_answers", {}))
+        clarification_calls.append({"issue_key": payload["issue_key"], "answers": captured_answers})
+        if captured_answers.get("deploy_scope"):
+            return {"needs_input": False, "analysis_summary": "ready", "requested_information": []}
+        return {
+            "needs_input": True,
+            "analysis_summary": "need deploy scope",
+            "requested_information": [
+                {
+                    "field": "deploy_scope",
+                    "label": "Deploy scope",
+                    "question": "What should be deployed?",
+                    "why": "Scope changes implementation.",
+                    "placeholder": "backend only",
+                }
+            ],
+        }
+
+    def fake_execute(repo_path, github_config, payload, reporter=None):  # noqa: ANN001
+        return {
+            "ok": True,
+            "status": "ready_for_manual_commit",
+            "message": "done",
+            "requested_model": "",
+            "requested_reasoning_effort": "",
+            "resolved_model": "gpt-5.4",
+            "resolved_reasoning_effort": "medium",
+            "codex_default_model": "gpt-5.4",
+            "codex_default_reasoning_effort": "medium",
+            "model_intent": "answers merged",
+            "implementation_summary": "answers merged",
+            "validation_summary": "ok",
+            "processed_files": ["app/main.py"],
+            "diff": "diff --git a/app/main.py b/app/main.py",
+            "test_output": "",
+            "execution_log_tail": "completed",
+            "risks": [],
+            "syntax_check_output": "ok",
+            "syntax_checked_files": ["app/main.py"],
+        }
+
+    class ImmediateThread:
+        def __init__(self, target=None, name=None, daemon=None, args=(), kwargs=None, **extra):  # noqa: ANN001
+            self._target = target
+            self._args = args
+            self._kwargs = kwargs or {}
+
+        def start(self) -> None:
+            if self._target is not None:
+                self._target(*self._args, **self._kwargs)
+
+        def join(self, timeout=None) -> None:  # noqa: ANN001
+            return None
+
+        def is_alive(self) -> bool:
+            return False
+
+    monkeypatch.setattr(main_module.CredentialStore, "load", fake_load)
+    monkeypatch.setattr(main_module, "_find_codex_launcher", lambda: ["codex"])
+    monkeypatch.setattr(main_module, "_resolve_commit_identity", lambda repo_path, payload: ({"name": "Codex Bot", "email": "codex@example.com"}, []))
+    monkeypatch.setattr(main_module, "_run_codex_clarification", fake_run_codex_clarification)
+    monkeypatch.setattr(main_module, "_execute_coding_workflow", fake_execute)
+    monkeypatch.setattr(main_module, "_safe_sync_jira_clarification_questions", lambda jira_payload, issue_key, analysis_summary, requested_information: {"status": "created"})
+    monkeypatch.setattr(main_module, "_safe_sync_jira_clarification_answers", lambda jira_payload, issue_key, answers, questions: {"status": "created"})
+    monkeypatch.setattr(main_module.threading, "Thread", ImmediateThread)
+
+    app = create_app()
+    client = app.test_client()
+    response = client.post(
+        "/api/workflow/batch/run",
+        json={
+            "issues": [{"issue_key": "DEMO-8", "issue_summary": "clarification merge"}],
+            "work_instruction": "reuse existing clarification answers",
+            "allow_auto_commit": False,
+            "clarification_answers": {"manual_override_mode": "replace all manual input"},
+        },
+    )
+    assert response.status_code == 202
+    batch_id = response.get_json()["batch_id"]
+    batch_data = client.get(f"/api/workflow/batch/{batch_id}").get_json()
+    run_id = batch_data["runs"][0]["run_id"]
+    assert batch_data["runs"][0]["status"] == "needs_input"
+
+    answer_response = client.post(
+        f"/api/workflow/batch/{batch_id}/runs/{run_id}/answers",
+        json={"clarification_answers": {"deploy_scope": "backend only"}},
+    )
+
+    assert answer_response.status_code == 200
+    assert clarification_calls[-1]["answers"] == {
+        "manual_override_mode": "replace all manual input",
+        "deploy_scope": "backend only",
+    }
 
 
 def test_run_workflow_batch_waits_for_plan_review_when_enabled(monkeypatch, tmp_path) -> None:

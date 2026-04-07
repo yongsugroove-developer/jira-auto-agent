@@ -3130,6 +3130,33 @@ def _format_clarification_answers(value: Any) -> str:
     return "\n".join(lines)
 
 
+def _format_clarification_questions(value: Any) -> str:
+    questions = _normalize_clarification_requests(value)
+    if not questions:
+        return "No prior clarification questions recorded."
+
+    lines: list[str] = []
+    for item in questions:
+        field = str(item.get("field", "")).strip()
+        label = str(item.get("label", "")).strip()
+        question = _prompt_text(item.get("question", ""), 400)
+        if not field:
+            continue
+        detail = question or "No question text"
+        if label:
+            lines.append(f"- {field} ({label}): {detail}")
+        else:
+            lines.append(f"- {field}: {detail}")
+    return "\n".join(lines) if lines else "No prior clarification questions recorded."
+
+
+def _merge_clarification_answers(existing: Any, incoming: Any) -> dict[str, str]:
+    merged = _normalize_clarification_answers(existing)
+    for field, answer in _normalize_clarification_answers(incoming).items():
+        merged[field] = answer
+    return merged
+
+
 def _jira_adf_to_text(node: Any) -> str:
     if node is None:
         return ""
@@ -4330,6 +4357,7 @@ def _build_codex_clarification_prompt(payload: dict[str, Any], repo_path: Path) 
     checklist = str(payload.get("commit_checklist", "")).strip() or "No explicit commit checklist provided."
     issue_description = _prompt_text(payload.get("issue_description", ""), 6000) or "No Jira issue description provided."
     issue_comments = _prompt_text(payload.get("issue_comments_text", ""), 3000) or "No Jira comments provided."
+    prior_questions = _format_clarification_questions(payload.get("clarification_questions"))
     clarification_answers = _format_clarification_answers(payload.get("clarification_answers"))
     return textwrap.dedent(
         f"""
@@ -4357,6 +4385,9 @@ def _build_codex_clarification_prompt(payload: dict[str, Any], repo_path: Path) 
         Commit checklist:
         {checklist}
 
+        Prior clarification question fields:
+        {prior_questions}
+
         Clarification answers already provided:
         {clarification_answers}
 
@@ -4367,6 +4398,9 @@ def _build_codex_clarification_prompt(payload: dict[str, Any], repo_path: Path) 
         - Only ask questions when the answer would materially change implementation scope, behavior, or risk.
         - Do not ask for Jira/GitHub tokens, repository paths, or other configuration already handled by the application.
         - Reuse existing clarification answers when they already resolve the ambiguity.
+        - Reuse the existing clarification field names whenever you are asking about the same unresolved topic.
+        - If you must split a previously asked topic into smaller follow-up questions, keep the original field name as a prefix. Example: existing field `manual_override_mode` can become `manual_override_mode_scope` or `manual_override_mode_ui`.
+        - Do not rename an existing field unless it is clearly wrong.
         - If the task is clear enough, return needs_input=false and an empty requested_information list.
         - Use snake_case field names.
         """
@@ -5304,8 +5338,8 @@ def _batch_issue_workflow_payload(
         "issue_labels": ", ".join(issue_detail.get("labels", []) or []),
         "issue_description": str(issue_detail.get("description", "")).strip(),
         "issue_comments_text": str(issue_detail.get("comments_text", "")).strip(),
-        "clarification_questions": [],
-        "clarification_answers": {},
+        "clarification_questions": _normalize_clarification_requests(common_payload.get("clarification_questions")),
+        "clarification_answers": _normalize_clarification_answers(common_payload.get("clarification_answers")),
         "resolved_space_key": resolved_space_key,
         "resolved_repo_provider": scm_config.provider,
         "resolved_repo_ref": scm_config.repo_ref,
@@ -6689,6 +6723,8 @@ def create_app() -> Flask:
             "git_author_email": str(payload.get("git_author_email", "")).strip(),
             "allow_auto_commit": bool(payload.get("allow_auto_commit", True)),
             "allow_auto_push": bool(payload.get("allow_auto_push", True)),
+            "clarification_questions": _normalize_clarification_requests(payload.get("clarification_questions")),
+            "clarification_answers": _normalize_clarification_answers(payload.get("clarification_answers")),
         }
 
         candidates, error = _resolve_batch_candidates(issues, common_payload, jira_payload, scm_payload)
@@ -6852,8 +6888,8 @@ def create_app() -> Flask:
     @app.post("/api/workflow/batch/<batch_id>/runs/<run_id>/answers")
     def answer_workflow_batch_run(batch_id: str, run_id: str) -> Any:
         payload = request.get_json(silent=True) or {}
-        answers = _normalize_clarification_answers(payload.get("clarification_answers"))
-        if not answers:
+        incoming_answers = _normalize_clarification_answers(payload.get("clarification_answers"))
+        if not incoming_answers:
             return jsonify({"ok": False, "error": "clarification_answers_missing", "fields": ["clarification_answers"]}), 400
 
         run = get_run(run_id)
@@ -6869,6 +6905,7 @@ def create_app() -> Flask:
         request_payload = dict(run.get("request_payload") or {})
         clarification_state = run.get("clarification") or {}
         request_payload["clarification_questions"] = _normalize_clarification_requests(clarification_state.get("requested_information"))
+        answers = _merge_clarification_answers(request_payload.get("clarification_answers"), incoming_answers)
         request_payload["clarification_answers"] = answers
 
         jira_payload = store.load("jira")
