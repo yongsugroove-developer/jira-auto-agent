@@ -162,6 +162,8 @@ def test_index_page_renders_automation_fields() -> None:
     assert 'id="jira_backlog_search"' in html
     assert 'id="clear_jira_backlog_search"' in html
     assert 'id="jira_backlog_search_status"' in html
+    assert 'class="jira-backlog-search__field"' in html
+    assert 'class="ghost-button jira-backlog-search__clear"' in html
     assert 'id="selected_issue_keys" class="selection-summary__list"' in html
     assert 'id="jira_issue_modal"' in html
     assert 'id="jira_issue_modal_meta"' in html
@@ -604,6 +606,9 @@ def test_jira_backlog_search_ui_and_script_exist() -> None:
 
     assert ".jira-backlog-toolbar" in style
     assert ".jira-backlog-search" in style
+    assert ".jira-backlog-search__field" in style
+    assert ".jira-backlog-search__icon" in style
+    assert ".jira-backlog-search__chip" in style
     assert ".jira-backlog-search-status" in style
     assert "backlogSearchQuery" in script
     assert "function issueMatchesBacklogSearch(issue, query)" in script

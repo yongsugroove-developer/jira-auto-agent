@@ -272,13 +272,23 @@
       <div class="sidebar-stage__body sidebar-stage__body--backlog">
         <div id="jira_backlog_table_shell" class="jira-backlog-shell">
           <div class="jira-backlog-toolbar">
-            <label class="jira-backlog-search" for="jira_backlog_search">
-              <span>검색</span>
-              <input id="jira_backlog_search" type="search" placeholder="SPACE 또는 제목 검색" autocomplete="off">
-            </label>
-            <button id="clear_jira_backlog_search" type="button" class="ghost-button">지우기</button>
+            <section class="jira-backlog-search" aria-label="Jira 일감 빠른 검색">
+              <div class="jira-backlog-search__label">
+                <label class="jira-backlog-search__eyebrow" for="jira_backlog_search">빠른 검색</label>
+                <p class="jira-backlog-search__headline">space와 제목을 한 번에 좁혀서 최근 일감을 바로 찾는다.</p>
+              </div>
+              <div class="jira-backlog-search__field">
+                <span class="jira-backlog-search__icon" aria-hidden="true"></span>
+                <input id="jira_backlog_search" type="search" placeholder="SPACE 또는 제목 검색" autocomplete="off">
+                <button id="clear_jira_backlog_search" type="button" class="ghost-button jira-backlog-search__clear">지우기</button>
+              </div>
+              <div class="jira-backlog-search__chips" aria-hidden="true">
+                <span class="jira-backlog-search__chip">SPACE</span>
+                <span class="jira-backlog-search__chip">TITLE</span>
+              </div>
+              <p id="jira_backlog_search_status" class="grid-note jira-backlog-search-status">조회 후 space 또는 제목으로 빠르게 찾을 수 있다.</p>
+            </section>
           </div>
-          <p id="jira_backlog_search_status" class="grid-note jira-backlog-search-status">조회 후 space 또는 제목으로 빠르게 찾을 수 있다.</p>
           <div class="jira-backlog-carousel">
             <div class="jira-backlog-carousel__viewport">
               <div id="issue_table" class="jira-backlog-list">
