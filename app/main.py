@@ -60,6 +60,8 @@ CODEX_TIMEOUT_SECONDS = 20 * 60
 CLARIFICATION_TIMEOUT_SECONDS = 8 * 60
 TEST_TIMEOUT_SECONDS = 10 * 60
 JIRA_SEARCH_PAGE_SIZE = 100
+JIRA_PROJECT_PAGE_SIZE = 50
+JIRA_USER_PAGE_SIZE = 100
 MAX_DIFF_CHARS = 60000
 MAX_OUTPUT_CHARS = 12000
 MAX_WORKFLOW_EVENTS = 160
@@ -94,6 +96,17 @@ DEFAULT_GITHUB_WEB_BASE_URL = "https://github.com"
 DEFAULT_GITHUB_API_BASE_URL = "https://api.github.com"
 GITLAB_TOKEN_USERNAME = "oauth2"
 GITHUB_TOKEN_USERNAME = "x-access-token"
+JIRA_JQL_MODES = ("builder", "manual")
+JIRA_STATUS_FILTER_OPTIONS = (
+    {"value": "Backlog", "label": "백로그"},
+    {"value": "To Do", "label": "할일"},
+    {"value": "In Progress", "label": "진행중"},
+    {"value": "Done", "label": "완료"},
+)
+JIRA_SORT_DIRECTION_OPTIONS = (
+    {"value": "DESC", "label": "updated DESC"},
+    {"value": "ASC", "label": "updated ASC"},
+)
 
 CLARIFICATION_QUESTION_COMMENT_HEADER = "[jira-auto-agent] Codex 사전 확인 질문"
 CLARIFICATION_ANSWER_COMMENT_HEADER = "[jira-auto-agent] 사용자 답변"
@@ -2266,6 +2279,9 @@ class JiraConfig:
     email: str
     api_token: str
     jql: str
+    jql_mode: str = "manual"
+    jql_manual: str = ""
+    jql_builder: dict[str, Any] | None = None
 
 
 @dataclass
@@ -2377,6 +2393,88 @@ def _load_encryption_key() -> bytes:
 
 def _normalize_space_key(value: Any) -> str:
     return str(value or "").strip().upper()
+
+
+def _normalize_string_list(raw_value: Any) -> list[str]:
+    if not isinstance(raw_value, (list, tuple, set)):
+        return []
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for raw_item in raw_value:
+        item = str(raw_item or "").strip()
+        if item and item not in seen:
+            normalized.append(item)
+            seen.add(item)
+    return normalized
+
+
+def _normalize_jira_jql_mode(value: Any) -> str:
+    normalized = str(value or "").strip().lower()
+    return normalized if normalized in JIRA_JQL_MODES else "builder"
+
+
+def _normalize_jira_sort_direction(value: Any) -> str:
+    normalized = str(value or "").strip().upper()
+    return normalized if normalized in {"ASC", "DESC"} else "DESC"
+
+
+def _normalize_jira_status_names(raw_value: Any) -> list[str]:
+    allowed = {item["value"] for item in JIRA_STATUS_FILTER_OPTIONS}
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for item in _normalize_string_list(raw_value):
+        if item in allowed and item not in seen:
+            normalized.append(item)
+            seen.add(item)
+    return normalized
+
+
+def _normalize_jira_jql_builder(raw_value: Any) -> dict[str, Any]:
+    payload = raw_value if isinstance(raw_value, dict) else {}
+    return {
+        "project_keys": [_normalize_space_key(item) for item in _normalize_string_list(payload.get("project_keys")) if _normalize_space_key(item)],
+        "assignee_account_ids": _normalize_string_list(payload.get("assignee_account_ids")),
+        "status_names": _normalize_jira_status_names(payload.get("status_names")),
+        "sort_direction": _normalize_jira_sort_direction(payload.get("sort_direction")),
+    }
+
+
+def _quote_jql_literal(value: Any) -> str:
+    text = str(value or "").strip()
+    escaped = text.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
+
+
+def _build_jira_jql_from_builder(builder: dict[str, Any] | None) -> str:
+    normalized_builder = _normalize_jira_jql_builder(builder)
+    clauses: list[str] = []
+    project_keys = normalized_builder["project_keys"]
+    assignee_account_ids = normalized_builder["assignee_account_ids"]
+    status_names = normalized_builder["status_names"]
+    sort_direction = normalized_builder["sort_direction"]
+
+    if project_keys:
+        clauses.append(f"project in ({', '.join(_quote_jql_literal(item) for item in project_keys)})")
+    if assignee_account_ids:
+        clauses.append(f"assignee in ({', '.join(_quote_jql_literal(item) for item in assignee_account_ids)})")
+    if status_names:
+        clauses.append(f"status in ({', '.join(_quote_jql_literal(item) for item in status_names)})")
+
+    order_clause = f"ORDER BY updated {sort_direction}"
+    if not clauses:
+        return order_clause
+    return f"{' AND '.join(clauses)} {order_clause}"
+
+
+def _effective_jira_jql(payload: dict[str, Any]) -> str:
+    raw_jql = str(payload.get("jira_jql", "")).strip()
+    if raw_jql:
+        return raw_jql
+
+    mode = _normalize_jira_jql_mode(payload.get("jira_jql_mode"))
+    if mode == "manual":
+        return str(payload.get("jira_jql_manual", "")).strip()
+    return _build_jira_jql_from_builder(payload.get("jira_jql_builder"))
 
 
 def _normalize_repo_mapping_token_map(raw_value: Any) -> dict[str, str]:
@@ -2601,7 +2699,7 @@ def _required_config_fields(
         "jira_base_url": payload.get("jira_base_url"),
         "jira_email": payload.get("jira_email"),
         "jira_api_token": _effective_secret_value(payload.get("jira_api_token"), existing_jira_payload.get("api_token")),
-        "jira_jql": payload.get("jira_jql"),
+        "jira_jql": _effective_jira_jql(payload),
     }
     missing = [name for name, value in required.items() if not str(value or "").strip()]
     repo_mappings, repo_mapping_errors = _parse_repo_mappings(payload.get("repo_mappings", ""))
@@ -3008,11 +3106,16 @@ def _agent_provider_options_payload() -> dict[str, dict[str, Any]]:
 
 
 def _to_jira_config(payload: dict[str, Any]) -> JiraConfig:
+    jql_mode = _normalize_jira_jql_mode(payload.get("jira_jql_mode"))
+    jql_builder = _normalize_jira_jql_builder(payload.get("jira_jql_builder"))
     return JiraConfig(
         base_url=str(payload["jira_base_url"]).strip().rstrip("/"),
         email=str(payload["jira_email"]).strip(),
         api_token=str(payload["jira_api_token"]).strip(),
-        jql=str(payload["jira_jql"]).strip(),
+        jql=_effective_jira_jql(payload),
+        jql_mode=jql_mode,
+        jql_manual=str(payload.get("jira_jql_manual", "")).strip(),
+        jql_builder=jql_builder,
     )
 
 
@@ -3057,6 +3160,102 @@ def _resolve_repo_context(scm_payload: dict[str, Any], issue_key: Any) -> RepoCo
 def _jira_headers(config: JiraConfig) -> dict[str, str]:
     token = base64.b64encode(f"{config.email}:{config.api_token}".encode("utf-8")).decode("utf-8")
     return {"Accept": "application/json", "Authorization": f"Basic {token}"}
+
+
+def _fetch_jira_projects(config: JiraConfig) -> tuple[list[dict[str, str]], requests.Response | None]:
+    projects: list[dict[str, str]] = []
+    seen_keys: set[str] = set()
+    start_at = 0
+
+    while True:
+        response = _request_with_logging(
+            "GET",
+            f"{config.base_url}/rest/api/3/project/search",
+            headers=_jira_headers(config),
+            params={"startAt": start_at, "maxResults": JIRA_PROJECT_PAGE_SIZE},
+            timeout=DEFAULT_TIMEOUT,
+        )
+        if response.status_code >= 400:
+            return [], response
+
+        data = response.json()
+        values = data.get("values", []) if isinstance(data, dict) else []
+        if not isinstance(values, list):
+            values = []
+
+        for raw_project in values:
+            if not isinstance(raw_project, dict):
+                continue
+            key = _normalize_space_key(raw_project.get("key"))
+            name = str(raw_project.get("name", "")).strip()
+            if not key or key in seen_keys:
+                continue
+            projects.append(
+                {
+                    "value": key,
+                    "label": key if not name or name == key else f"{key} - {name}",
+                }
+            )
+            seen_keys.add(key)
+
+        if not values or bool(data.get("isLast", False)):
+            break
+
+        try:
+            total = int(data.get("total")) if data.get("total") is not None else None
+        except (TypeError, ValueError):
+            total = None
+
+        start_at += len(values)
+        if len(values) < JIRA_PROJECT_PAGE_SIZE:
+            break
+        if total is not None and start_at >= total:
+            break
+
+    projects.sort(key=lambda item: item["label"].lower())
+    return projects, None
+
+
+def _fetch_jira_users(config: JiraConfig) -> tuple[list[dict[str, str]], requests.Response | None]:
+    users: list[dict[str, str]] = []
+    seen_account_ids: set[str] = set()
+    start_at = 0
+
+    while True:
+        response = _request_with_logging(
+            "GET",
+            f"{config.base_url}/rest/api/3/users/search",
+            headers=_jira_headers(config),
+            params={"startAt": start_at, "maxResults": JIRA_USER_PAGE_SIZE},
+            timeout=DEFAULT_TIMEOUT,
+        )
+        if response.status_code >= 400:
+            return [], response
+
+        data = response.json()
+        if not isinstance(data, list):
+            break
+
+        for raw_user in data:
+            if not isinstance(raw_user, dict) or raw_user.get("active") is False:
+                continue
+            account_id = str(raw_user.get("accountId", "")).strip()
+            display_name = str(raw_user.get("displayName", "")).strip()
+            email = str(raw_user.get("emailAddress", "")).strip()
+            if not account_id or account_id in seen_account_ids:
+                continue
+            label = display_name or email or account_id
+            if email and email != label:
+                label = f"{label} - {email}"
+            users.append({"value": account_id, "label": label})
+            seen_account_ids.add(account_id)
+
+        if not data or len(data) < JIRA_USER_PAGE_SIZE:
+            break
+        start_at += len(data)
+
+    users.sort(key=lambda item: item["label"].lower())
+    return users, None
 
 
 def _fetch_all_jira_backlog_issues(config: JiraConfig) -> tuple[list[dict[str, Any]], requests.Response | None]:
@@ -7279,10 +7478,20 @@ def create_app() -> Flask:
         jira = store.load("jira") or {}
         scm = _load_scm_payload(store) or {}
         repo_mapping_tokens = _normalize_repo_mapping_token_map(scm.get("repo_mapping_tokens", {}))
+        jira_jql_mode = _normalize_jira_jql_mode(jira.get("jql_mode"))
+        jira_jql_builder = _normalize_jira_jql_builder(jira.get("jql_builder"))
+        jira_jql_manual = str(jira.get("jql_manual", "")).strip()
+        jira_jql = str(jira.get("jql", "")).strip()
+        if not isinstance(jira.get("jql_builder"), dict):
+            jira_jql_mode = "manual" if jira_jql else "builder"
+            jira_jql_manual = jira_jql_manual or jira_jql
         saved_config = {
             "jira_base_url": jira.get("base_url", ""),
             "jira_email": jira.get("email", ""),
-            "jira_jql": jira.get("jql", ""),
+            "jira_jql": jira_jql,
+            "jira_jql_mode": jira_jql_mode,
+            "jira_jql_manual": jira_jql_manual,
+            "jira_jql_builder": jira_jql_builder,
             "jira_api_token": "",
             "jira_api_token_saved": bool(str(jira.get("api_token", "")).strip()),
             "gitlab_base_url": scm.get("gitlab_base_url", ""),
@@ -7405,6 +7614,9 @@ def create_app() -> Flask:
                 "email": jira.email,
                 "api_token": jira.api_token,
                 "jql": jira.jql,
+                "jql_mode": jira.jql_mode,
+                "jql_manual": jira.jql_manual,
+                "jql_builder": jira.jql_builder or _normalize_jira_jql_builder({}),
             },
         )
         store.save(
@@ -7423,6 +7635,76 @@ def create_app() -> Flask:
                 "jira_api_token_saved": bool(jira.api_token),
                 "repo_mapping_token_spaces": sorted(final_repo_mapping_tokens.keys()),
                 "gitlab_base_url": gitlab_base_url,
+            }
+        )
+
+    @app.post("/api/jira/options")
+    def jira_options() -> Any:
+        payload = request.get_json(silent=True) or {}
+        existing_jira = store.load("jira") or {}
+        jira_payload = dict(payload)
+        jira_payload["jira_api_token"] = _effective_secret_value(payload.get("jira_api_token"), existing_jira.get("api_token"))
+
+        missing = [
+            field_name
+            for field_name in ["jira_base_url", "jira_email", "jira_api_token"]
+            if not str(jira_payload.get(field_name) or "").strip()
+        ]
+        if missing:
+            return (
+                jsonify(
+                    {
+                        "ok": False,
+                        "error": "jira_option_fields_missing",
+                        "fields": missing,
+                        "requested_information": _build_requested_information(missing),
+                        "message": "Jira 옵션을 동기화하려면 주소, 이메일, API Token이 필요합니다.",
+                    }
+                ),
+                400,
+            )
+
+        config = JiraConfig(
+            base_url=str(jira_payload["jira_base_url"]).strip().rstrip("/"),
+            email=str(jira_payload["jira_email"]).strip(),
+            api_token=str(jira_payload["jira_api_token"]).strip(),
+            jql="",
+        )
+        projects, project_response = _fetch_jira_projects(config)
+        if project_response is not None:
+            return (
+                jsonify(
+                    {
+                        "ok": False,
+                        "error": "jira_project_sync_failed",
+                        "status": project_response.status_code,
+                        "body": project_response.text,
+                    }
+                ),
+                502,
+            )
+
+        assignees, assignee_response = _fetch_jira_users(config)
+        if assignee_response is not None:
+            return (
+                jsonify(
+                    {
+                        "ok": False,
+                        "error": "jira_assignee_sync_failed",
+                        "status": assignee_response.status_code,
+                        "body": assignee_response.text,
+                    }
+                ),
+                502,
+            )
+
+        return jsonify(
+            {
+                "ok": True,
+                "projects": projects,
+                "assignees": assignees,
+                "status_options": list(JIRA_STATUS_FILTER_OPTIONS),
+                "sort_options": list(JIRA_SORT_DIRECTION_OPTIONS),
             }
         )
 

@@ -380,6 +380,95 @@ table {
   backdrop-filter: blur(8px);
 }
 
+.jira-jql-builder {
+  display: grid;
+  gap: 16px;
+  padding: 18px;
+  border: 1px solid rgba(42, 115, 245, 0.12);
+  border-radius: 18px;
+  background: linear-gradient(180deg, rgba(247, 249, 253, 0.96) 0%, rgba(255, 255, 255, 0.98) 100%);
+}
+
+.jira-jql-builder__header,
+.jira-jql-builder__footer {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: flex-start;
+}
+
+.jira-jql-builder__copy {
+  display: grid;
+  gap: 4px;
+}
+
+.jira-jql-builder__copy strong,
+.jira-jql-builder__preview-label {
+  font-size: 15px;
+}
+
+.jira-jql-builder__copy p {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.jira-jql-builder__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+}
+
+.jira-jql-builder__toggle {
+  display: inline-flex;
+  gap: 8px;
+  align-items: center;
+  font-weight: 600;
+}
+
+.jira-jql-builder__filters {
+  display: grid;
+  gap: 16px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.jira-jql-builder__filters select,
+.jira-jql-builder__advanced textarea {
+  margin-top: 8px;
+}
+
+.jira-jql-builder__filters select[multiple] {
+  min-height: 152px;
+}
+
+.jira-jql-builder__preview {
+  display: grid;
+  gap: 8px;
+  min-width: min(100%, 420px);
+}
+
+.jira-jql-builder__preview code {
+  display: block;
+  padding: 12px 14px;
+  border: 1px solid rgba(42, 115, 245, 0.14);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.92);
+  color: var(--text);
+  white-space: pre-wrap;
+  word-break: break-word;
+  line-height: 1.5;
+}
+
+.jira-jql-builder__preview code.is-empty {
+  color: var(--muted);
+}
+
+.grid-note.is-error {
+  color: #a33a2b;
+}
+
 .jira-backlog-shell {
   margin-top: 12px;
   display: grid;
@@ -3267,6 +3356,15 @@ tbody tr:hover {
   .jira-backlog-item__detail-grid,
   .jira-backlog-carousel {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .jira-jql-builder__filters {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .jira-jql-builder__header,
+  .jira-jql-builder__footer {
+    flex-direction: column;
   }
 
   .jira-backlog-carousel__nav {
