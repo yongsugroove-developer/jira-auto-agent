@@ -350,6 +350,9 @@ function setResult(id, payload) {
     return;
   }
   target.text(JSON.stringify(payload, null, 2));
+  if (targetId === "#workflow_result") {
+    $("#workflow_result_panel").prop("hidden", !payload);
+  }
 }
 
 function clearResultActions(targetId) {

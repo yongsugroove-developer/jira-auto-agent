@@ -2,6 +2,8 @@
   const batchWorkspaceState = {
     previewTimer: null,
     pollTimer: null,
+    previewRequest: null,
+    batchRunRequest: null,
     preview: null,
     recentBatches: [],
     activeBatch: null,
@@ -48,6 +50,18 @@
 
   function cloneJson(value) {
     return JSON.parse(JSON.stringify(value));
+  }
+
+  function isOptimisticBatch(batch) {
+    return String((batch && batch.batch_id) || "").trim() === "pending-batch";
+  }
+
+  function clearPreviewRequest() {
+    batchWorkspaceState.previewRequest = null;
+  }
+
+  function clearBatchRunRequest() {
+    batchWorkspaceState.batchRunRequest = null;
   }
 
   function safeStorageGet(key) {
@@ -231,7 +245,11 @@
       return;
     }
 
-    $.ajax({
+    if (batchWorkspaceState.previewRequest && typeof batchWorkspaceState.previewRequest.abort === "function") {
+      batchWorkspaceState.previewRequest.abort();
+    }
+
+    batchWorkspaceState.previewRequest = $.ajax({
       url: "/api/workflow/batch/preview",
       method: "POST",
       contentType: "application/json",
@@ -242,8 +260,14 @@
         setResult("#workflow_result", { ok: true, message: `배치 미리보기 ${data.selected_issue_count || 0}건을 갱신했습니다.` });
       })
       .fail((xhr) => {
+        if (xhr && xhr.statusText === "abort") {
+          return;
+        }
         setBatchPreviewEmpty("미리보기를 불러오지 못했다.");
         setResult("#workflow_result", xhr.responseJSON || { ok: false, error: xhr.responseText });
+      })
+      .always(() => {
+        clearPreviewRequest();
       });
   }
 
@@ -724,6 +748,10 @@
 
   function canCancelRun(run) {
     const status = String((run && run.status) || "").trim();
+    const batchId = String((run && run.batch_id) || "").trim();
+    if (batchId === "pending-batch") {
+      return false;
+    }
     return ["queued", "running", "needs_input", "pending_plan_review"].includes(status);
   }
 
@@ -1577,6 +1605,21 @@
       setResult("#workflow_result", { ok: false, error: "active_batch_required", message: "현재 선택된 배치를 찾을 수 없다." });
       return;
     }
+    if (isOptimisticBatch(batch)) {
+      if (batchWorkspaceState.batchRunRequest && typeof batchWorkspaceState.batchRunRequest.abort === "function") {
+        batchWorkspaceState.batchRunRequest.abort();
+      }
+      if (batchWorkspaceState.previewTimer) {
+        window.clearTimeout(batchWorkspaceState.previewTimer);
+        batchWorkspaceState.previewTimer = null;
+      }
+      if (batchWorkspaceState.previewRequest && typeof batchWorkspaceState.previewRequest.abort === "function") {
+        batchWorkspaceState.previewRequest.abort();
+      }
+      clearActiveBatchView();
+      setResult("#workflow_result", { ok: true, status: "cancelled", message: "실행 접수를 취소했다." });
+      return;
+    }
     const runId = String(button.attr("data-cancel-run-id") || "").trim();
     if (!runId) {
       setResult("#workflow_result", { ok: false, error: "workflow_run_not_found", message: "취소할 작업을 찾을 수 없다." });
@@ -1642,7 +1685,15 @@
     setResult("#workflow_result", { ok: true, status: "queued", message: `선택한 이슈 ${payload.issues.length}건의 배치 실행을 접수했다.` });
     renderActiveBatch(buildPendingBatch(payload.issues, payload.agent_provider), { preserveSelection: false });
 
-    $.ajax({
+    if (batchWorkspaceState.previewTimer) {
+      window.clearTimeout(batchWorkspaceState.previewTimer);
+      batchWorkspaceState.previewTimer = null;
+    }
+    if (batchWorkspaceState.previewRequest && typeof batchWorkspaceState.previewRequest.abort === "function") {
+      batchWorkspaceState.previewRequest.abort();
+    }
+
+    batchWorkspaceState.batchRunRequest = $.ajax({
       url: "/api/workflow/batch/run",
       method: "POST",
       contentType: "application/json",
@@ -1659,9 +1710,17 @@
         }
       })
       .fail((xhr) => {
+        if (xhr && xhr.statusText === "abort") {
+          button.prop("disabled", false).text("선택 이슈 배치 실행");
+          clearActiveBatchView();
+          return;
+        }
         setResult("#workflow_result", xhr.responseJSON || { ok: false, error: xhr.responseText });
         button.prop("disabled", false).text("선택 이슈 배치 실행");
         clearActiveBatchView();
+      })
+      .always(() => {
+        clearBatchRunRequest();
       });
   }
 

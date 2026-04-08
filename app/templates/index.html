@@ -322,7 +322,6 @@
 
       <div id="workflow_batch_actions" class="actions workflow-batch-actions"></div>
 
-      <pre id="workflow_result" class="result"></pre>
       <div id="workflow_result_actions" class="result-actions"></div>
       </div>
     </section>
@@ -480,6 +479,10 @@
 
                       <section id="batch_detail_panel_logs" class="workspace-detail-panel" data-detail-panel="logs" hidden>
                         <div class="detail-grid">
+                          <section id="workflow_result_panel" class="detail-card" hidden>
+                            <h3>작업 요청 로그</h3>
+                            <pre id="workflow_result" class="result result-scroll"></pre>
+                          </section>
                           <section class="detail-card">
                             <h3>문법 검사 출력</h3>
                             <pre id="batch_run_test_output" class="result"></pre>

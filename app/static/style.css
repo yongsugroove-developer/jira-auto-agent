@@ -869,6 +869,12 @@ tbody tr:hover {
   margin-bottom: 0;
 }
 
+#action_center_section {
+  display: grid;
+  gap: 20px;
+  align-content: start;
+}
+
 .prepare-stage-card .sidebar-stage__body {
   overflow: visible;
   padding-right: 0;
@@ -941,7 +947,7 @@ tbody tr:hover {
   display: flex;
   flex-wrap: wrap;
   gap: 10px;
-  margin: -2px 0 16px;
+  margin: 0;
 }
 
 .action-center-run-tabs[hidden] {
@@ -1517,11 +1523,11 @@ tbody tr:hover {
 .clarification-answer-list {
   display: grid;
   gap: 12px;
-  margin-top: 14px;
+  margin-top: 0;
 }
 
 .clarification-state-banner {
-  margin-top: 14px;
+  margin-top: 0;
 }
 
 .clarification-state-banner__body {
@@ -1687,6 +1693,20 @@ tbody tr:hover {
 .clarification-question-list {
   display: grid;
   gap: 12px;
+}
+
+#batch_run_clarification_card {
+  display: grid;
+  gap: 16px;
+  align-content: start;
+}
+
+#batch_run_clarification_card > h3 {
+  margin: 0;
+}
+
+#batch_run_clarification_actions.actions {
+  margin-top: 0;
 }
 
 .clarification-question {

@@ -212,6 +212,7 @@ def test_index_page_renders_automation_fields() -> None:
     assert 'id="batch_run_diff"' in html
     assert 'id="batch_run_sync_status_card"' in html
     assert 'id="submit_batch_run_answers"' in html
+    assert 'id="workflow_result_panel"' in html
     assert 'src="/static/batch-workspace.js"' in html
     assert 'id="work_status_hint"' not in html
     assert "현재 진행 중인 작업이 없습니다." in html
@@ -232,8 +233,9 @@ def test_index_page_renders_automation_fields() -> None:
     assert html.index('id="load_config"') < html.index('class="config-sticky-group"')
     assert html.index('id="load_backlog"') < html.index('id="issue_table"')
     assert html.index('id="jira_backlog_table_shell"') < html.index('id="jira_selection_summary"')
-    assert html.index('id="workflow_batch_actions"') < html.index('id="workflow_result"')
+    assert html.index('id="workflow_batch_actions"') < html.index('id="workflow_result_actions"')
     assert html.index('id="action_center_section"') > html.index('id="workflow_result_actions"')
+    assert html.index('id="batch_detail_panel_logs"') < html.index('id="workflow_result"')
     assert html.index('id="monitoring_tabs"') < html.index('id="work_status_section"')
     assert html.index('id="mapping_provider"') < html.index('id="repo_mapping_settings_panel"')
     assert html.index('id="gitlab_base_url"') < html.index('id="mapping_repo_ref"')
@@ -570,6 +572,8 @@ def test_batch_workspace_script_supports_run_cancel_actions() -> None:
     assert 'data-cancel-run-id' in batch_script
     assert '/runs/${encodeURIComponent(runId)}/cancel' in batch_script
     assert "작업 취소" in batch_script
+    assert 'pending-batch' in batch_script
+    assert 'batchWorkspaceState.batchRunRequest.abort()' in batch_script
 
 
 def test_mock_jira_issue_detail_returns_description_and_comments() -> None:
@@ -791,6 +795,58 @@ def test_build_codex_prompt_includes_likely_relevant_files(monkeypatch) -> None:
     assert "- app/main.py" in prompt
     assert "Start with the likely relevant files below before doing broad repository search." in prompt
     assert "Expand to wider repo search only if these hints are insufficient." in prompt
+
+
+def test_run_codex_edit_stream_accepts_cancel_event_and_process_tracker(monkeypatch, tmp_path) -> None:
+    observed: dict[str, object] = {}
+    cancel_event = threading.Event()
+
+    monkeypatch.setattr(main_module, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(main_module, "_find_codex_launcher", lambda: ["codex"])
+    monkeypatch.setattr(main_module, "_build_codex_prompt", lambda payload, repo_path: "prompt")
+    monkeypatch.setattr(
+        main_module,
+        "_resolve_codex_execution_settings",
+        lambda payload: {
+            "requested_model": "",
+            "requested_reasoning_effort": "",
+            "resolved_model": "",
+            "resolved_reasoning_effort": "",
+            "codex_default_model": "",
+            "codex_default_reasoning_effort": "",
+        },
+    )
+
+    def fake_call_with_supported_kwargs(function, *args, **kwargs):  # noqa: ANN001
+        observed["function"] = function
+        observed["kwargs"] = kwargs
+        return {
+            "returncode": 0,
+            "timed_out": False,
+            "cancelled": False,
+            "elapsed_seconds": 0.25,
+            "activity_log": "",
+            "activity_log_truncated": False,
+            "last_agent_message": "{}",
+            "last_progress_message": "done",
+            "progress_event_count": 1,
+        }
+
+    monkeypatch.setattr(main_module, "_call_with_supported_kwargs", fake_call_with_supported_kwargs)
+
+    tracker = lambda process: None  # noqa: E731
+    result = main_module._run_codex_edit_stream(
+        tmp_path,
+        {"issue_key": "DEMO-99", "issue_summary": "cancel propagation"},
+        cancel_event=cancel_event,
+        process_tracker=tracker,
+    )
+
+    assert observed["function"] is main_module._run_codex_command
+    assert observed["kwargs"]["cancel_event"] is cancel_event
+    assert observed["kwargs"]["process_tracker"] is tracker
+    assert result["returncode"] == 0
+    assert result["progress_event_count"] == 1
 
 
 def test_build_codex_clarification_prompt_does_not_include_likely_relevant_files(monkeypatch) -> None:

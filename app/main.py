@@ -4933,7 +4933,14 @@ def _run_codex_edit(
     }
 
 
-def _run_codex_edit_stream(repo_path: Path, payload: dict[str, Any], reporter: Any = None) -> dict[str, Any]:
+def _run_codex_edit_stream(
+    repo_path: Path,
+    payload: dict[str, Any],
+    reporter: Any = None,
+    *,
+    cancel_event: threading.Event | None = None,
+    process_tracker: Any = None,
+) -> dict[str, Any]:
     launcher = _find_codex_launcher()
     prompt = _build_codex_prompt(payload, repo_path)
     codex_settings = _resolve_codex_execution_settings(payload)
@@ -4976,12 +4983,15 @@ def _run_codex_edit_stream(repo_path: Path, payload: dict[str, Any], reporter: A
                 f"reasoning={codex_settings['resolved_reasoning_effort'] or 'CLI default'}",
             )
 
-        result = _run_codex_command(
+        result = _call_with_supported_kwargs(
+            _run_codex_command,
             command,
             cwd=repo_path,
             timeout=CODEX_TIMEOUT_SECONDS,
             input_text=prompt,
             reporter=reporter,
+            cancel_event=cancel_event,
+            process_tracker=process_tracker,
         )
         final_message = output_path.read_text(encoding="utf-8") if output_path.exists() else ""
         if not final_message.strip():
