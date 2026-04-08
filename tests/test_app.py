@@ -576,6 +576,13 @@ def test_batch_workspace_script_supports_run_cancel_actions() -> None:
     assert 'batchWorkspaceState.batchRunRequest.abort()' in batch_script
 
 
+def test_app_script_preserves_backlog_page_when_opening_issue_detail() -> None:
+    script = Path("app/static/app.js").read_text(encoding="utf-8")
+
+    assert "preservePage: true" in script
+    assert 'loadIssueDetail(issue.issue_key, { preserveBacklogPage: true });' in script
+
+
 def test_mock_jira_issue_detail_returns_description_and_comments() -> None:
     app = create_app()
     client = app.test_client()

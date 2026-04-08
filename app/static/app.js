@@ -949,6 +949,7 @@ function renderBacklogIssueTable(issues, options) {
   const preferredIndex = preferredKey
     ? items.findIndex((issue) => String(issue.issue_key || issue.key || "").trim() === preferredKey)
     : -1;
+  const shouldPreservePage = Boolean(settings.preservePage);
 
   jiraState.backlogIssues = items.slice();
   jiraState.backlogInputType = settings.inputType || "radio";
@@ -956,7 +957,12 @@ function renderBacklogIssueTable(issues, options) {
   jiraState.backlogColumns = columns;
   jiraState.backlogItemsPerPage = itemsPerPage;
 
-  if (preferredIndex >= 0) {
+  if (shouldPreservePage) {
+    jiraState.backlogPageIndex = Math.min(
+      Math.max(Number(jiraState.backlogPageIndex) || 0, 0),
+      Math.max(Math.ceil(Math.max(items.length, 1) / itemsPerPage) - 1, 0)
+    );
+  } else if (preferredIndex >= 0) {
     jiraState.backlogPageIndex = Math.floor(preferredIndex / itemsPerPage);
   } else {
     jiraState.backlogPageIndex = 0;
@@ -1040,6 +1046,7 @@ function refreshBacklogLayout() {
   renderBacklogIssueTable(jiraState.backlogIssues, {
     inputType: jiraState.backlogInputType,
     inputName: jiraState.backlogInputName,
+    preservePage: true,
   });
   if (typeof syncIssueAccordionState === "function") {
     syncIssueAccordionState();
@@ -1684,13 +1691,16 @@ function renderIssueDetail(detail) {
   syncIssueAccordionState();
 }
 
-function loadIssueDetail(issueKey) {
+function loadIssueDetail(issueKey, options) {
   const key = String(issueKey || "").trim();
+  const settings = options || {};
   if (!key) {
     resetIssueDetail();
     return;
   }
-  ensureBacklogIssuePage(key);
+  if (!settings.preserveBacklogPage) {
+    ensureBacklogIssuePage(key);
+  }
 
   if (jiraState.issueDetailRequest && typeof jiraState.issueDetailRequest.abort === "function") {
     jiraState.issueDetailRequest.abort();
@@ -1963,13 +1973,16 @@ function renderIssueDetail(detail) {
   syncIssueAccordionState();
 }
 
-function loadIssueDetail(issueKey) {
+function loadIssueDetail(issueKey, options) {
   const key = String(issueKey || "").trim();
+  const settings = options || {};
   if (!key) {
     resetIssueDetail();
     return;
   }
-  ensureBacklogIssuePage(key);
+  if (!settings.preserveBacklogPage) {
+    ensureBacklogIssuePage(key);
+  }
 
   if (jiraState.issueDetailRequest && typeof jiraState.issueDetailRequest.abort === "function") {
     jiraState.issueDetailRequest.abort();
@@ -2738,7 +2751,7 @@ $(document).ready(function () {
     const issue = selectedIssue();
     if (issue) {
       fillWorkflow(issue);
-      loadIssueDetail(issue.issue_key);
+      loadIssueDetail(issue.issue_key, { preserveBacklogPage: true });
     }
   });
 
@@ -2759,7 +2772,7 @@ $(document).ready(function () {
     }
     if (issue.issue_key) {
       openIssueModal(issue.issue_key, issue.issue_summary);
-      loadIssueDetail(issue.issue_key);
+      loadIssueDetail(issue.issue_key, { preserveBacklogPage: true });
     }
   });
 
