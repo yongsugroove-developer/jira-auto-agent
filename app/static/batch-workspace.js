@@ -1289,7 +1289,11 @@
     renderRunSync(run, payload);
     renderList("#batch_run_files", payload.processed_files || [], "변경 파일이 없다.");
     renderText("#batch_run_diff", payload.diff, "diff 없음");
-    renderText("#batch_run_test_output", payload.syntax_check_output || payload.test_output, "문법 검사 출력이 없다.");
+    renderText(
+      "#batch_run_test_output",
+      payload.syntax_check_output || payload.test_output || payload.clarification_debug_text || payload.clarification_output_tail,
+      "문법 검사 출력이나 사전 확인 로그가 없다.",
+    );
     renderText("#batch_run_log", typeof eventLogText === "function" ? eventLogText(run.events) : "실행 로그 없음", "실행 로그 없음");
     syncActionCenterVisibility(batch, run.run_id);
   }

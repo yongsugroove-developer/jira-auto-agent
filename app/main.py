@@ -21,7 +21,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 from urllib.parse import quote, urlparse
 
 import requests
@@ -94,6 +94,9 @@ DEFAULT_GITHUB_WEB_BASE_URL = "https://github.com"
 DEFAULT_GITHUB_API_BASE_URL = "https://api.github.com"
 GITLAB_TOKEN_USERNAME = "oauth2"
 GITHUB_TOKEN_USERNAME = "x-access-token"
+
+CLARIFICATION_QUESTION_COMMENT_HEADER = "[jira-auto-agent] Codex 사전 확인 질문"
+CLARIFICATION_ANSWER_COMMENT_HEADER = "[jira-auto-agent] 사용자 답변"
 AGENT_PROVIDER_LABELS = {
     "codex": "Codex",
     "claude": "Claude Code",
@@ -141,6 +144,16 @@ class PendingWorkflowJob:
     repo_path: Path
     scm_config: ScmRepoConfig
     payload: dict[str, Any]
+
+
+class ClarificationExecutionError(RuntimeError):
+    def __init__(self, error_code: str, user_message: str, details: dict[str, Any] | None = None) -> None:
+        normalized_code = str(error_code or "").strip() or "clarification_failed"
+        super().__init__(normalized_code)
+        self.error_code = normalized_code
+        self.user_message = str(user_message or "").strip() or "사전 확인 단계가 실패했습니다."
+        self.details = dict(details or {})
+
 
 FIELD_GUIDES: dict[str, dict[str, str]] = {
     "jira_base_url": {"label": "Jira Base URL", "guide_section": "jira", "guide_step_id": "jira-base-url"},
@@ -3149,6 +3162,14 @@ def _prompt_text(value: Any, limit: int) -> str:
     return truncated
 
 
+def _prompt_recent_text(value: Any, limit: int) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    truncated, _ = _truncate_recent_text(text, limit)
+    return truncated
+
+
 def _format_clarification_answers(value: Any) -> str:
     answers = _normalize_clarification_answers(value)
     if not answers:
@@ -3178,11 +3199,392 @@ def _format_clarification_questions(value: Any) -> str:
     return "\n".join(lines) if lines else "No prior clarification questions recorded."
 
 
+def _merge_clarification_questions(existing: Any, incoming: Any) -> list[dict[str, str]]:
+    merged_by_field: dict[str, dict[str, str]] = {}
+    ordered_fields: list[str] = []
+    for source in (_normalize_clarification_requests(existing), _normalize_clarification_requests(incoming)):
+        for item in source:
+            field = str(item.get("field", "")).strip()
+            if not field:
+                continue
+            if field not in merged_by_field:
+                ordered_fields.append(field)
+                merged_by_field[field] = {}
+            merged_by_field[field].update(item)
+    return [merged_by_field[field] for field in ordered_fields[:MAX_CLARIFICATION_QUESTIONS]]
+
+
 def _merge_clarification_answers(existing: Any, incoming: Any) -> dict[str, str]:
     merged = _normalize_clarification_answers(existing)
     for field, answer in _normalize_clarification_answers(incoming).items():
         merged[field] = answer
     return merged
+
+
+def _split_formatted_jira_comment_blocks(comments_text: Any) -> list[dict[str, str]]:
+    text = str(comments_text or "").strip()
+    if not text:
+        return []
+
+    header_pattern = re.compile(r"(?m)^(?P<header>\d{4}-\d{2}-\d{2}[^\n]* / [^\n]+)$")
+    matches = list(header_pattern.finditer(text))
+    if not matches:
+        return [{"header": "", "body": text}]
+
+    blocks: list[dict[str, str]] = []
+    for index, match in enumerate(matches):
+        body_start = match.end()
+        body_end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+        body = text[body_start:body_end].strip()
+        if not body:
+            continue
+        blocks.append({"header": match.group("header").strip(), "body": body})
+    return blocks
+
+
+def _recent_jira_comment_excerpt(comments_text: Any, limit: int) -> str:
+    text = str(comments_text or "").strip()
+    if not text:
+        return ""
+
+    blocks = _split_formatted_jira_comment_blocks(text)
+    if len(blocks) <= 1:
+        return _prompt_recent_text(text, limit)
+
+    selected_blocks: list[str] = []
+    total_length = 0
+    for block in reversed(blocks):
+        block_text = _join_non_empty(
+            [
+                str(block.get("header", "")).strip(),
+                str(block.get("body", "")).strip(),
+            ],
+            "\n\n",
+        )
+        if not block_text:
+            continue
+        additional_length = len(block_text) + (2 if selected_blocks else 0)
+        if selected_blocks and total_length + additional_length > limit:
+            break
+        if not selected_blocks and additional_length > limit:
+            return _prompt_recent_text(block_text, limit)
+        selected_blocks.append(block_text)
+        total_length += additional_length
+
+    if not selected_blocks:
+        return _prompt_recent_text(text, limit)
+
+    excerpt = "\n\n".join(reversed(selected_blocks))
+    if len(excerpt) >= len(text):
+        return excerpt
+
+    prefix = "... (older Jira comments omitted)\n\n"
+    if len(prefix) + len(excerpt) <= limit:
+        return prefix + excerpt
+    return _prompt_recent_text(excerpt, limit)
+
+
+def _append_clarification_line(target: dict[str, str], field: str, value: str) -> None:
+    current = str(target.get(field, "")).strip()
+    addition = str(value or "").strip()
+    if not addition:
+        return
+    target[field] = "\n".join(part for part in [current, addition] if part).strip()
+
+
+def _parse_clarification_question_comment(body_text: str) -> dict[str, Any] | None:
+    lines = [line.rstrip() for line in str(body_text or "").splitlines()]
+    non_empty = [line.strip() for line in lines if line.strip()]
+    if not non_empty or non_empty[0] != CLARIFICATION_QUESTION_COMMENT_HEADER:
+        return None
+
+    item_pattern = re.compile(r"^\d+\.\s+(?P<label>.+?)\s+\((?P<field>[a-z0-9_]+)\)\s*$")
+    analysis_lines: list[str] = []
+    questions: list[dict[str, str]] = []
+    current: dict[str, str] | None = None
+    last_key = ""
+
+    def flush_current() -> None:
+        nonlocal current
+        if current is None:
+            return
+        questions.append(
+            {
+                "field": str(current.get("field", "")).strip(),
+                "label": str(current.get("label", "")).strip(),
+                "question": str(current.get("question", "")).strip(),
+                "why": str(current.get("why", "")).strip(),
+                "placeholder": str(current.get("placeholder", "")).strip(),
+            }
+        )
+        current = None
+
+    for raw_line in lines[1:]:
+        stripped = raw_line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith("jira-auto-agent:clarification:questions:"):
+            break
+        match = item_pattern.match(stripped)
+        if match:
+            flush_current()
+            current = {
+                "field": match.group("field"),
+                "label": match.group("label"),
+                "question": "",
+                "why": "",
+                "placeholder": "",
+            }
+            last_key = ""
+            continue
+        if current is None:
+            analysis_lines.append(stripped)
+            continue
+        if stripped.startswith("질문:"):
+            current["question"] = stripped.partition(":")[2].strip()
+            last_key = "question"
+            continue
+        if stripped.startswith("이유:"):
+            current["why"] = stripped.partition(":")[2].strip()
+            last_key = "why"
+            continue
+        if stripped.startswith("입력 예시:"):
+            current["placeholder"] = stripped.partition(":")[2].strip()
+            last_key = "placeholder"
+            continue
+        if last_key:
+            _append_clarification_line(current, last_key, stripped)
+        else:
+            analysis_lines.append(stripped)
+
+    flush_current()
+    normalized_questions = _normalize_clarification_requests(questions)
+    if not normalized_questions:
+        return None
+    return {
+        "analysis_summary": _prompt_text("\n".join(analysis_lines), 1600),
+        "requested_information": normalized_questions,
+    }
+
+
+def _parse_clarification_answer_comment(body_text: str) -> dict[str, Any] | None:
+    lines = [line.rstrip() for line in str(body_text or "").splitlines()]
+    non_empty = [line.strip() for line in lines if line.strip()]
+    if not non_empty or non_empty[0] != CLARIFICATION_ANSWER_COMMENT_HEADER:
+        return None
+
+    item_pattern = re.compile(r"^\d+\.\s+(?P<label>.+?)\s+\((?P<field>[a-z0-9_]+)\)\s*$")
+    answers: dict[str, str] = {}
+    questions: list[dict[str, str]] = []
+    current: dict[str, str] | None = None
+    last_key = ""
+
+    def flush_current() -> None:
+        nonlocal current
+        if current is None:
+            return
+        field = str(current.get("field", "")).strip()
+        answer = str(current.get("answer", "")).strip()
+        if field and answer:
+            answers[field] = answer
+        if field and str(current.get("question", "")).strip():
+            questions.append(
+                {
+                    "field": field,
+                    "label": str(current.get("label", "")).strip(),
+                    "question": str(current.get("question", "")).strip(),
+                    "why": "",
+                    "placeholder": "",
+                }
+            )
+        current = None
+
+    for raw_line in lines[1:]:
+        stripped = raw_line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith("jira-auto-agent:clarification:answers:"):
+            break
+        match = item_pattern.match(stripped)
+        if match:
+            flush_current()
+            current = {
+                "field": match.group("field"),
+                "label": match.group("label"),
+                "question": "",
+                "answer": "",
+            }
+            last_key = ""
+            continue
+        if current is None:
+            continue
+        if stripped.startswith("질문:"):
+            current["question"] = stripped.partition(":")[2].strip()
+            last_key = "question"
+            continue
+        if stripped.startswith("답변:"):
+            current["answer"] = stripped.partition(":")[2].strip()
+            last_key = "answer"
+            continue
+        if last_key:
+            _append_clarification_line(current, last_key, stripped)
+
+    flush_current()
+    normalized_answers = _normalize_clarification_answers(answers)
+    normalized_questions = _normalize_clarification_requests(questions)
+    if not normalized_answers and not normalized_questions:
+        return None
+    return {"answers": normalized_answers, "questions": normalized_questions}
+
+
+def _extract_clarification_context_from_comments(comments_text: Any) -> dict[str, Any]:
+    latest_questions: list[dict[str, str]] = []
+    latest_analysis_summary = ""
+    merged_answers: dict[str, str] = {}
+    latest_question_excerpt = ""
+    latest_answer_excerpt = ""
+
+    for block in _split_formatted_jira_comment_blocks(comments_text):
+        body = str(block.get("body", "")).strip()
+        if not body:
+            continue
+        parsed_question = _parse_clarification_question_comment(body)
+        if parsed_question:
+            latest_questions = parsed_question["requested_information"]
+            latest_analysis_summary = str(parsed_question.get("analysis_summary", "")).strip() or latest_analysis_summary
+            latest_question_excerpt = _prompt_recent_text(body, 1600)
+        parsed_answer = _parse_clarification_answer_comment(body)
+        if parsed_answer:
+            merged_answers = _merge_clarification_answers(merged_answers, parsed_answer.get("answers"))
+            latest_questions = _merge_clarification_questions(latest_questions, parsed_answer.get("questions"))
+            latest_answer_excerpt = _prompt_recent_text(body, 1600)
+
+    context_lines: list[str] = []
+    if latest_answer_excerpt:
+        context_lines.extend(["Latest clarification answer comment:", latest_answer_excerpt])
+    if latest_question_excerpt:
+        if context_lines:
+            context_lines.append("")
+        context_lines.extend(["Latest clarification question comment:", latest_question_excerpt])
+
+    return {
+        "clarification_questions": latest_questions,
+        "clarification_answers": merged_answers,
+        "analysis_summary": latest_analysis_summary,
+        "comment_context": "\n".join(context_lines).strip(),
+    }
+
+
+def _payload_with_hydrated_clarification_context(payload: dict[str, Any]) -> dict[str, Any]:
+    hydrated_payload = dict(payload)
+    extracted = _extract_clarification_context_from_comments(hydrated_payload.get("issue_comments_text", ""))
+    hydrated_payload["clarification_questions"] = _merge_clarification_questions(
+        extracted.get("clarification_questions"),
+        hydrated_payload.get("clarification_questions"),
+    )
+    hydrated_payload["clarification_answers"] = _merge_clarification_answers(
+        extracted.get("clarification_answers"),
+        hydrated_payload.get("clarification_answers"),
+    )
+    if str(extracted.get("analysis_summary", "")).strip():
+        hydrated_payload["_clarification_analysis_summary"] = str(extracted["analysis_summary"]).strip()
+    if str(extracted.get("comment_context", "")).strip():
+        hydrated_payload["_clarification_comment_context"] = str(extracted["comment_context"]).strip()
+    return hydrated_payload
+
+
+def _build_clarification_error_details(
+    provider: str,
+    result: dict[str, Any],
+    *,
+    raw_final_message: str = "",
+    provider_settings: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    combined_output = _combined_output(
+        str(result.get("stdout", "")).strip(),
+        str(result.get("stderr", "")).strip(),
+    )
+    if not combined_output:
+        combined_output = str(result.get("activity_log", "")).strip()
+    output_tail, output_tail_truncated = _truncate_recent_text(combined_output, 4000) if combined_output else ("", False)
+    stdout_tail, stdout_truncated = _truncate_recent_text(str(result.get("stdout", "")).strip(), 2000)
+    stderr_tail, stderr_truncated = _truncate_recent_text(str(result.get("stderr", "")).strip(), 2000)
+    raw_final_tail, raw_final_truncated = _truncate_recent_text(str(raw_final_message or "").strip(), 2000)
+    details: dict[str, Any] = {
+        "clarification_provider": str(provider or "").strip(),
+        "clarification_elapsed_seconds": result.get("elapsed_seconds"),
+        "clarification_returncode": result.get("returncode"),
+        "clarification_timed_out": bool(result.get("timed_out", False)),
+        "clarification_last_progress_message": str(result.get("last_progress_message", "")).strip(),
+        "clarification_progress_event_count": int(result.get("progress_event_count", 0) or 0),
+        "clarification_output_tail": output_tail,
+        "clarification_output_tail_truncated": output_tail_truncated,
+        "clarification_raw_final_message": raw_final_tail,
+        "clarification_raw_final_message_truncated": raw_final_truncated,
+        "clarification_stdout": stdout_tail,
+        "clarification_stdout_truncated": stdout_truncated,
+        "clarification_stderr": stderr_tail,
+        "clarification_stderr_truncated": stderr_truncated,
+    }
+    settings = dict(provider_settings or {})
+    if str(settings.get("resolved_model", "")).strip():
+        details["clarification_resolved_model"] = str(settings["resolved_model"]).strip()
+    if str(settings.get("resolved_reasoning_effort", "")).strip():
+        details["clarification_resolved_reasoning_effort"] = str(settings["resolved_reasoning_effort"]).strip()
+    if str(settings.get("resolved_permission_mode", "")).strip():
+        details["clarification_resolved_permission_mode"] = str(settings["resolved_permission_mode"]).strip()
+    return details
+
+
+def _clarification_error_debug_text(payload: dict[str, Any]) -> str:
+    lines = [
+        f"error: {str(payload.get('error') or payload.get('status') or '').strip()}",
+        f"message: {str(payload.get('message', '')).strip()}",
+        f"provider: {str(payload.get('clarification_provider', '')).strip() or 'unknown'}",
+    ]
+    resolved_model = str(payload.get("clarification_resolved_model", "")).strip()
+    if resolved_model:
+        lines.append(f"resolved_model: {resolved_model}")
+    reasoning_effort = str(payload.get("clarification_resolved_reasoning_effort", "")).strip()
+    if reasoning_effort:
+        lines.append(f"resolved_reasoning_effort: {reasoning_effort}")
+    permission_mode = str(payload.get("clarification_resolved_permission_mode", "")).strip()
+    if permission_mode:
+        lines.append(f"resolved_permission_mode: {permission_mode}")
+    lines.append(f"elapsed_seconds: {payload.get('clarification_elapsed_seconds')}")
+    lines.append(f"returncode: {payload.get('clarification_returncode')}")
+    lines.append(f"timed_out: {bool(payload.get('clarification_timed_out', False))}")
+    last_progress = str(payload.get("clarification_last_progress_message", "")).strip()
+    if last_progress:
+        lines.append(f"last_progress: {last_progress}")
+    lines.append(f"progress_event_count: {int(payload.get('clarification_progress_event_count', 0) or 0)}")
+    raw_final = str(payload.get("clarification_raw_final_message", "")).strip()
+    if raw_final:
+        lines.extend(["", "[raw_final_message]", raw_final])
+    output_tail = str(payload.get("clarification_output_tail", "")).strip()
+    if output_tail:
+        lines.extend(["", "[output_tail]", output_tail])
+    stdout_text = str(payload.get("clarification_stdout", "")).strip()
+    if stdout_text:
+        lines.extend(["", "[stdout_tail]", stdout_text])
+    stderr_text = str(payload.get("clarification_stderr", "")).strip()
+    if stderr_text:
+        lines.extend(["", "[stderr_tail]", stderr_text])
+    return "\n".join(line for line in lines if line is not None).strip()
+
+
+def _clarification_error_payload(
+    error_code: str,
+    user_message: str,
+    details: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    payload = dict(details or {})
+    payload["ok"] = False
+    payload["status"] = str(error_code or "").strip() or "clarification_failed"
+    payload["error"] = payload["status"]
+    payload["message"] = str(user_message or "").strip() or "사전 확인 단계가 실패했습니다."
+    payload["clarification_debug_text"] = _clarification_error_debug_text(payload)
+    return payload
 
 
 def _jira_adf_to_text(node: Any) -> str:
@@ -3625,6 +4027,14 @@ def _truncate_text(text: str, limit: int) -> tuple[str, bool]:
     suffix = f"\n... (truncated {len(text) - limit} chars)\n"
     keep = max(limit - len(suffix), 0)
     return text[:keep] + suffix, True
+
+
+def _truncate_recent_text(text: str, limit: int) -> tuple[str, bool]:
+    if len(text) <= limit:
+        return text, False
+    prefix = f"... (truncated {len(text) - limit} leading chars)\n"
+    keep = max(limit - len(prefix), 0)
+    return prefix + text[-keep:], True
 
 
 def _combined_output(stdout: str, stderr: str) -> str:
@@ -4476,9 +4886,16 @@ def _build_codex_clarification_prompt(payload: dict[str, Any], repo_path: Path) 
     acceptance = str(payload.get("acceptance_criteria", "")).strip() or "No explicit acceptance criteria provided."
     checklist = str(payload.get("commit_checklist", "")).strip() or "No explicit commit checklist provided."
     issue_description = _prompt_text(payload.get("issue_description", ""), 6000) or "No Jira issue description provided."
-    issue_comments = _prompt_text(payload.get("issue_comments_text", ""), 3000) or "No Jira comments provided."
+    issue_comments = _recent_jira_comment_excerpt(payload.get("issue_comments_text", ""), 3000) or "No Jira comments provided."
     prior_questions = _format_clarification_questions(payload.get("clarification_questions"))
     clarification_answers = _format_clarification_answers(payload.get("clarification_answers"))
+    clarification_analysis = (
+        _prompt_text(payload.get("_clarification_analysis_summary", ""), 1200) or "No recovered clarification analysis summary."
+    )
+    clarification_comment_context = (
+        _prompt_recent_text(payload.get("_clarification_comment_context", ""), 2200)
+        or "No recovered clarification comment context."
+    )
     return textwrap.dedent(
         f"""
         Repository path: {repo_path}
@@ -4511,6 +4928,12 @@ def _build_codex_clarification_prompt(payload: dict[str, Any], repo_path: Path) 
         Clarification answers already provided:
         {clarification_answers}
 
+        Recovered clarification analysis summary:
+        {clarification_analysis}
+
+        Recovered clarification comment context:
+        {clarification_comment_context}
+
         Task:
         - You are not implementing code yet.
         - Decide whether the current information is sufficient to perform the task safely and precisely.
@@ -4521,6 +4944,8 @@ def _build_codex_clarification_prompt(payload: dict[str, Any], repo_path: Path) 
         - Reuse the existing clarification field names whenever you are asking about the same unresolved topic.
         - If you must split a previously asked topic into smaller follow-up questions, keep the original field name as a prefix. Example: existing field `manual_override_mode` can become `manual_override_mode_scope` or `manual_override_mode_ui`.
         - Do not rename an existing field unless it is clearly wrong.
+        - Treat the structured clarification question fields, clarification answers, and recovered clarification comment context above as newer and more authoritative than older general Jira comments when they overlap.
+        - The Jira recent comments block above is intentionally biased toward newer comments.
         - If the task is clear enough, return needs_input=false and an empty requested_information list.
         - Use snake_case field names.
         """
@@ -5080,12 +5505,44 @@ def _run_codex_clarification(repo_path: Path, payload: dict[str, Any]) -> dict[s
         if not final_message.strip():
             final_message = str(result.get("last_agent_message", "")).strip()
 
-    parsed: dict[str, Any] = {}
-    if final_message.strip():
-        try:
-            parsed = json.loads(final_message)
-        except json.JSONDecodeError:
-            parsed = {}
+    diagnostics = _build_clarification_error_details(
+        "codex",
+        result,
+        raw_final_message=final_message,
+        provider_settings=codex_settings,
+    )
+    if result["timed_out"]:
+        raise ClarificationExecutionError(
+            "clarification_timeout",
+            "사전 확인 단계 응답 시간이 초과되었습니다.",
+            diagnostics,
+        )
+    if result["returncode"] not in {0, None}:
+        raise ClarificationExecutionError(
+            "clarification_failed",
+            "사전 확인 단계가 비정상 종료되었습니다.",
+            diagnostics,
+        )
+    if not final_message.strip():
+        raise ClarificationExecutionError(
+            "clarification_parse_failed",
+            "사전 확인 단계 응답이 비어 있습니다.",
+            {**diagnostics, "clarification_parse_reason": "empty_response"},
+        )
+    try:
+        parsed = json.loads(final_message)
+    except json.JSONDecodeError:
+        raise ClarificationExecutionError(
+            "clarification_parse_failed",
+            "사전 확인 단계 응답 형식을 해석하지 못했습니다.",
+            {**diagnostics, "clarification_parse_reason": "invalid_json"},
+        ) from None
+    if not isinstance(parsed, dict) or not {"needs_input", "analysis_summary", "requested_information"}.issubset(parsed):
+        raise ClarificationExecutionError(
+            "clarification_parse_failed",
+            "사전 확인 단계 응답 형식을 해석하지 못했습니다.",
+            {**diagnostics, "clarification_parse_reason": "schema_mismatch"},
+        )
 
     normalized = _normalize_clarification_response(parsed)
     normalized.update(
@@ -5097,11 +5554,6 @@ def _run_codex_clarification(repo_path: Path, payload: dict[str, Any]) -> dict[s
             "codex_progress_event_count": int(result.get("progress_event_count", 0) or 0),
         }
     )
-
-    if result["timed_out"]:
-        raise RuntimeError("clarification_timeout")
-    if result["returncode"] not in {0, None}:
-        raise RuntimeError("clarification_failed")
     return normalized
 
 
@@ -5195,7 +5647,38 @@ def _run_claude_clarification(repo_path: Path, payload: dict[str, Any]) -> dict[
     if claude_settings["resolved_model"]:
         command.extend(["--model", claude_settings["resolved_model"]])
     result = _run_claude_command(command, cwd=repo_path, timeout=CLARIFICATION_TIMEOUT_SECONDS, reporter=None)
-    parsed = _parse_claude_json_message(str(result.get("stdout", "")).strip())
+    raw_message = str(result.get("stdout", "")).strip() or str(result.get("last_agent_message", "")).strip()
+    diagnostics = _build_clarification_error_details(
+        "claude",
+        result,
+        raw_final_message=raw_message,
+        provider_settings=claude_settings,
+    )
+    if result["timed_out"]:
+        raise ClarificationExecutionError(
+            "clarification_timeout",
+            "사전 확인 단계 응답 시간이 초과되었습니다.",
+            diagnostics,
+        )
+    if result["returncode"] not in {0, None}:
+        raise ClarificationExecutionError(
+            "clarification_failed",
+            "사전 확인 단계가 비정상 종료되었습니다.",
+            diagnostics,
+        )
+    if not raw_message:
+        raise ClarificationExecutionError(
+            "clarification_parse_failed",
+            "사전 확인 단계 응답이 비어 있습니다.",
+            {**diagnostics, "clarification_parse_reason": "empty_response"},
+        )
+    parsed = _parse_claude_json_message(raw_message)
+    if not isinstance(parsed, dict) or not {"needs_input", "analysis_summary", "requested_information"}.issubset(parsed):
+        raise ClarificationExecutionError(
+            "clarification_parse_failed",
+            "사전 확인 단계 응답 형식을 해석하지 못했습니다.",
+            {**diagnostics, "clarification_parse_reason": "schema_mismatch"},
+        )
     normalized = _normalize_clarification_response(parsed)
     normalized.update(
         {
@@ -5206,10 +5689,6 @@ def _run_claude_clarification(repo_path: Path, payload: dict[str, Any]) -> dict[
             "claude_progress_event_count": int(result.get("progress_event_count", 0) or 0),
         }
     )
-    if result["timed_out"]:
-        raise RuntimeError("clarification_timeout")
-    if result["returncode"] not in {0, None}:
-        raise RuntimeError("clarification_failed")
     return normalized
 
 
@@ -5240,6 +5719,7 @@ def _run_agent_edit(
 
 
 def _run_agent_clarification(repo_path: Path, payload: dict[str, Any]) -> dict[str, Any]:
+    payload = _payload_with_hydrated_clarification_context(payload)
     provider = _normalize_agent_provider(payload.get("agent_provider"))
     if provider == "claude":
         return _run_claude_clarification(repo_path, payload)
@@ -5550,7 +6030,7 @@ def _batch_issue_workflow_payload(
 ) -> dict[str, Any]:
     issue_key = str(issue["issue_key"]).strip().upper()
     issue_summary = str(issue["issue_summary"]).strip()
-    return {
+    payload = {
         **common_payload,
         "issue_key": issue_key,
         "issue_summary": issue_summary,
@@ -5572,6 +6052,7 @@ def _batch_issue_workflow_payload(
         "resolved_repo_name": scm_config.repo_name,
         "resolved_base_branch": scm_config.base_branch,
     }
+    return _payload_with_hydrated_clarification_context(payload)
 
 
 def _execute_coding_workflow(
@@ -6147,6 +6628,97 @@ def create_app() -> Flask:
             run_files = run_files[:limit]
         return [item.stem for item in run_files]
 
+    def _iter_known_run_snapshots() -> Iterator[dict[str, Any]]:
+        seen_run_ids: set[str] = set()
+        with workflow_runs_lock:
+            loaded_runs = [_workflow_run_snapshot(run) for run in workflow_runs.values()]
+        for run in loaded_runs:
+            run_id = str(run.get("run_id", "")).strip()
+            if not run_id or run_id in seen_run_ids:
+                continue
+            seen_run_ids.add(run_id)
+            yield run
+        for run_id in _load_run_file_ids():
+            run_id = str(run_id).strip()
+            if not run_id or run_id in seen_run_ids:
+                continue
+            persisted_run = _load_workflow_run(run_id)
+            if persisted_run is None:
+                continue
+            seen_run_ids.add(run_id)
+            yield persisted_run
+
+    def _recover_batch_from_runs(batch_id: str) -> dict[str, Any] | None:
+        normalized_batch_id = str(batch_id).strip()
+        if not normalized_batch_id:
+            return None
+
+        matched_runs = [
+            run_snapshot
+            for run_snapshot in _iter_known_run_snapshots()
+            if str(run_snapshot.get("batch_id", "")).strip() == normalized_batch_id
+        ]
+        if not matched_runs:
+            return None
+
+        created_candidates = [
+            str(run_snapshot.get("created_at", "")).strip()
+            for run_snapshot in matched_runs
+            if str(run_snapshot.get("created_at", "")).strip()
+        ]
+        created_at = min(created_candidates, default=_utcnow_iso())
+        updated_candidates = [
+            str(
+                run_snapshot.get("updated_at")
+                or run_snapshot.get("finished_at")
+                or run_snapshot.get("started_at")
+                or run_snapshot.get("created_at")
+                or ""
+            ).strip()
+            for run_snapshot in matched_runs
+        ]
+        updated_at = max([value for value in updated_candidates if value], default=created_at)
+        selected_issue_keys = sorted(
+            {
+                str(run_snapshot.get("issue_key", "")).strip().upper()
+                for run_snapshot in matched_runs
+                if str(run_snapshot.get("issue_key", "")).strip()
+            }
+        )
+        recovered_batch = {
+            "batch_id": normalized_batch_id,
+            "status": "queued",
+            "message": "기존 실행 기록으로 배치 상태를 복구했다.",
+            "created_at": created_at,
+            "updated_at": updated_at,
+            "active_run_id": None,
+            "run_ids": [str(run_snapshot.get("run_id", "")).strip() for run_snapshot in matched_runs],
+            "runs": [_workflow_batch_run_ref(run_snapshot) for run_snapshot in matched_runs],
+            "counts": {},
+            "selected_issue_keys": selected_issue_keys,
+            "selected_issue_count": len(selected_issue_keys),
+        }
+        with workflow_batches_lock:
+            workflow_batches[normalized_batch_id] = recovered_batch
+        _save_workflow_batch(recovered_batch)
+        return recovered_batch
+
+    def _load_active_batch_ids_from_runs(limit: int | None = None) -> list[str]:
+        active_statuses = {"queued", "running", "needs_input", "pending_plan_review"}
+        batch_ids: list[str] = []
+        seen_batch_ids: set[str] = set()
+        for run_snapshot in _iter_known_run_snapshots():
+            if str(run_snapshot.get("status", "")).strip() not in active_statuses:
+                continue
+            batch_id = str(run_snapshot.get("batch_id", "")).strip()
+            if not batch_id or batch_id in seen_batch_ids:
+                continue
+            seen_batch_ids.add(batch_id)
+            batch_ids.append(batch_id)
+            if limit is not None and len(batch_ids) >= limit:
+                break
+        return batch_ids
+
     def _ensure_batch_loaded(batch_id: str) -> dict[str, Any] | None:
         with workflow_batches_lock:
             batch = workflow_batches.get(batch_id)
@@ -6154,7 +6726,9 @@ def create_app() -> Flask:
                 return batch
         persisted_batch = _load_workflow_batch(batch_id)
         if persisted_batch is None:
-            return None
+            persisted_batch = _recover_batch_from_runs(batch_id)
+            if persisted_batch is None:
+                return None
         with workflow_batches_lock:
             workflow_batches.setdefault(batch_id, persisted_batch)
             return workflow_batches[batch_id]
@@ -6304,11 +6878,16 @@ def create_app() -> Flask:
         return _refresh_batch_state(batch_id)
 
     def list_batches(limit: int = MAX_RECENT_BATCHES) -> list[dict[str, Any]]:
+        active_statuses = {"queued", "running", "needs_input", "pending_plan_review"}
         results: list[dict[str, Any]] = []
         seen_ids: set[str] = set()
         with workflow_batches_lock:
             loaded_batch_ids = list(workflow_batches.keys())
-        candidate_ids = [*loaded_batch_ids, *_load_batch_file_ids(limit=limit * 2)]
+        candidate_ids = [
+            *loaded_batch_ids,
+            *_load_batch_file_ids(limit=limit * 2),
+            *_load_active_batch_ids_from_runs(limit=limit * 2),
+        ]
         for batch_id in candidate_ids:
             batch_id = str(batch_id).strip()
             if not batch_id or batch_id in seen_ids:
@@ -6319,6 +6898,7 @@ def create_app() -> Flask:
                 continue
             results.append(_workflow_batch_snapshot(batch_snapshot))
         results.sort(key=lambda item: str(item.get("updated_at", "")), reverse=True)
+        results.sort(key=lambda item: 0 if str(item.get("status", "")).strip() in active_statuses else 1)
         return results[:limit]
 
     def list_workflow_logs(limit: int = 50) -> list[dict[str, Any]]:
@@ -7150,14 +7730,17 @@ def create_app() -> Flask:
             _append_workflow_event(run, "queued", "배치 실행 항목을 등록했습니다.")
             _register_run(run)
 
+            error_payload: dict[str, Any] | None = None
             try:
                 clarification = _run_agent_clarification(repo_path, run_payload)
+            except ClarificationExecutionError as exc:
+                error_payload = _clarification_error_payload(exc.error_code, exc.user_message, exc.details)
             except RuntimeError as exc:
-                error_payload = {
-                    "ok": False,
-                    "status": str(exc),
-                    "message": "사전 확인 단계에서 Agent 응답을 해석하지 못했습니다.",
-                }
+                error_payload = _clarification_error_payload(
+                    str(exc),
+                    "사전 확인 단계에서 Agent 응답을 해석하지 못했습니다.",
+                )
+            if error_payload is not None:
                 update_run(
                     run["run_id"],
                     lambda target_run, payload=error_payload: (
@@ -7293,9 +7876,12 @@ def create_app() -> Flask:
         if not repo_path.exists() or not (repo_path / ".git").exists():
             return jsonify({"ok": False, "error": "local_repo_not_found"}), 400
 
-        request_payload = dict(run.get("request_payload") or {})
+        request_payload = _payload_with_hydrated_clarification_context(dict(run.get("request_payload") or {}))
         clarification_state = run.get("clarification") or {}
-        request_payload["clarification_questions"] = _normalize_clarification_requests(clarification_state.get("requested_information"))
+        request_payload["clarification_questions"] = _merge_clarification_questions(
+            request_payload.get("clarification_questions"),
+            clarification_state.get("requested_information"),
+        )
         answers = _merge_clarification_answers(request_payload.get("clarification_answers"), incoming_answers)
         request_payload["clarification_answers"] = answers
 
@@ -7312,8 +7898,10 @@ def create_app() -> Flask:
             clarification = _run_agent_clarification(repo_path, request_payload)
         except FileNotFoundError as exc:
             return jsonify(_agent_cli_missing_error(str(request_payload.get("agent_provider", DEFAULT_AGENT_PROVIDER)), exc)), 400
+        except ClarificationExecutionError as exc:
+            return jsonify(_clarification_error_payload(exc.error_code, exc.user_message, exc.details)), 502
         except RuntimeError as exc:
-            return jsonify({"ok": False, "error": str(exc), "message": "사전 확인 단계에서 Agent 응답을 해석하지 못했습니다."}), 502
+            return jsonify(_clarification_error_payload(str(exc), "사전 확인 단계에서 Agent 응답을 해석하지 못했습니다.")), 502
 
         if clarification["needs_input"]:
             jira_comment_sync["questions"] = _safe_sync_jira_clarification_questions(
@@ -7582,6 +8170,7 @@ def create_app() -> Flask:
         payload = _normalize_workflow_agent_payload(request.get_json(silent=True) or {})
         payload["clarification_questions"] = _normalize_clarification_requests(payload.get("clarification_questions"))
         payload["clarification_answers"] = _normalize_clarification_answers(payload.get("clarification_answers"))
+        explicit_clarification_answers = dict(payload["clarification_answers"])
         jira_comment_sync = {
             "questions": {"status": "skipped", "reason": "not_requested"},
             "answers": {"status": "skipped", "reason": "not_requested"},
@@ -7656,40 +8245,36 @@ def create_app() -> Flask:
             )
 
         _safe_ensure_project_memory(repo_path, space_key=resolved_space_key)
+        clarification_request_payload = _payload_with_hydrated_clarification_context(
+            {
+                **payload,
+                "resolved_space_key": resolved_space_key,
+                "resolved_repo_provider": scm_config.provider,
+                "resolved_repo_ref": scm_config.repo_ref,
+                "resolved_repo_owner": scm_config.repo_owner,
+                "resolved_repo_name": scm_config.repo_name,
+                "resolved_base_branch": scm_config.base_branch,
+            }
+        )
 
         try:
-            clarification = _run_agent_clarification(
-                repo_path,
-                {
-                    **payload,
-                    "resolved_space_key": resolved_space_key,
-                    "resolved_repo_provider": scm_config.provider,
-                    "resolved_repo_ref": scm_config.repo_ref,
-                    "resolved_repo_owner": scm_config.repo_owner,
-                    "resolved_repo_name": scm_config.repo_name,
-                    "resolved_base_branch": scm_config.base_branch,
-                },
-            )
+            clarification = _run_agent_clarification(repo_path, clarification_request_payload)
         except FileNotFoundError as exc:
             return jsonify(_agent_cli_missing_error(str(payload.get("agent_provider", DEFAULT_AGENT_PROVIDER)), exc)), 400
+        except ClarificationExecutionError as exc:
+            return jsonify(_clarification_error_payload(exc.error_code, exc.user_message, exc.details)), 502
         except RuntimeError as exc:
             return (
-                jsonify(
-                    {
-                        "ok": False,
-                        "error": str(exc),
-                        "message": "사전 확인 단계에서 Agent 응답을 해석하지 못했습니다.",
-                    }
-                ),
+                jsonify(_clarification_error_payload(str(exc), "사전 확인 단계에서 Agent 응답을 해석하지 못했습니다.")),
                 502,
             )
 
-        if payload["clarification_answers"]:
+        if explicit_clarification_answers:
             jira_comment_sync["answers"] = _safe_sync_jira_clarification_answers(
                 jira_payload,
                 str(payload.get("issue_key", "")).strip(),
-                payload["clarification_answers"],
-                payload["clarification_questions"],
+                explicit_clarification_answers,
+                clarification_request_payload["clarification_questions"],
             )
         if clarification["needs_input"]:
             jira_comment_sync["questions"] = _safe_sync_jira_clarification_questions(
@@ -7730,18 +8315,7 @@ def create_app() -> Flask:
         }
         if not clarification["needs_input"] and bool(payload.get("enable_plan_review")):
             try:
-                plan_review = _run_agent_plan_review(
-                    repo_path,
-                    {
-                        **payload,
-                        "resolved_space_key": resolved_space_key,
-                        "resolved_repo_provider": scm_config.provider,
-                        "resolved_repo_ref": scm_config.repo_ref,
-                        "resolved_repo_owner": scm_config.repo_owner,
-                        "resolved_repo_name": scm_config.repo_name,
-                        "resolved_base_branch": scm_config.base_branch,
-                    },
-                )
+                plan_review = _run_agent_plan_review(repo_path, clarification_request_payload)
             except FileNotFoundError as exc:
                 return jsonify(_agent_cli_missing_error(str(payload.get("agent_provider", DEFAULT_AGENT_PROVIDER)), exc)), 400
             except RuntimeError as exc:
@@ -7755,6 +8329,7 @@ def create_app() -> Flask:
         payload = _normalize_workflow_agent_payload(request.get_json(silent=True) or {})
         payload["clarification_questions"] = _normalize_clarification_requests(payload.get("clarification_questions"))
         payload["clarification_answers"] = _normalize_clarification_answers(payload.get("clarification_answers"))
+        explicit_clarification_answers = dict(payload["clarification_answers"])
         jira_comment_sync = {
             "questions": {"status": "skipped", "reason": "not_requested"},
             "answers": {"status": "skipped", "reason": "not_requested"},
@@ -7846,26 +8421,37 @@ def create_app() -> Flask:
         except FileNotFoundError as exc:
             return jsonify(_agent_cli_missing_error(str(payload.get("agent_provider", DEFAULT_AGENT_PROVIDER)), exc)), 400
 
-        if payload["clarification_answers"]:
+        run_payload = _payload_with_hydrated_clarification_context(
+            {
+                **payload,
+                "resolved_space_key": resolved_space_key,
+                "resolved_repo_provider": scm_config.provider,
+                "resolved_repo_ref": scm_config.repo_ref,
+                "resolved_repo_owner": scm_config.repo_owner,
+                "resolved_repo_name": scm_config.repo_name,
+                "resolved_base_branch": scm_config.base_branch,
+                "git_author_name": identity["name"],
+                "git_author_email": identity["email"],
+            }
+        )
+
+        if explicit_clarification_answers:
             jira_comment_sync["answers"] = _safe_sync_jira_clarification_answers(
                 jira_payload,
                 str(payload.get("issue_key", "")).strip(),
-                payload["clarification_answers"],
-                payload["clarification_questions"],
+                explicit_clarification_answers,
+                run_payload["clarification_questions"],
             )
-
-        run_payload = {
-            **payload,
-            "resolved_space_key": resolved_space_key,
-            "resolved_repo_provider": scm_config.provider,
-            "resolved_repo_ref": scm_config.repo_ref,
-            "resolved_repo_owner": scm_config.repo_owner,
-            "resolved_repo_name": scm_config.repo_name,
-            "resolved_base_branch": scm_config.base_branch,
-            "git_author_name": identity["name"],
-            "git_author_email": identity["email"],
-        }
+        batch = create_batch(
+            [
+                {
+                    "issue_key": str(payload.get("issue_key", "")).strip(),
+                    "issue_summary": str(payload.get("issue_summary", "")).strip(),
+                }
+            ]
+        )
         run = _new_workflow_run(
+            batch_id=batch["batch_id"],
             agent_provider=str(payload.get("agent_provider", DEFAULT_AGENT_PROVIDER)),
             issue_key=str(payload.get("issue_key", "")).strip(),
             issue_summary=str(payload.get("issue_summary", "")).strip(),

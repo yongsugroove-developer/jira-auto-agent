@@ -566,6 +566,13 @@ def test_batch_workspace_script_limits_work_status_to_active_runs() -> None:
     assert '$("#toggle_failed_runs")' not in batch_script
 
 
+def test_batch_workspace_script_surfaces_clarification_debug_output() -> None:
+    batch_script = Path("app/static/batch-workspace.js").read_text(encoding="utf-8")
+
+    assert "payload.clarification_debug_text" in batch_script
+    assert "payload.clarification_output_tail" in batch_script
+
+
 def test_batch_workspace_script_supports_run_cancel_actions() -> None:
     batch_script = Path("app/static/batch-workspace.js").read_text(encoding="utf-8")
 
@@ -746,6 +753,106 @@ def test_build_codex_clarification_prompt_includes_prior_question_fields(monkeyp
     assert "- manual_override_mode (수동 입력 유지 여부): 기존 수동 입력을 유지할지 정해 달라." in prompt
     assert "Reuse the existing clarification field names whenever you are asking about the same unresolved topic." in prompt
     assert "manual_override_mode_scope" in prompt
+
+
+def test_payload_hydrates_clarification_context_from_jira_comments() -> None:
+    questions = [
+        {
+            "field": "deploy_scope",
+            "label": "배포 범위",
+            "question": "이번 작업은 백엔드만 배포합니까?",
+            "why": "배포 범위에 따라 수정 범위가 달라집니다.",
+            "placeholder": "백엔드만 배포합니다.",
+        }
+    ]
+    question_marker = main_module._clarification_sync_marker(
+        "questions",
+        "DEMO-20",
+        {"analysis_summary": "배포 범위를 먼저 확인해야 합니다.", "requested_information": questions},
+    )
+    answer_marker = main_module._clarification_sync_marker(
+        "answers",
+        "DEMO-20",
+        {"answers": {"deploy_scope": "백엔드만 배포합니다."}, "questions": questions},
+    )
+    comments_text = "\n\n".join(
+        [
+            "2026-04-08 12:00 / jira-auto-agent\n"
+            + main_module._build_clarification_questions_comment(
+                "배포 범위를 먼저 확인해야 합니다.",
+                questions,
+                question_marker,
+            ),
+            "2026-04-08 13:00 / tester\n"
+            + main_module._build_clarification_answers_comment(
+                {"deploy_scope": "백엔드만 배포합니다."},
+                questions,
+                answer_marker,
+            ),
+        ]
+    )
+
+    hydrated = main_module._payload_with_hydrated_clarification_context({"issue_comments_text": comments_text})
+
+    assert hydrated["clarification_answers"] == {"deploy_scope": "백엔드만 배포합니다."}
+    assert hydrated["clarification_questions"][0]["field"] == "deploy_scope"
+    assert "Latest clarification answer comment:" in hydrated["_clarification_comment_context"]
+
+
+def test_build_codex_clarification_prompt_prioritizes_recent_clarification_context(monkeypatch) -> None:
+    monkeypatch.setattr(main_module, "_safe_build_project_memory_block", lambda repo_path, max_history=5, space_key="": "cached project memory")
+    questions = [
+        {
+            "field": "deploy_scope",
+            "label": "배포 범위",
+            "question": "이번 작업은 백엔드만 배포합니까?",
+            "why": "배포 범위에 따라 수정 범위가 달라집니다.",
+            "placeholder": "백엔드만 배포합니다.",
+        }
+    ]
+    question_marker = main_module._clarification_sync_marker(
+        "questions",
+        "DEMO-21",
+        {"analysis_summary": "배포 범위를 먼저 확인해야 합니다.", "requested_information": questions},
+    )
+    answer_marker = main_module._clarification_sync_marker(
+        "answers",
+        "DEMO-21",
+        {"answers": {"deploy_scope": "백엔드만 배포합니다."}, "questions": questions},
+    )
+    comments_text = "\n".join(["OLD-COMMENT"] * 600) + "\n\n" + "\n\n".join(
+        [
+            "2026-04-08 12:00 / jira-auto-agent\n"
+            + main_module._build_clarification_questions_comment(
+                "배포 범위를 먼저 확인해야 합니다.",
+                questions,
+                question_marker,
+            ),
+            "2026-04-08 13:00 / tester\n"
+            + main_module._build_clarification_answers_comment(
+                {"deploy_scope": "백엔드만 배포합니다."},
+                questions,
+                answer_marker,
+            ),
+        ]
+    )
+    payload = main_module._payload_with_hydrated_clarification_context(
+        {
+            "issue_key": "DEMO-21",
+            "issue_summary": "clarification prompt priority",
+            "branch_name": "feature/DEMO-21-priority",
+            "commit_message": "DEMO-21: priority",
+            "work_instruction": "최신 답변을 우선 반영한다.",
+            "issue_comments_text": comments_text,
+        }
+    )
+
+    prompt = main_module._build_codex_clarification_prompt(payload, main_module.BASE_DIR)
+
+    assert "Treat the structured clarification question fields, clarification answers, and recovered clarification comment context above as newer and more authoritative" in prompt
+    assert "배엔드만 배포합니다." not in prompt
+    assert "백엔드만 배포합니다." in prompt
+    assert "OLD-COMMENT" not in prompt
 
 
 def test_build_codex_prompt_uses_resolved_space_key_for_project_memory(monkeypatch) -> None:
@@ -1067,6 +1174,153 @@ def test_clarify_workflow_returns_requested_information(monkeypatch, tmp_path) -
     assert '"issue_key": "DEMO-88"' in synced_comments["questions"]
     assert data["jira_comment_sync"]["answers"]["status"] == "created"
     assert data["jira_comment_sync"]["questions"]["status"] == "created"
+
+
+def test_clarify_workflow_reuses_hydrated_clarification_answers_without_resync(monkeypatch, tmp_path) -> None:
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+    (repo_path / ".git").mkdir()
+    captured_payload: dict[str, object] = {}
+    historical_questions = [
+        {
+            "field": "manual_override_mode",
+            "label": "Manual override mode",
+            "question": "Should the existing manual input be fully replaced?",
+            "why": "This changes implementation scope.",
+            "placeholder": "Replace all manual input.",
+        }
+    ]
+    question_marker = main_module._clarification_sync_marker(
+        "questions",
+        "DEMO-91",
+        {"analysis_summary": "Need manual override scope.", "requested_information": historical_questions},
+    )
+    answer_marker = main_module._clarification_sync_marker(
+        "answers",
+        "DEMO-91",
+        {"answers": {"manual_override_mode": "Replace all manual input."}, "questions": historical_questions},
+    )
+    issue_comments_text = "\n\n".join(
+        [
+            "2026-04-08 12:00 / jira-auto-agent\n"
+            + main_module._build_clarification_questions_comment(
+                "Need manual override scope.",
+                historical_questions,
+                question_marker,
+            ),
+            "2026-04-08 13:00 / tester\n"
+            + main_module._build_clarification_answers_comment(
+                {"manual_override_mode": "Replace all manual input."},
+                historical_questions,
+                answer_marker,
+            ),
+        ]
+    )
+
+    def fake_load(self, provider: str):  # noqa: ANN001
+        if provider == "github":
+            return _github_mapping_payload(_repo_mapping_line("DEMO", repo_path))
+        if provider == "jira":
+            return {
+                "base_url": "https://example.atlassian.net",
+                "email": "tester@example.com",
+                "api_token": "token",
+                "jql": "project = DEMO",
+            }
+        return None
+
+    def fake_run_codex_clarification(repo_path, payload):  # noqa: ANN001
+        captured_payload.update(payload)
+        return {
+            "needs_input": False,
+            "analysis_summary": "ready",
+            "requested_information": [],
+        }
+
+    monkeypatch.setattr(main_module.CredentialStore, "load", fake_load)
+    monkeypatch.setattr(main_module, "_safe_ensure_project_memory", lambda repo_path, space_key="": None)
+    monkeypatch.setattr(main_module, "_run_codex_clarification", fake_run_codex_clarification)
+    monkeypatch.setattr(
+        main_module,
+        "_safe_sync_jira_clarification_answers",
+        lambda jira_payload, issue_key, answers, questions: pytest.fail("hydrated historical answers must not be re-synced"),
+    )
+
+    app = create_app()
+    client = app.test_client()
+    response = client.post(
+        "/api/workflow/clarify",
+        json={
+            "issue_key": "DEMO-91",
+            "issue_summary": "clarify hydration",
+            "branch_name": "feature/DEMO-91-clarify-hydration",
+            "commit_message": "DEMO-91: clarify hydration",
+            "work_instruction": "Reuse prior clarification answers.",
+            "issue_comments_text": issue_comments_text,
+        },
+    )
+
+    assert response.status_code == 200
+    data = response.get_json()
+    assert data is not None
+    assert data["status"] == "ready"
+    assert data["jira_comment_sync"]["answers"]["status"] == "skipped"
+    assert captured_payload["clarification_answers"] == {"manual_override_mode": "Replace all manual input."}
+    assert {item["field"] for item in captured_payload["clarification_questions"]} == {"manual_override_mode"}
+
+
+def test_clarify_workflow_returns_timeout_diagnostics(monkeypatch, tmp_path) -> None:
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+    (repo_path / ".git").mkdir()
+
+    def fake_load(self, provider: str):  # noqa: ANN001
+        if provider == "github":
+            return _github_mapping_payload(_repo_mapping_line("DEMO", repo_path))
+        if provider == "jira":
+            return {
+                "base_url": "https://example.atlassian.net",
+                "email": "tester@example.com",
+                "api_token": "token",
+                "jql": "project = DEMO",
+            }
+        return None
+
+    def fake_run_codex_clarification(repo_path, payload):  # noqa: ANN001
+        raise main_module.ClarificationExecutionError(
+            "clarification_timeout",
+            "사전 확인 단계 응답 시간이 초과되었습니다.",
+            {
+                "clarification_provider": "codex",
+                "clarification_last_progress_message": "waiting for structured JSON",
+                "clarification_output_tail": "partial output tail",
+            },
+        )
+
+    monkeypatch.setattr(main_module.CredentialStore, "load", fake_load)
+    monkeypatch.setattr(main_module, "_safe_ensure_project_memory", lambda repo_path, space_key="": None)
+    monkeypatch.setattr(main_module, "_run_codex_clarification", fake_run_codex_clarification)
+
+    app = create_app()
+    client = app.test_client()
+    response = client.post(
+        "/api/workflow/clarify",
+        json={
+            "issue_key": "DEMO-92",
+            "issue_summary": "clarify timeout",
+            "branch_name": "feature/DEMO-92-clarify-timeout",
+            "commit_message": "DEMO-92: clarify timeout",
+            "work_instruction": "Return timeout diagnostics.",
+        },
+    )
+
+    assert response.status_code == 502
+    data = response.get_json()
+    assert data is not None
+    assert data["error"] == "clarification_timeout"
+    assert data["message"] == "사전 확인 단계 응답 시간이 초과되었습니다."
+    assert data["clarification_last_progress_message"] == "waiting for structured JSON"
+    assert "clarification_timeout" in data["clarification_debug_text"]
 
 
 def test_load_repo_context_uses_space_mapping() -> None:
@@ -1702,16 +1956,26 @@ def test_run_workflow_returns_stubbed_automation_result(monkeypatch, tmp_path) -
     assert data["ok"] is True
     assert data["status"] == "completed"
     assert data["run_id"]
+    assert data["batch_id"]
 
     status_response = client.get(f"/api/workflow/run/{data['run_id']}")
     assert status_response.status_code == 200
     status_data = status_response.get_json()
     assert status_data is not None
     assert status_data["status"] == "completed"
+    assert status_data["batch_id"] == data["batch_id"]
     assert status_data["result"]["status"] == "committed"
     assert status_data["result"]["resolved_model"] == "gpt-5.4"
     assert status_data["result"]["resolved_reasoning_effort"] == "xhigh"
     assert status_data["result"]["processed_files"] == ["app/static/app.js", "app/main.py"]
+
+    batch_response = client.get(f"/api/workflow/batch/{data['batch_id']}")
+    assert batch_response.status_code == 200
+    batch_data = batch_response.get_json()
+    assert batch_data is not None
+    assert batch_data["status"] == "completed"
+    assert batch_data["runs"][0]["run_id"] == data["run_id"]
+    assert batch_data["runs"][0]["status"] == "completed"
 
 
 def test_run_workflow_passes_normalized_clarification_answers(monkeypatch, tmp_path) -> None:
@@ -1838,6 +2102,151 @@ def test_run_workflow_passes_normalized_clarification_answers(monkeypatch, tmp_p
     response_data = response.get_json()
     assert response_data is not None
     assert response_data["jira_comment_sync"]["answers"]["status"] == "created"
+
+
+def test_run_workflow_hydrates_clarification_answers_from_comments_without_resync(monkeypatch, tmp_path) -> None:
+    _isolate_workflow_storage(monkeypatch, tmp_path)
+
+    captured_payload: dict[str, object] = {}
+    synced_answers: dict[str, object] = {}
+    historical_questions = [
+        {
+            "field": "manual_override_mode",
+            "label": "Manual override mode",
+            "question": "Should the existing manual input be fully replaced?",
+            "why": "This changes implementation scope.",
+            "placeholder": "Replace all manual input.",
+        }
+    ]
+    historical_question_marker = main_module._clarification_sync_marker(
+        "questions",
+        "DEMO-90",
+        {"analysis_summary": "Need manual override scope.", "requested_information": historical_questions},
+    )
+    historical_answer_marker = main_module._clarification_sync_marker(
+        "answers",
+        "DEMO-90",
+        {"answers": {"manual_override_mode": "Replace all manual input."}, "questions": historical_questions},
+    )
+    issue_comments_text = "\n\n".join(
+        [
+            "2026-04-08 12:00 / jira-auto-agent\n"
+            + main_module._build_clarification_questions_comment(
+                "Need manual override scope.",
+                historical_questions,
+                historical_question_marker,
+            ),
+            "2026-04-08 13:00 / tester\n"
+            + main_module._build_clarification_answers_comment(
+                {"manual_override_mode": "Replace all manual input."},
+                historical_questions,
+                historical_answer_marker,
+            ),
+        ]
+    )
+
+    def fake_load(self, provider: str):  # noqa: ANN001
+        if provider == "github":
+            return _github_mapping_payload(_repo_mapping_line("DEMO", "."))
+        if provider == "jira":
+            return {
+                "base_url": "https://example.atlassian.net",
+                "email": "tester@example.com",
+                "api_token": "token",
+                "jql": "project = DEMO",
+            }
+        return None
+
+    def fake_execute(repo_path, github_config, payload, reporter=None):  # noqa: ANN001
+        captured_payload.update(payload)
+        return {
+            "ok": True,
+            "status": "ready_for_manual_commit",
+            "message": "done",
+            "requested_model": "gpt-5.4",
+            "requested_reasoning_effort": "high",
+            "resolved_model": "gpt-5.4",
+            "resolved_reasoning_effort": "high",
+            "codex_default_model": "gpt-5.4",
+            "codex_default_reasoning_effort": "high",
+            "model_intent": "clarification answers merged",
+            "implementation_summary": "clarification answers merged",
+            "validation_summary": "pytest -q skipped",
+            "processed_files": ["app/main.py"],
+            "diff": "diff --git a/app/main.py b/app/main.py",
+            "test_output": "",
+            "execution_log_tail": "Codex completed",
+            "risks": [],
+        }
+
+    class ImmediateThread:
+        def __init__(self, target=None, name=None, daemon=None, args=(), kwargs=None, **extra):  # noqa: ANN001
+            self._target = target
+            self._args = args
+            self._kwargs = kwargs or {}
+
+        def start(self) -> None:
+            if self._target is not None:
+                self._target(*self._args, **self._kwargs)
+
+        def join(self, timeout=None) -> None:  # noqa: ANN001
+            return None
+
+        def is_alive(self) -> bool:
+            return False
+
+    monkeypatch.setattr(main_module.CredentialStore, "load", fake_load)
+    monkeypatch.setattr(main_module, "_safe_ensure_project_memory", lambda repo_path, space_key="": None)
+    monkeypatch.setattr(main_module, "_find_codex_launcher", lambda: ["codex"])
+    monkeypatch.setattr(main_module, "_resolve_commit_identity", lambda repo_path, payload: ({"name": "Codex Bot", "email": "codex@example.com"}, []))
+    monkeypatch.setattr(main_module, "_execute_coding_workflow", fake_execute)
+    monkeypatch.setattr(
+        main_module,
+        "_safe_sync_jira_clarification_answers",
+        lambda jira_payload, issue_key, answers, questions: {
+            "status": "created",
+            "marker": synced_answers.setdefault(
+                "payload",
+                json.dumps(
+                    {
+                        "jira_payload": jira_payload,
+                        "issue_key": issue_key,
+                        "answers": answers,
+                        "questions": questions,
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ),
+            ),
+        },
+    )
+    monkeypatch.setattr(main_module.threading, "Thread", ImmediateThread)
+
+    app = create_app()
+    client = app.test_client()
+    response = client.post(
+        "/api/workflow/run",
+        json={
+            "issue_key": "DEMO-90",
+            "issue_summary": "clarification hydration",
+            "branch_name": "feature/DEMO-90-clarification-hydration",
+            "commit_message": "DEMO-90: clarification hydration",
+            "work_instruction": "Merge historical clarification answers.",
+            "test_command": "pytest -q",
+            "allow_auto_commit": False,
+            "issue_comments_text": issue_comments_text,
+            "clarification_answers": {
+                "deploy_scope": "backend only",
+            },
+        },
+    )
+
+    assert response.status_code == 202
+    assert captured_payload["clarification_answers"]["manual_override_mode"] == "Replace all manual input."
+    assert captured_payload["clarification_answers"]["deploy_scope"] == "backend only"
+    assert {item["field"] for item in captured_payload["clarification_questions"]} == {"manual_override_mode"}
+    synced_payload = json.loads(str(synced_answers["payload"]))
+    assert synced_payload["answers"] == {"deploy_scope": "backend only"}
 
 
 def test_run_workflow_records_project_history(monkeypatch, tmp_path) -> None:
@@ -2664,6 +3073,82 @@ def test_answer_workflow_batch_run_merges_existing_clarification_answers(monkeyp
     }
 
 
+def test_run_workflow_batch_persists_clarification_timeout_diagnostics(monkeypatch, tmp_path) -> None:
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+    (repo_path / ".git").mkdir()
+    monkeypatch.setattr(main_module, "WORKFLOW_RUNS_DIR", tmp_path / "workflow-runs")
+    monkeypatch.setattr(main_module, "WORKFLOW_BATCHES_DIR", tmp_path / "workflow-batches")
+    monkeypatch.setattr(main_module, "_safe_ensure_project_memory", lambda repo_path, space_key="": None)
+    monkeypatch.setattr(main_module, "_safe_record_project_history", lambda repo_path, workflow_run, space_key="": None)
+
+    def fake_load(self, provider: str):  # noqa: ANN001
+        if provider == "github":
+            return _github_mapping_payload(_repo_mapping_line("DEMO", repo_path))
+        if provider == "jira":
+            return {
+                "base_url": "https://example.atlassian.net",
+                "email": "tester@example.com",
+                "api_token": "token",
+                "jql": "project = DEMO",
+            }
+        return None
+
+    def fake_run_codex_clarification(repo_path, payload):  # noqa: ANN001
+        raise main_module.ClarificationExecutionError(
+            "clarification_timeout",
+            "사전 확인 단계 응답 시간이 초과되었습니다.",
+            {
+                "clarification_provider": "codex",
+                "clarification_last_progress_message": "waiting for structured JSON",
+                "clarification_output_tail": "partial output tail",
+            },
+        )
+
+    class ImmediateThread:
+        def __init__(self, target=None, name=None, daemon=None, args=(), kwargs=None, **extra):  # noqa: ANN001
+            self._target = target
+            self._args = args
+            self._kwargs = kwargs or {}
+
+        def start(self) -> None:
+            if self._target is not None:
+                self._target(*self._args, **self._kwargs)
+
+        def join(self, timeout=None) -> None:  # noqa: ANN001
+            return None
+
+        def is_alive(self) -> bool:
+            return False
+
+    monkeypatch.setattr(main_module.CredentialStore, "load", fake_load)
+    monkeypatch.setattr(main_module, "_find_codex_launcher", lambda: ["codex"])
+    monkeypatch.setattr(main_module, "_run_codex_clarification", fake_run_codex_clarification)
+    monkeypatch.setattr(main_module.threading, "Thread", ImmediateThread)
+
+    app = create_app()
+    client = app.test_client()
+    response = client.post(
+        "/api/workflow/batch/run",
+        json={
+            "issues": [{"issue_key": "DEMO-93", "issue_summary": "clarification timeout"}],
+            "work_instruction": "Persist clarification timeout diagnostics.",
+            "allow_auto_commit": False,
+        },
+    )
+
+    assert response.status_code == 202
+    batch_id = response.get_json()["batch_id"]
+    batch_data = client.get(f"/api/workflow/batch/{batch_id}").get_json()
+    assert batch_data["runs"][0]["status"] == "failed"
+    run_id = batch_data["runs"][0]["run_id"]
+    run_data = client.get(f"/api/workflow/run/{run_id}").get_json()
+    assert run_data["error"]["error"] == "clarification_timeout"
+    assert run_data["error"]["message"] == "사전 확인 단계 응답 시간이 초과되었습니다."
+    assert run_data["error"]["clarification_last_progress_message"] == "waiting for structured JSON"
+    assert "partial output tail" in run_data["error"]["clarification_debug_text"]
+
+
 def test_run_workflow_batch_waits_for_plan_review_when_enabled(monkeypatch, tmp_path) -> None:
     repo_path = tmp_path / "repo"
     repo_path.mkdir()
@@ -3426,6 +3911,134 @@ def test_workflow_batch_persists_across_app_recreation(monkeypatch, tmp_path) ->
     assert batch_data is not None
     assert batch_data["batch_id"] == batch_id
     assert batch_data["runs"][0]["status"] == "completed"
+
+
+def test_list_workflow_batches_recovers_active_runs_without_batch_file(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(main_module, "WORKFLOW_RUNS_DIR", tmp_path / "workflow-runs")
+    monkeypatch.setattr(main_module, "WORKFLOW_BATCHES_DIR", tmp_path / "workflow-batches")
+
+    timestamp = datetime.now(timezone.utc).isoformat()
+    run = {
+        "run_id": "run-recover",
+        "batch_id": "batch-recover",
+        "issue_key": "DEMO-1",
+        "issue_summary": "recover active run",
+        "tab_label": "DEMO-1 recover active run",
+        "status": "needs_input",
+        "message": "추가 확인이 필요하다.",
+        "queue_key": "repo",
+        "queue_state": "idle",
+        "queue_position": 0,
+        "local_repo_path": str(tmp_path / "repo"),
+        "resolved_space_key": "DEMO",
+        "clarification_status": "needs_input",
+        "clarification": {
+            "status": "needs_input",
+            "analysis_summary": "추가 확인이 필요하다.",
+            "requested_information": [],
+        },
+        "created_at": timestamp,
+        "updated_at": timestamp,
+        "events": [{"timestamp": timestamp, "phase": "needs_input", "message": "추가 확인이 필요하다."}],
+        "result": None,
+        "error": None,
+    }
+
+    main_module._save_workflow_run(run)
+
+    app = create_app()
+    client = app.test_client()
+    response = client.get("/api/workflow/batches?limit=12")
+
+    assert response.status_code == 200
+    data = response.get_json()
+    assert data is not None
+    assert data["ok"] is True
+    assert len(data["batches"]) == 1
+    batch = data["batches"][0]
+    assert batch["batch_id"] == "batch-recover"
+    assert batch["status"] == "needs_input"
+    assert batch["runs"][0]["run_id"] == "run-recover"
+    assert batch["runs"][0]["status"] == "needs_input"
+    assert (tmp_path / "workflow-batches" / "batch-recover.json").exists()
+
+
+def test_list_workflow_batches_prioritizes_active_batches(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(main_module, "WORKFLOW_RUNS_DIR", tmp_path / "workflow-runs")
+    monkeypatch.setattr(main_module, "WORKFLOW_BATCHES_DIR", tmp_path / "workflow-batches")
+
+    active_timestamp = "2026-04-03T05:59:34+00:00"
+    active_run = {
+        "run_id": "run-active-priority",
+        "batch_id": "batch-active-priority",
+        "issue_key": "DEMO-ACTIVE",
+        "issue_summary": "active batch should be visible",
+        "tab_label": "DEMO-ACTIVE active batch should be visible",
+        "status": "needs_input",
+        "message": "추가 확인이 필요하다.",
+        "queue_key": "repo",
+        "queue_state": "idle",
+        "queue_position": 0,
+        "local_repo_path": str(tmp_path / "repo"),
+        "resolved_space_key": "DEMO",
+        "clarification_status": "needs_input",
+        "created_at": active_timestamp,
+        "updated_at": active_timestamp,
+        "events": [{"timestamp": active_timestamp, "phase": "needs_input", "message": "추가 확인이 필요하다."}],
+        "result": None,
+        "error": None,
+    }
+    main_module._save_workflow_run(active_run)
+
+    for index in range(12):
+        updated_at = f"2026-04-08T14:{index:02d}:00+00:00"
+        run_id = f"run-completed-{index}"
+        batch_id = f"batch-completed-{index}"
+        completed_run = {
+            "run_id": run_id,
+            "batch_id": batch_id,
+            "issue_key": f"DEMO-{index}",
+            "issue_summary": f"completed {index}",
+            "tab_label": f"DEMO-{index} completed {index}",
+            "status": "completed",
+            "message": "완료",
+            "queue_key": "repo",
+            "queue_state": "finished",
+            "queue_position": 0,
+            "local_repo_path": str(tmp_path / "repo"),
+            "resolved_space_key": "DEMO",
+            "created_at": updated_at,
+            "updated_at": updated_at,
+            "events": [{"timestamp": updated_at, "phase": "completed", "message": "완료"}],
+            "result": {"ok": True},
+            "error": None,
+        }
+        completed_batch = {
+            "batch_id": batch_id,
+            "status": "completed",
+            "message": "완료",
+            "created_at": updated_at,
+            "updated_at": updated_at,
+            "active_run_id": run_id,
+            "run_ids": [run_id],
+            "runs": [main_module._workflow_batch_run_ref(completed_run)],
+            "counts": {"queued": 0, "running": 0, "needs_input": 0, "completed": 1, "failed": 0, "total": 1},
+            "selected_issue_keys": [f"DEMO-{index}"],
+            "selected_issue_count": 1,
+        }
+        main_module._save_workflow_run(completed_run)
+        main_module._save_workflow_batch(completed_batch)
+
+    app = create_app()
+    client = app.test_client()
+    response = client.get("/api/workflow/batches?limit=12")
+
+    assert response.status_code == 200
+    data = response.get_json()
+    assert data is not None
+    returned_batch_ids = [batch["batch_id"] for batch in data["batches"]]
+    assert "batch-active-priority" in returned_batch_ids
+    assert returned_batch_ids[0] == "batch-active-priority"
 
 
 def test_list_workflow_batches_is_safe_under_concurrent_polling(monkeypatch, tmp_path) -> None:
