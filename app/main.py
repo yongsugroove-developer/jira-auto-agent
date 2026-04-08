@@ -3,6 +3,7 @@ from __future__ import annotations
 import atexit
 import base64
 import hashlib
+import inspect
 import json
 import logging
 import os
@@ -29,9 +30,11 @@ from flask import Flask, jsonify, render_template, request
 
 try:
     from app.project_memory import (
+        build_file_map_prompt_context,
         build_project_memory_block,
         ensure_project_memory,
         project_memory_ignored_prefixes,
+        record_project_file_map,
         record_project_history,
         should_ignore_project_memory_status_line,
     )
@@ -39,9 +42,11 @@ except ModuleNotFoundError as exc:
     if exc.name != "app":
         raise
     from project_memory import (
+        build_file_map_prompt_context,
         build_project_memory_block,
         ensure_project_memory,
         project_memory_ignored_prefixes,
+        record_project_file_map,
         record_project_history,
         should_ignore_project_memory_status_line,
     )
@@ -2212,11 +2217,34 @@ def _safe_build_project_memory_block(repo_path: Path, *, max_history: int = 5, s
         return ""
 
 
+def _safe_build_file_map_prompt_context(repo_path: Path, payload: dict[str, Any], *, space_key: str = "") -> dict[str, Any]:
+    try:
+        return build_file_map_prompt_context(repo_path, payload, app_data_dir=DATA_DIR, space_key=space_key)
+    except Exception:
+        LOGGER.exception("Failed to build file map prompt context: repo=%s", repo_path)
+        return {
+            "file_map_block": "",
+            "file_map_candidates_count": 0,
+            "file_map_selected_paths": [],
+        }
+
+
 def _safe_record_project_history(repo_path: Path, workflow_run: dict[str, Any], *, space_key: str = "") -> None:
     try:
         record_project_history(repo_path, workflow_run, app_data_dir=DATA_DIR, space_key=space_key)
     except Exception:
         LOGGER.exception("Failed to record project history: repo=%s run_id=%s", repo_path, workflow_run.get("run_id", ""))
+
+
+def _safe_record_project_file_map(repo_path: Path, workflow_run: dict[str, Any], *, space_key: str = "") -> dict[str, int]:
+    try:
+        return record_project_file_map(repo_path, workflow_run, app_data_dir=DATA_DIR, space_key=space_key)
+    except Exception:
+        LOGGER.exception("Failed to record project file map: repo=%s run_id=%s", repo_path, workflow_run.get("run_id", ""))
+        return {
+            "file_map_observed_count": 0,
+            "file_map_updated_count": 0,
+        }
 
 
 @dataclass
@@ -3946,6 +3974,24 @@ def _stream_reader(stream_name: str, pipe: Any, sink: list[str], output_queue: q
         output_queue.put((stream_name, None))
 
 
+def _call_with_supported_kwargs(function: Any, *args: Any, **kwargs: Any) -> Any:
+    try:
+        signature = inspect.signature(function)
+    except (TypeError, ValueError):
+        return function(*args, **kwargs)
+
+    for parameter in signature.parameters.values():
+        if parameter.kind == inspect.Parameter.VAR_KEYWORD:
+            return function(*args, **kwargs)
+
+    filtered_kwargs = {
+        key: value
+        for key, value in kwargs.items()
+        if key in signature.parameters
+    }
+    return function(*args, **filtered_kwargs)
+
+
 def _run_codex_command(
     command: list[str],
     *,
@@ -3953,10 +3999,26 @@ def _run_codex_command(
     timeout: int,
     input_text: str,
     reporter: Any = None,
+    cancel_event: threading.Event | None = None,
+    process_tracker: Any = None,
 ) -> dict[str, Any]:
     started_at = time.monotonic()
     display_command = _display_command(command)
     LOGGER.info("Codex process start: cwd=%s timeout=%s command=%s", str(cwd), timeout, display_command)
+    if cancel_event is not None and cancel_event.is_set():
+        return {
+            "returncode": None,
+            "timed_out": False,
+            "cancelled": True,
+            "elapsed_seconds": 0,
+            "stdout": "",
+            "stderr": "",
+            "activity_log": "",
+            "activity_log_truncated": False,
+            "last_agent_message": "",
+            "last_progress_message": "",
+            "progress_event_count": 0,
+        }
     process = subprocess.Popen(
         command,
         cwd=str(cwd),
@@ -3967,6 +4029,8 @@ def _run_codex_command(
         encoding="utf-8",
         errors="replace",
     )
+    if process_tracker:
+        process_tracker(process)
 
     if process.stdin is not None:
         process.stdin.write(input_text)
@@ -3999,7 +4063,14 @@ def _run_codex_command(
 
     eof_count = 0
     timed_out = False
+    cancelled = False
     while eof_count < 2:
+        if cancel_event is not None and cancel_event.is_set():
+            cancelled = True
+            LOGGER.info("Codex process cancellation requested: cwd=%s command=%s", str(cwd), display_command)
+            _stop_managed_process(process, name="codex-workflow")
+            break
+
         remaining = timeout - (time.monotonic() - started_at)
         if remaining <= 0:
             timed_out = True
@@ -4062,6 +4133,9 @@ def _run_codex_command(
     except subprocess.TimeoutExpired:
         process.kill()
         returncode = process.wait(timeout=5)
+    finally:
+        if process_tracker:
+            process_tracker(None)
 
     for reader in readers:
         reader.join(timeout=1)
@@ -4081,6 +4155,7 @@ def _run_codex_command(
     return {
         "returncode": None if timed_out else returncode,
         "timed_out": timed_out,
+        "cancelled": cancelled,
         "elapsed_seconds": elapsed,
         "stdout": "".join(stdout_lines),
         "stderr": "".join(stderr_lines),
@@ -4148,10 +4223,26 @@ def _run_claude_command(
     cwd: Path,
     timeout: int,
     reporter: Any = None,
+    cancel_event: threading.Event | None = None,
+    process_tracker: Any = None,
 ) -> dict[str, Any]:
     started_at = time.monotonic()
     display_command = _display_command(command)
     LOGGER.info("Claude process start: cwd=%s timeout=%s command=%s", str(cwd), timeout, display_command)
+    if cancel_event is not None and cancel_event.is_set():
+        return {
+            "returncode": None,
+            "timed_out": False,
+            "cancelled": True,
+            "elapsed_seconds": 0,
+            "stdout": "",
+            "stderr": "",
+            "activity_log": "",
+            "activity_log_truncated": False,
+            "last_agent_message": "",
+            "last_progress_message": "",
+            "progress_event_count": 0,
+        }
     process = subprocess.Popen(
         command,
         cwd=str(cwd),
@@ -4162,6 +4253,8 @@ def _run_claude_command(
         encoding="utf-8",
         errors="replace",
     )
+    if process_tracker:
+        process_tracker(process)
 
     stdout_lines: list[str] = []
     stderr_lines: list[str] = []
@@ -4190,7 +4283,14 @@ def _run_claude_command(
 
     eof_count = 0
     timed_out = False
+    cancelled = False
     while eof_count < 2:
+        if cancel_event is not None and cancel_event.is_set():
+            cancelled = True
+            LOGGER.info("Claude process cancellation requested: cwd=%s command=%s", str(cwd), display_command)
+            _stop_managed_process(process, name="claude-workflow")
+            break
+
         remaining = timeout - (time.monotonic() - started_at)
         if remaining <= 0:
             timed_out = True
@@ -4254,6 +4354,9 @@ def _run_claude_command(
     except subprocess.TimeoutExpired:
         process.kill()
         returncode = process.wait(timeout=5)
+    finally:
+        if process_tracker:
+            process_tracker(None)
 
     for reader in readers:
         reader.join(timeout=1)
@@ -4272,6 +4375,7 @@ def _run_claude_command(
     return {
         "returncode": None if timed_out else returncode,
         "timed_out": timed_out,
+        "cancelled": cancelled,
         "elapsed_seconds": elapsed,
         "stdout": "".join(stdout_lines),
         "stderr": "".join(stderr_lines),
@@ -4289,6 +4393,20 @@ def _build_codex_prompt(payload: dict[str, Any], repo_path: Path) -> str:
         max_history=5,
         space_key=str(payload.get("resolved_space_key", "")).strip(),
     )
+    file_map_context = payload.get("_file_map_prompt_context") if isinstance(payload.get("_file_map_prompt_context"), dict) else None
+    if file_map_context is None:
+        file_map_context = _safe_build_file_map_prompt_context(
+            repo_path,
+            payload,
+            space_key=str(payload.get("resolved_space_key", "")).strip(),
+        )
+    file_map_block = str(file_map_context.get("file_map_block", "")).strip()
+    file_map_requirements = (
+        "- Start with the likely relevant files below before doing broad repository search.\n"
+        "- Expand to wider repo search only if these hints are insufficient.\n"
+        if file_map_block
+        else ""
+    )
     acceptance = str(payload.get("acceptance_criteria", "")).strip() or "별도 수용 기준 없음"
     checklist = str(payload.get("commit_checklist", "")).strip() or "별도 체크리스트 없음"
     issue_description = _prompt_text(payload.get("issue_description", ""), 6000) or "Jira 상세 설명 없음"
@@ -4304,6 +4422,7 @@ def _build_codex_prompt(payload: dict[str, Any], repo_path: Path) -> str:
         Repository path: {repo_path}
         Project memory:
         {project_memory_block or "Project memory unavailable"}
+        {file_map_block if file_map_block else ""}
 
         Issue key: {str(payload.get("issue_key", "")).strip().upper()}
         Issue summary: {str(payload.get("issue_summary", "")).strip()}
@@ -4338,6 +4457,7 @@ def _build_codex_prompt(payload: dict[str, Any], repo_path: Path) -> str:
 
         Requirements:
         - Read and follow the repository AGENTS.md instructions.
+        {file_map_requirements.rstrip()}
         - Make only the changes needed for this task.
         - Do not create a git commit.
         - Do not revert unrelated user changes.
@@ -4678,7 +4798,63 @@ def _plan_review_payload(payload: dict[str, Any], plan_review: dict[str, Any]) -
     }
 
 
-def _run_codex_edit(repo_path: Path, payload: dict[str, Any], reporter: Any = None) -> dict[str, Any]:
+def _payload_with_file_map_context(repo_path: Path, payload: dict[str, Any]) -> dict[str, Any]:
+    space_key = str(payload.get("resolved_space_key", "")).strip()
+    file_map_context = _safe_build_file_map_prompt_context(repo_path, payload, space_key=space_key)
+    return {
+        **payload,
+        "_file_map_prompt_context": file_map_context,
+    }
+
+
+def _attach_file_map_result_metadata(response: dict[str, Any], payload: dict[str, Any]) -> None:
+    context = payload.get("_file_map_prompt_context") if isinstance(payload.get("_file_map_prompt_context"), dict) else {}
+    file_map_candidates_count = int(context.get("file_map_candidates_count", 0) or 0)
+    file_map_selected_paths = [
+        str(item).strip()
+        for item in list(context.get("file_map_selected_paths") or [])
+        if str(item).strip()
+    ]
+    response["file_map_candidates_count"] = file_map_candidates_count
+    response["file_map_selected_paths"] = file_map_selected_paths
+    provider_metadata = dict(response.get("provider_metadata") or {})
+    provider_metadata.update(
+        {
+            "file_map_candidates_count": file_map_candidates_count,
+            "file_map_selected_paths": file_map_selected_paths,
+        }
+    )
+    response["provider_metadata"] = provider_metadata
+
+
+def _merge_file_map_run_metadata(target_run: dict[str, Any], metadata: dict[str, Any]) -> None:
+    result = target_run.get("result")
+    if not isinstance(result, dict):
+        return
+    result.update(metadata)
+    provider_metadata = result.get("provider_metadata")
+    if not isinstance(provider_metadata, dict):
+        provider_metadata = {}
+        result["provider_metadata"] = provider_metadata
+    provider_metadata.update(metadata)
+
+
+def _set_cancelled_response(response: dict[str, Any], message: str) -> dict[str, Any]:
+    response["ok"] = False
+    response["status"] = "cancelled"
+    response["message"] = message
+    response["push_succeeded"] = False
+    return response
+
+
+def _run_codex_edit(
+    repo_path: Path,
+    payload: dict[str, Any],
+    reporter: Any = None,
+    *,
+    cancel_event: threading.Event | None = None,
+    process_tracker: Any = None,
+) -> dict[str, Any]:
     launcher = _find_codex_launcher()
     prompt = _build_codex_prompt(payload, repo_path)
     codex_settings = _resolve_codex_execution_settings(payload)
@@ -4720,12 +4896,15 @@ def _run_codex_edit(repo_path: Path, payload: dict[str, Any], reporter: Any = No
                 f"model={codex_settings['resolved_model'] or 'CLI default'}, "
                 f"reasoning={codex_settings['resolved_reasoning_effort'] or 'CLI default'}",
             )
-        result = _run_codex_command(
+        result = _call_with_supported_kwargs(
+            _run_codex_command,
             command,
             cwd=repo_path,
             timeout=CODEX_TIMEOUT_SECONDS,
             input_text=prompt,
             reporter=reporter,
+            cancel_event=cancel_event,
+            process_tracker=process_tracker,
         )
         final_message = output_path.read_text(encoding="utf-8") if output_path.exists() else ""
         if not final_message.strip():
@@ -4828,6 +5007,7 @@ def _run_codex_edit_stream(repo_path: Path, payload: dict[str, Any], reporter: A
     return {
         "returncode": result["returncode"],
         "timed_out": bool(result["timed_out"]),
+        "cancelled": bool(result.get("cancelled", False)),
         "elapsed_seconds": result["elapsed_seconds"],
         "command": _display_command(command),
         "final_message": parsed,
@@ -4915,7 +5095,14 @@ def _run_codex_clarification(repo_path: Path, payload: dict[str, Any]) -> dict[s
     return normalized
 
 
-def _run_claude_edit(repo_path: Path, payload: dict[str, Any], reporter: Any = None) -> dict[str, Any]:
+def _run_claude_edit(
+    repo_path: Path,
+    payload: dict[str, Any],
+    reporter: Any = None,
+    *,
+    cancel_event: threading.Event | None = None,
+    process_tracker: Any = None,
+) -> dict[str, Any]:
     launcher = _find_claude_launcher()
     prompt = _build_codex_prompt(payload, repo_path)
     claude_settings = _resolve_claude_execution_settings(payload)
@@ -4940,7 +5127,15 @@ def _run_claude_edit(repo_path: Path, payload: dict[str, Any], reporter: Any = N
             f"model={claude_settings['resolved_model'] or 'CLI default'}, "
             f"permission={claude_settings['resolved_permission_mode'] or 'acceptEdits'}",
         )
-    result = _run_claude_command(command, cwd=repo_path, timeout=CODEX_TIMEOUT_SECONDS, reporter=reporter)
+    result = _call_with_supported_kwargs(
+        _run_claude_command,
+        command,
+        cwd=repo_path,
+        timeout=CODEX_TIMEOUT_SECONDS,
+        reporter=reporter,
+        cancel_event=cancel_event,
+        process_tracker=process_tracker,
+    )
     stdout_text = str(result.get("stdout", "")).strip()
     final_message = _parse_claude_json_message(stdout_text)
     if not final_message:
@@ -4957,6 +5152,7 @@ def _run_claude_edit(repo_path: Path, payload: dict[str, Any], reporter: Any = N
     return {
         "returncode": result["returncode"],
         "timed_out": bool(result["timed_out"]),
+        "cancelled": bool(result.get("cancelled", False)),
         "elapsed_seconds": result["elapsed_seconds"],
         "command": _display_command(command),
         "final_message": final_message,
@@ -5007,11 +5203,30 @@ def _run_claude_clarification(repo_path: Path, payload: dict[str, Any]) -> dict[
     return normalized
 
 
-def _run_agent_edit(repo_path: Path, payload: dict[str, Any], reporter: Any = None) -> dict[str, Any]:
+def _run_agent_edit(
+    repo_path: Path,
+    payload: dict[str, Any],
+    reporter: Any = None,
+    *,
+    cancel_event: threading.Event | None = None,
+    process_tracker: Any = None,
+) -> dict[str, Any]:
     provider = _normalize_agent_provider(payload.get("agent_provider"))
     if provider == "claude":
-        return _run_claude_edit(repo_path, payload, reporter=reporter)
-    return _run_codex_edit(repo_path, payload, reporter=reporter)
+        return _run_claude_edit(
+            repo_path,
+            payload,
+            reporter=reporter,
+            cancel_event=cancel_event,
+            process_tracker=process_tracker,
+        )
+    return _run_codex_edit(
+        repo_path,
+        payload,
+        reporter=reporter,
+        cancel_event=cancel_event,
+        process_tracker=process_tracker,
+    )
 
 
 def _run_agent_clarification(repo_path: Path, payload: dict[str, Any]) -> dict[str, Any]:
@@ -5349,8 +5564,17 @@ def _batch_issue_workflow_payload(
     }
 
 
-def _execute_coding_workflow(repo_path: Path, scm_config: ScmRepoConfig, payload: dict[str, Any], reporter: Any = None) -> dict[str, Any]:
+def _execute_coding_workflow(
+    repo_path: Path,
+    scm_config: ScmRepoConfig,
+    payload: dict[str, Any],
+    reporter: Any = None,
+    *,
+    cancel_event: threading.Event | None = None,
+    process_tracker: Any = None,
+) -> dict[str, Any]:
     _safe_ensure_project_memory(repo_path, space_key=str(payload.get("resolved_space_key", "")).strip())
+    payload = _payload_with_file_map_context(repo_path, payload)
     dirty_entries = _repo_dirty_entries(repo_path)
     if dirty_entries:
         return {
@@ -5381,7 +5605,13 @@ def _execute_coding_workflow(repo_path: Path, scm_config: ScmRepoConfig, payload
     if reporter:
         reporter("branch_ready", f"Branch ready: {branch_info['active_branch']}")
     start_sha = branch_info["head_sha"]
-    codex_result = _run_codex_edit(repo_path, {**payload, "branch_name": branch_name}, reporter=reporter)
+    codex_result = _run_codex_edit(
+        repo_path,
+        {**payload, "branch_name": branch_name},
+        reporter=reporter,
+        cancel_event=cancel_event,
+        process_tracker=process_tracker,
+    )
 
     if reporter:
         reporter("stage_changes", "Codex 변경을 stage 하고 diff를 수집합니다.")
@@ -5450,6 +5680,9 @@ def _execute_coding_workflow(repo_path: Path, scm_config: ScmRepoConfig, payload
         "git_author_name": "",
         "git_author_email": "",
     }
+    _attach_file_map_result_metadata(response, payload)
+    if codex_result.get("cancelled") or (cancel_event is not None and cancel_event.is_set()):
+        return _set_cancelled_response(response, "사용자 요청으로 작업을 취소했다.")
 
     if codex_result["timed_out"]:
         response["status"] = "codex_timeout"
@@ -5468,6 +5701,10 @@ def _execute_coding_workflow(repo_path: Path, scm_config: ScmRepoConfig, payload
 
     if reporter:
         reporter("test_start", f"테스트 명령 실행: {str(payload.get('test_command', '')).strip()}")
+    if cancel_event is not None and cancel_event.is_set():
+        return _set_cancelled_response(response, "사용자 요청으로 작업을 취소했다.")
+    if cancel_event is not None and cancel_event.is_set():
+        return _set_cancelled_response(response, "사용자 요청으로 작업을 취소했다.")
     test_result = _test_changes(repo_path, str(payload.get("test_command", "")).strip(), reporter=reporter)
     response["test_returncode"] = test_result["returncode"]
     response["test_elapsed_seconds"] = test_result["elapsed_seconds"]
@@ -5490,6 +5727,10 @@ def _execute_coding_workflow(repo_path: Path, scm_config: ScmRepoConfig, payload
         response["message"] = "테스트 명령이 실패하여 자동 커밋을 중단했습니다."
         return response
 
+    if cancel_event is not None and cancel_event.is_set():
+        return _set_cancelled_response(response, "사용자 요청으로 작업을 취소했다.")
+    if cancel_event is not None and cancel_event.is_set():
+        return _set_cancelled_response(response, "사용자 요청으로 작업을 취소했다.")
     response["status"] = "validated"
     response["message"] = "Codex 변경과 문법 검사가 완료되었습니다."
     response["message"] = "Codex 변경과 테스트가 완료되었습니다."
@@ -5502,6 +5743,10 @@ def _execute_coding_workflow(repo_path: Path, scm_config: ScmRepoConfig, payload
         response["message"] = "테스트까지 완료했으며, 자동 커밋은 비활성화되어 있습니다."
         return response
 
+    if cancel_event is not None and cancel_event.is_set():
+        return _set_cancelled_response(response, "사용자 요청으로 작업을 취소했다.")
+    if cancel_event is not None and cancel_event.is_set():
+        return _set_cancelled_response(response, "사용자 요청으로 작업을 취소했다.")
     identity, missing_identity = _resolve_commit_identity(repo_path, payload)
     if missing_identity:
         response["status"] = "missing_git_identity"
@@ -5525,6 +5770,10 @@ def _execute_coding_workflow(repo_path: Path, scm_config: ScmRepoConfig, payload
         response["message"] = "테스트는 통과했지만 git commit 단계에서 실패했습니다."
         return response
 
+    if cancel_event is not None and cancel_event.is_set():
+        return _set_cancelled_response(response, "사용자 요청으로 작업을 취소했다.")
+    if cancel_event is not None and cancel_event.is_set():
+        return _set_cancelled_response(response, "사용자 요청으로 작업을 취소했다.")
     response["commit_sha"] = commit_result["sha"]
     response["end_sha"] = commit_result["sha"]
     response["processed_files"] = commit_result["files"]
@@ -5557,7 +5806,15 @@ def _execute_coding_workflow(repo_path: Path, scm_config: ScmRepoConfig, payload
     return response
 
 
-def _execute_agent_workflow(repo_path: Path, scm_config: ScmRepoConfig, payload: dict[str, Any], reporter: Any = None) -> dict[str, Any]:
+def _execute_agent_workflow(
+    repo_path: Path,
+    scm_config: ScmRepoConfig,
+    payload: dict[str, Any],
+    reporter: Any = None,
+    *,
+    cancel_event: threading.Event | None = None,
+    process_tracker: Any = None,
+) -> dict[str, Any]:
     agent_settings = _resolve_agent_execution_settings(payload)
     agent_provider = str(agent_settings.get("agent_provider", DEFAULT_AGENT_PROVIDER)).strip() or DEFAULT_AGENT_PROVIDER
     agent_label = str(agent_settings.get("agent_label", AGENT_PROVIDER_LABELS.get(agent_provider, "Agent"))).strip() or "Agent"
@@ -5566,7 +5823,17 @@ def _execute_agent_workflow(repo_path: Path, scm_config: ScmRepoConfig, payload:
     ).strip() or "Execution Mode"
 
     if agent_provider == "codex":
-        response = dict(_execute_coding_workflow(repo_path, scm_config, payload, reporter=reporter))
+        response = dict(
+            _call_with_supported_kwargs(
+                _execute_coding_workflow,
+                repo_path,
+                scm_config,
+                payload,
+                reporter=reporter,
+                cancel_event=cancel_event,
+                process_tracker=process_tracker,
+            )
+        )
         response["agent_provider"] = agent_provider
         response["resolved_agent_label"] = agent_label
         response["resolved_agent_model"] = str(
@@ -5599,6 +5866,7 @@ def _execute_agent_workflow(repo_path: Path, scm_config: ScmRepoConfig, payload:
         return response
 
     _safe_ensure_project_memory(repo_path, space_key=str(payload.get("resolved_space_key", "")).strip())
+    payload = _payload_with_file_map_context(repo_path, payload)
 
     dirty_entries = _repo_dirty_entries(repo_path)
     if dirty_entries:
@@ -5634,7 +5902,13 @@ def _execute_agent_workflow(repo_path: Path, scm_config: ScmRepoConfig, payload:
     if reporter:
         reporter("branch_ready", f"브랜치 준비 완료: {branch_info['active_branch']}")
     start_sha = branch_info["head_sha"]
-    agent_result = _run_agent_edit(repo_path, {**payload, "branch_name": branch_name}, reporter=reporter)
+    agent_result = _run_agent_edit(
+        repo_path,
+        {**payload, "branch_name": branch_name},
+        reporter=reporter,
+        cancel_event=cancel_event,
+        process_tracker=process_tracker,
+    )
 
     if reporter:
         reporter("stage_changes", f"{agent_label} 변경을 stage하고 diff를 수집합니다.")
@@ -5720,6 +5994,9 @@ def _execute_agent_workflow(repo_path: Path, scm_config: ScmRepoConfig, payload:
         "git_author_name": "",
         "git_author_email": "",
     }
+    _attach_file_map_result_metadata(response, payload)
+    if agent_result.get("cancelled") or (cancel_event is not None and cancel_event.is_set()):
+        return _set_cancelled_response(response, "사용자 요청으로 작업을 취소했다.")
 
     if agent_result["timed_out"]:
         response["status"] = "agent_timeout"
@@ -5832,6 +6109,9 @@ def create_app() -> Flask:
     workflow_queue_lock = threading.Lock()
     workflow_queue_pending: dict[str, list[PendingWorkflowJob]] = {}
     workflow_queue_active: set[str] = set()
+    workflow_run_controls_lock = threading.Lock()
+    workflow_run_cancel_events: dict[str, threading.Event] = {}
+    workflow_run_processes: dict[str, subprocess.Popen[str] | None] = {}
 
     def _load_batch_file_ids(limit: int | None = None) -> list[str]:
         if not WORKFLOW_BATCHES_DIR.exists():
@@ -6060,6 +6340,82 @@ def create_app() -> Flask:
                 ),
             )
 
+    def _ensure_workflow_run_cancel_event(run_id: str) -> threading.Event:
+        with workflow_run_controls_lock:
+            event = workflow_run_cancel_events.get(run_id)
+            if event is None:
+                event = threading.Event()
+                workflow_run_cancel_events[run_id] = event
+            return event
+
+    def _track_workflow_run_process(run_id: str, process: subprocess.Popen[str] | None) -> None:
+        with workflow_run_controls_lock:
+            if process is None:
+                workflow_run_processes.pop(run_id, None)
+                return
+            workflow_run_processes[run_id] = process
+
+    def _clear_workflow_run_controls(run_id: str) -> None:
+        with workflow_run_controls_lock:
+            workflow_run_cancel_events.pop(run_id, None)
+            workflow_run_processes.pop(run_id, None)
+
+    def _request_workflow_run_cancel(run_id: str) -> bool:
+        cancel_event = _ensure_workflow_run_cancel_event(run_id)
+        cancel_event.set()
+        process: subprocess.Popen[str] | None = None
+        with workflow_run_controls_lock:
+            process = workflow_run_processes.get(run_id)
+        if process is None:
+            return False
+        _stop_managed_process(process, name=f"workflow-run-{run_id}")
+        return True
+
+    def _remove_pending_workflow_job(run_id: str, queue_key: str) -> bool:
+        removed = False
+        with workflow_queue_lock:
+            pending_jobs = workflow_queue_pending.get(queue_key, [])
+            remaining_jobs = [job for job in pending_jobs if job.run_id != run_id]
+            removed = len(remaining_jobs) != len(pending_jobs)
+            if removed:
+                if remaining_jobs:
+                    workflow_queue_pending[queue_key] = remaining_jobs
+                else:
+                    workflow_queue_pending.pop(queue_key, None)
+                _update_pending_queue_positions(queue_key)
+        return removed
+
+    def _cancel_workflow_run_now(
+        run_id: str,
+        *,
+        message: str,
+        clarification_status: str | None = None,
+        plan_review_status: str | None = None,
+    ) -> dict[str, Any] | None:
+        result_payload = {
+            "ok": False,
+            "status": "cancelled",
+            "message": message,
+        }
+        snapshot = update_run(
+            run_id,
+            lambda target_run, payload=result_payload: (
+                target_run.__setitem__("queue_state", "finished"),
+                target_run.__setitem__("queue_position", 0),
+                target_run.__setitem__(
+                    "clarification_status",
+                    clarification_status if clarification_status is not None else target_run.get("clarification_status", "not_requested"),
+                ),
+                target_run.__setitem__(
+                    "plan_review_status",
+                    plan_review_status if plan_review_status is not None else target_run.get("plan_review_status", "not_requested"),
+                ),
+                _finish_workflow_run(target_run, "cancelled", message, result=payload, error=None),
+            ),
+        )
+        _clear_workflow_run_controls(run_id)
+        return snapshot
+
     def _start_next_queued_job_locked(queue_key: str) -> PendingWorkflowJob | None:
         pending_jobs = workflow_queue_pending.get(queue_key, [])
         if queue_key in workflow_queue_active or not pending_jobs:
@@ -6104,6 +6460,7 @@ def create_app() -> Flask:
     def _start_workflow_execution(job: PendingWorkflowJob, queue_key: str) -> None:
         run_id = job.run_id
         repo_path = job.repo_path
+        cancel_event = _ensure_workflow_run_cancel_event(run_id)
 
         def reporter(phase: str, message: str) -> None:
             update_run(run_id, lambda run: _append_workflow_event(run, phase, message))
@@ -6118,9 +6475,20 @@ def create_app() -> Flask:
                 ),
             )
             try:
-                result = _execute_agent_workflow(repo_path, job.scm_config, job.payload, reporter=reporter)
+                result = _call_with_supported_kwargs(
+                    _execute_agent_workflow,
+                    repo_path,
+                    job.scm_config,
+                    job.payload,
+                    reporter=reporter,
+                    cancel_event=cancel_event,
+                    process_tracker=lambda process: _track_workflow_run_process(run_id, process),
+                )
                 result_status = str(result.get("status", "")).strip()
-                final_status = "completed" if result.get("ok") else ("partially_completed" if result_status == "push_failed" else "failed")
+                if result_status == "cancelled" or cancel_event.is_set():
+                    final_status = "cancelled"
+                else:
+                    final_status = "completed" if result.get("ok") else ("partially_completed" if result_status == "push_failed" else "failed")
                 normalized_messages = {
                     "syntax_failed": "문법 검사에서 실패하여 자동 커밋을 중단했습니다.",
                     "validated": "Codex 변경과 문법 검사가 완료되었습니다.",
@@ -6129,6 +6497,7 @@ def create_app() -> Flask:
                     "pushed": "Codex 자동 작업과 문법 검사, 커밋, 원격 push까지 완료되었습니다.",
                     "push_failed": "로컬 커밋까지는 완료했지만 원격 push 단계에서 실패했습니다.",
                     "codex_timeout": "Codex 실행이 제한 시간을 초과했습니다. 마지막 진행 단계와 실행 로그를 확인하세요.",
+                    "cancelled": "사용자 요청으로 작업을 취소했다.",
                 }
                 result_message = normalized_messages.get(result_status, str(result.get("message", "")))
                 if result_message:
@@ -6143,7 +6512,7 @@ def create_app() -> Flask:
                             final_status,
                             str(result.get("message", "작업이 종료되었습니다.")),
                             result=result,
-                            error=None if result.get("ok") else result,
+                            error=None if final_status == "cancelled" or result.get("ok") else result,
                         ),
                     ),
                 )
@@ -6160,11 +6529,23 @@ def create_app() -> Flask:
                 )
             final_run = get_run(run_id)
             if final_run is not None:
+                file_map_metadata = _safe_record_project_file_map(
+                    repo_path,
+                    final_run,
+                    space_key=str(final_run.get("resolved_space_key", "")).strip(),
+                )
+                if file_map_metadata:
+                    update_run(
+                        run_id,
+                        lambda run: _merge_file_map_run_metadata(run, file_map_metadata),
+                    )
+                    final_run = get_run(run_id) or final_run
                 _safe_record_project_history(
                     repo_path,
                     final_run,
                     space_key=str(final_run.get("resolved_space_key", "")).strip(),
                 )
+            _clear_workflow_run_controls(run_id)
             _finish_queue_job(queue_key)
 
         thread = threading.Thread(target=worker, name=f"workflow-run-{run_id}", daemon=True)
@@ -7128,6 +7509,63 @@ def create_app() -> Flask:
         )
         batch_snapshot = get_batch(batch_id)
         return jsonify({"ok": True, "status": "cancelled", "run": updated_run, "batch": batch_snapshot})
+
+    @app.post("/api/workflow/batch/<batch_id>/runs/<run_id>/cancel")
+    def cancel_workflow_batch_run(batch_id: str, run_id: str) -> Any:
+        run = get_run(run_id)
+        if run is None or str(run.get("batch_id", "")).strip() != batch_id:
+            return jsonify({"ok": False, "error": "workflow_run_not_found"}), 404
+
+        status = str(run.get("status", "")).strip()
+        if status not in {"queued", "running", "needs_input", "pending_plan_review"}:
+            return jsonify({"ok": False, "error": "workflow_run_not_cancellable"}), 400
+
+        message = "사용자 요청으로 작업을 취소했다."
+        queue_key = str(run.get("queue_key", "")).strip()
+        if not queue_key:
+            repo_hint = str(run.get("local_repo_path", "")).strip()
+            if repo_hint:
+                queue_key = _normalize_queue_key(Path(repo_hint))
+
+        if status == "queued":
+            if queue_key:
+                _remove_pending_workflow_job(run_id, queue_key)
+            updated_run = _cancel_workflow_run_now(run_id, message=message)
+            batch_snapshot = get_batch(batch_id)
+            return jsonify({"ok": True, "status": "cancelled", "run": updated_run, "batch": batch_snapshot})
+
+        if status == "needs_input":
+            updated_run = _cancel_workflow_run_now(run_id, message=message, clarification_status="cancelled")
+            batch_snapshot = get_batch(batch_id)
+            return jsonify({"ok": True, "status": "cancelled", "run": updated_run, "batch": batch_snapshot})
+
+        if status == "pending_plan_review":
+            update_run(
+                run_id,
+                lambda target_run: target_run.__setitem__(
+                    "plan_review",
+                    {
+                        **dict(target_run.get("plan_review") or {}),
+                        "cancelled_at": _utcnow_iso(),
+                    },
+                ),
+            )
+            updated_run = _cancel_workflow_run_now(run_id, message=message, plan_review_status="cancelled")
+            batch_snapshot = get_batch(batch_id)
+            return jsonify({"ok": True, "status": "cancelled", "run": updated_run, "batch": batch_snapshot})
+
+        _request_workflow_run_cancel(run_id)
+        updated_run = update_run(
+            run_id,
+            lambda target_run: (
+                _append_workflow_event(target_run, "cancel_requested", message),
+                target_run.__setitem__("message", message),
+                target_run.__setitem__("updated_at", _utcnow_iso()),
+            ),
+        )
+        batch_snapshot = get_batch(batch_id)
+        response_status = "cancelled" if str((updated_run or {}).get("status", "")).strip() == "cancelled" else "cancel_requested"
+        return jsonify({"ok": True, "status": response_status, "run": updated_run, "batch": batch_snapshot})
 
     @app.post("/api/workflow/clarify")
     def clarify_workflow() -> Any:

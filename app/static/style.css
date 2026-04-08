@@ -813,7 +813,7 @@ tbody tr:hover {
 .workspace-shell {
   position: relative;
   min-height: calc(100vh - 120px);
-  padding: 0 116px;
+  padding: 0 144px;
   overflow-x: visible;
   overflow-y: visible;
 }
@@ -880,7 +880,7 @@ tbody tr:hover {
 }
 
 .workspace-view-toggle {
-  position: absolute;
+  position: fixed;
   top: 50%;
   z-index: 4;
   display: inline-flex;
@@ -921,11 +921,11 @@ tbody tr:hover {
 }
 
 .workspace-view-toggle--to-operations {
-  right: 24px;
+  right: 8px;
 }
 
 .workspace-view-toggle--to-prepare {
-  left: 24px;
+  left: 8px;
 }
 
 #action_center_content {
@@ -1036,6 +1036,10 @@ tbody tr:hover {
   gap: var(--section-gap);
 }
 
+#work_status_content[hidden] {
+  display: none !important;
+}
+
 .workflow-log-shell {
   display: grid;
   gap: 16px;
@@ -1098,16 +1102,37 @@ tbody tr:hover {
 
 .work-status-empty {
   min-height: 220px;
-  align-content: start;
+  display: grid;
+  place-items: center;
+  text-align: center;
+  align-content: center;
+  padding: 20px;
+  border-style: dashed;
+  border-color: rgba(180, 188, 204, 0.72);
+  background:
+    repeating-linear-gradient(
+      -45deg,
+      rgba(246, 248, 252, 0.96),
+      rgba(246, 248, 252, 0.96) 10px,
+      rgba(238, 242, 248, 0.98) 10px,
+      rgba(238, 242, 248, 0.98) 20px
+    );
 }
 
 .work-status-empty h3 {
-  margin-bottom: 10px;
+  margin-bottom: 0;
+  font-size: 22px;
+  line-height: 1.35;
+  letter-spacing: -0.02em;
 }
 
 .work-flow-panel {
   display: grid;
   gap: var(--section-gap);
+}
+
+.work-flow-panel[hidden] {
+  display: none !important;
 }
 
 .work-flow-panel__header {
@@ -1417,7 +1442,20 @@ tbody tr:hover {
 }
 
 .workspace-tabs--runs {
+  display: grid;
+  gap: 12px;
   margin-top: 2px;
+}
+
+.workspace-run-tab-row {
+  display: flex;
+  align-items: stretch;
+  gap: 12px;
+}
+
+.workspace-run-tab-row .workspace-tab--run {
+  flex: 1 1 auto;
+  min-width: 0;
 }
 
 .workspace-tab--run {
@@ -1427,6 +1465,32 @@ tbody tr:hover {
 
 .workspace-tab--run .workspace-tab__meta strong {
   font-size: 14px;
+}
+
+.workspace-run-tab__cancel {
+  flex: 0 0 auto;
+  min-width: 108px;
+  padding: 0 16px;
+  border: 1px solid rgba(211, 74, 74, 0.2);
+  border-radius: 18px;
+  background: rgba(255, 247, 245, 0.94);
+  color: #b33b38;
+  font-size: 13px;
+  font-weight: 800;
+  letter-spacing: -0.01em;
+  transition: background-color 180ms ease, border-color 180ms ease, color 180ms ease;
+}
+
+.workspace-run-tab__cancel:hover,
+.workspace-run-tab__cancel:focus-visible {
+  border-color: rgba(211, 74, 74, 0.34);
+  background: rgba(255, 238, 234, 0.98);
+  color: #992a28;
+}
+
+.workspace-run-tab__cancel:disabled {
+  opacity: 0.65;
+  cursor: wait;
 }
 
 .workspace-tabs--detail {
@@ -2942,11 +3006,11 @@ tbody tr:hover {
   }
 
   .workspace-view-toggle {
-    position: sticky;
-    top: auto;
-    bottom: 16px;
-    transform: none;
-    margin-left: auto;
+    position: fixed;
+    top: 50%;
+    bottom: auto;
+    margin-left: 0;
+    transform: translateY(-50%);
   }
 
   .workspace-view-toggle--to-operations {
@@ -2961,7 +3025,7 @@ tbody tr:hover {
 
   .workspace-view-toggle:hover,
   .workspace-view-toggle:focus-visible {
-    transform: none;
+    transform: translateY(-50%);
   }
 
   .floating-guide-button {
