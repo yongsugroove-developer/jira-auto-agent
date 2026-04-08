@@ -271,6 +271,14 @@
 
       <div class="sidebar-stage__body sidebar-stage__body--backlog">
         <div id="jira_backlog_table_shell" class="jira-backlog-shell">
+          <div class="jira-backlog-toolbar">
+            <label class="jira-backlog-search" for="jira_backlog_search">
+              <span>검색</span>
+              <input id="jira_backlog_search" type="search" placeholder="SPACE 또는 제목 검색" autocomplete="off">
+            </label>
+            <button id="clear_jira_backlog_search" type="button" class="ghost-button">지우기</button>
+          </div>
+          <p id="jira_backlog_search_status" class="grid-note jira-backlog-search-status">조회 후 space 또는 제목으로 빠르게 찾을 수 있다.</p>
           <div class="jira-backlog-carousel">
             <div class="jira-backlog-carousel__viewport">
               <div id="issue_table" class="jira-backlog-list">

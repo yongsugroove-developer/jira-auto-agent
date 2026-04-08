@@ -159,6 +159,9 @@ def test_index_page_renders_automation_fields() -> None:
     assert 'id="jira_backlog_table_shell"' in html
     assert 'class="jira-backlog-list"' in html
     assert 'id="jira_backlog_pagination"' in html
+    assert 'id="jira_backlog_search"' in html
+    assert 'id="clear_jira_backlog_search"' in html
+    assert 'id="jira_backlog_search_status"' in html
     assert 'id="selected_issue_keys" class="selection-summary__list"' in html
     assert 'id="jira_issue_modal"' in html
     assert 'id="jira_issue_modal_meta"' in html
@@ -247,6 +250,7 @@ def test_index_page_renders_automation_fields() -> None:
     assert "최근 배치와 이슈별 작업 상태를 여기에서 추적한다." not in html
     assert html.index('id="load_config"') < html.index('class="config-sticky-group"')
     assert html.index('id="load_backlog"') < html.index('id="issue_table"')
+    assert html.index('id="jira_backlog_search"') < html.index('id="issue_table"')
     assert html.index('id="jira_backlog_table_shell"') < html.index('id="jira_selection_summary"')
     assert html.index('id="workflow_batch_actions"') < html.index('id="workflow_result_actions"')
     assert html.index('id="action_center_section"') > html.index('id="workflow_result_actions"')
@@ -592,6 +596,22 @@ def test_jira_backlog_style_highlights_unmapped_issue_cards() -> None:
     assert ".jira-backlog-item__selector.is-disabled" in style
     assert ".jira-backlog-item__notice" in style
     assert ".field-pill--muted" in style
+
+
+def test_jira_backlog_search_ui_and_script_exist() -> None:
+    style = Path("app/static/style.css").read_text(encoding="utf-8")
+    script = Path("app/static/app.js").read_text(encoding="utf-8")
+
+    assert ".jira-backlog-toolbar" in style
+    assert ".jira-backlog-search" in style
+    assert ".jira-backlog-search-status" in style
+    assert "backlogSearchQuery" in script
+    assert "function issueMatchesBacklogSearch(issue, query)" in script
+    assert "function filterBacklogIssues(issues)" in script
+    assert "function syncBacklogSearchStatus(totalCount, visibleCount)" in script
+    assert '#jira_backlog_search' in script
+    assert '#clear_jira_backlog_search' in script
+    assert 'issueSpaceKeyFromValue(issueKey)' in script
 
 
 def test_batch_workspace_script_limits_work_status_to_active_runs() -> None:

@@ -43,7 +43,9 @@ const jiraState = {
   expandedIssueKey: null,
   issueAccordionCollapsed: false,
   issueModalKey: null,
+  backlogSourceIssues: [],
   backlogIssues: [],
+  backlogSearchQuery: "",
   backlogInputType: "radio",
   backlogInputName: "selected_issue",
   backlogPageIndex: 0,
@@ -887,6 +889,53 @@ function backlogItemsPerPage(columns) {
   return Math.max((Number(columns) || 1) * 2, 1);
 }
 
+function issueMatchesBacklogSearch(issue, query) {
+  const normalizedQuery = String(query || "").trim().toLowerCase();
+  if (!normalizedQuery) {
+    return true;
+  }
+  const issueKey = String(issue.issue_key || issue.key || "").trim();
+  const spaceKey = issueSpaceKeyFromValue(issueKey);
+  const summary = String(issue.issue_summary || issue.summary || "").trim();
+  return issueKey.toLowerCase().includes(normalizedQuery)
+    || spaceKey.toLowerCase().includes(normalizedQuery)
+    || summary.toLowerCase().includes(normalizedQuery);
+}
+
+function filterBacklogIssues(issues) {
+  const items = Array.isArray(issues) ? issues : [];
+  return items.filter((issue) => issueMatchesBacklogSearch(issue, jiraState.backlogSearchQuery));
+}
+
+function syncBacklogSearchStatus(totalCount, visibleCount) {
+  const searchInput = $("#jira_backlog_search");
+  const clearButton = $("#clear_jira_backlog_search");
+  const status = $("#jira_backlog_search_status");
+  const query = String(jiraState.backlogSearchQuery || "").trim();
+
+  if (searchInput.length && searchInput.val() !== query) {
+    searchInput.val(query);
+  }
+  clearButton.prop("disabled", !query);
+
+  if (!status.length) {
+    return;
+  }
+  if (!totalCount) {
+    status.text(query ? "조회된 이슈가 없어 검색 결과가 없다." : "조회 후 space 또는 제목으로 빠르게 찾을 수 있다.");
+    return;
+  }
+  if (!query) {
+    status.text(`총 ${totalCount}건을 표시한다. space 또는 제목으로 검색할 수 있다.`);
+    return;
+  }
+  if (!visibleCount) {
+    status.text(`"${query}" 검색 결과가 없다. 총 ${totalCount}건을 확인했다.`);
+    return;
+  }
+  status.text(`"${query}" 검색 결과 ${visibleCount}건을 표시한다. 전체 ${totalCount}건이다.`);
+}
+
 function backlogPageCount() {
   if (!jiraState.backlogIssues.length) {
     return 0;
@@ -959,7 +1008,8 @@ function renderBacklogPagination(totalPages, activePage) {
 
 function renderBacklogIssueTable(issues, options) {
   const settings = options || {};
-  const items = Array.isArray(issues) ? issues : [];
+  const sourceItems = Array.isArray(issues) ? issues : [];
+  const items = filterBacklogIssues(sourceItems);
   const checkedKeys = new Set(currentCheckedIssueKeys());
   const columns = backlogColumnCount();
   const itemsPerPage = backlogItemsPerPage(columns);
@@ -969,11 +1019,13 @@ function renderBacklogIssueTable(issues, options) {
     : -1;
   const shouldPreservePage = Boolean(settings.preservePage);
 
+  jiraState.backlogSourceIssues = sourceItems.slice();
   jiraState.backlogIssues = items.slice();
   jiraState.backlogInputType = settings.inputType || "radio";
   jiraState.backlogInputName = settings.inputName || "selected_issue";
   jiraState.backlogColumns = columns;
   jiraState.backlogItemsPerPage = itemsPerPage;
+  syncBacklogSearchStatus(sourceItems.length, items.length);
 
   if (shouldPreservePage) {
     jiraState.backlogPageIndex = Math.min(
@@ -992,6 +1044,7 @@ function renderBacklogIssueTable(issues, options) {
       .html('<p class="batch-preview-empty">조회된 이슈가 없습니다.</p>')
       .css("transform", "");
     $("#jira_backlog_pagination").empty().prop("hidden", true);
+    $(document).trigger("jira:backlog-rendered");
     return;
   }
 
@@ -1019,6 +1072,7 @@ function renderBacklogIssueTable(issues, options) {
     .html(pageHtml)
     .css("transform", "");
   setBacklogPage(jiraState.backlogPageIndex);
+  $(document).trigger("jira:backlog-rendered");
 }
 
 function populateIssueBacklog(data, options) {
@@ -1058,10 +1112,10 @@ function ensureBacklogIssuePage(issueKey) {
 }
 
 function refreshBacklogLayout() {
-  if (!jiraState.backlogIssues.length) {
+  if (!jiraState.backlogSourceIssues.length) {
     return;
   }
-  renderBacklogIssueTable(jiraState.backlogIssues, {
+  renderBacklogIssueTable(jiraState.backlogSourceIssues, {
     inputType: jiraState.backlogInputType,
     inputName: jiraState.backlogInputName,
     preservePage: true,
@@ -3196,6 +3250,29 @@ $(document).ready(function () {
         setResult("#backlog_result", xhr.responseJSON || { ok: false, error: xhr.responseText });
       });
   });
+
+  $("#jira_backlog_search").on("input", function () {
+    jiraState.backlogSearchQuery = String($(this).val() || "").trim();
+    renderBacklogIssueTable(jiraState.backlogSourceIssues, {
+      inputType: jiraState.backlogInputType,
+      inputName: jiraState.backlogInputName,
+    });
+    syncIssueAccordionState();
+  });
+
+  $("#clear_jira_backlog_search").on("click", function () {
+    if (!jiraState.backlogSearchQuery) {
+      return;
+    }
+    jiraState.backlogSearchQuery = "";
+    $("#jira_backlog_search").val("");
+    renderBacklogIssueTable(jiraState.backlogSourceIssues, {
+      inputType: jiraState.backlogInputType,
+      inputName: jiraState.backlogInputName,
+    });
+    syncIssueAccordionState();
+  });
+  syncBacklogSearchStatus(jiraState.backlogSourceIssues.length, jiraState.backlogIssues.length);
 
   $("#check_repo").on("click", function () {
     const issue = selectedIssue();
