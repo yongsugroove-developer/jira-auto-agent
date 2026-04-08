@@ -1051,6 +1051,17 @@ function refreshBacklogLayout() {
   if (typeof syncIssueAccordionState === "function") {
     syncIssueAccordionState();
   }
+  const selectedInput = $("input[name='selected_issue']:checked").first();
+  if (selectedInput.length) {
+    fillWorkflow({
+      issue_key: selectedInput.data("key"),
+      issue_summary: selectedInput.data("summary"),
+    });
+    return;
+  }
+  $("#issue_key").val("");
+  $("#issue_summary").val("");
+  resetIssueDetail();
 }
 
 function prefersReducedMotion() {
@@ -1882,6 +1893,34 @@ function closeIssueModal() {
   jiraState.issueModalKey = null;
   $("#jira_issue_modal").removeClass("is-open").attr("aria-hidden", "true");
   syncModalBodyState();
+}
+
+function issueSpaceKeyFromValue(issueKey) {
+  return String(issueKey || "")
+    .trim()
+    .toUpperCase()
+    .split("-", 1)[0]
+    .trim();
+}
+
+function mappedBacklogSpaceKeys() {
+  return new Set(
+    currentRepoMappings()
+      .map((item) => issueSpaceKeyFromValue(item.space_key))
+      .filter(Boolean)
+  );
+}
+
+function issueSelectionAvailability(issue) {
+  const issueKey = String(issue.issue_key || issue.key || "").trim();
+  const spaceKey = issueSpaceKeyFromValue(issueKey);
+  const mapped = Boolean(spaceKey) && mappedBacklogSpaceKeys().has(spaceKey);
+  const disabledReason = mapped
+    ? ""
+    : spaceKey
+      ? `${spaceKey} 공간은 저장소 매핑이 없어 선택할 수 없습니다.`
+      : "저장소 매핑을 확인할 수 없어 선택할 수 없습니다.";
+  return { issueKey, spaceKey, mapped, disabledReason };
 }
 
 function renderIssueAccordionItem(issue, options) {
@@ -2864,6 +2903,7 @@ $(document).ready(function () {
         setSavedSecretState("#jira_api_token", Boolean(data.jira_api_token_saved), "현재 저장된 토큰이 있습니다.", "Jira API Token");
         $("#github_token").val("");
         setGithubTokenHelp(savedTokenSpaces.size > 0);
+        refreshBacklogLayout();
         clearResultActions("#config_result_actions");
         setResult("#config_result", data);
       })
@@ -3584,6 +3624,7 @@ fillConfig = function (data) {
   updateRepoMappingProviderUI();
   setGithubTokenHelp(savedTokenSpaces.size > 0);
   updateConfigFlowState();
+  refreshBacklogLayout();
 };
 
 collectConfig = function () {
@@ -4208,6 +4249,89 @@ executeWorkflowRunWithClarification = function (button, payload) {
     });
 };
 
+function renderIssueAccordionItem(issue, options) {
+  const settings = options || {};
+  const availability = issueSelectionAvailability(issue);
+  const checked = settings.checked && availability.mapped ? 'checked="checked"' : "";
+  const inputName = settings.inputName || "selected_issue";
+  const inputType = settings.inputType || "radio";
+  const safeKey = escapeHtml(issue.issue_key || issue.key || "");
+  const safeSummary = escapeHtml(issue.issue_summary || issue.summary || "");
+  const safeStatus = escapeHtml(issue.status || "");
+  const safeSpaceKey = escapeHtml(availability.spaceKey || "");
+  const cardClasses = ["jira-backlog-item"];
+  const selectorClasses = ["jira-backlog-item__selector"];
+  let metaHtml = renderIssueStatusPill({ status: issue.status || "" });
+  if (checked) {
+    cardClasses.push("is-selected");
+    selectorClasses.push("is-checked");
+  }
+  if (!availability.mapped) {
+    cardClasses.push("is-unmapped");
+    selectorClasses.push("is-disabled");
+    metaHtml = [metaHtml, '<span class="field-pill field-pill--muted">매핑 필요</span>']
+      .filter(Boolean)
+      .join("");
+  }
+  const disabled = availability.mapped ? "" : 'disabled="disabled"';
+  const noticeHtml = availability.mapped
+    ? ""
+    : `<p class="jira-backlog-item__notice">${escapeHtml(availability.disabledReason)}</p>`;
+  return `
+    <article class="${cardClasses.join(" ")}" data-issue-key="${safeKey}" data-issue-status="${safeStatus}" data-issue-space-key="${safeSpaceKey}" data-issue-mapped="${availability.mapped ? "true" : "false"}">
+      <div class="jira-backlog-item__row">
+        <div class="jira-backlog-item__trigger" data-jira-issue-modal-open="${safeKey}" data-issue-summary="${safeSummary}" role="button" tabindex="0" aria-pressed="${checked ? "true" : "false"}">
+          <div class="jira-backlog-item__heading">
+            <div class="jira-backlog-item__title">
+              <strong>${safeKey}</strong>
+              <span>${safeSummary}</span>
+            </div>
+            <div class="jira-backlog-item__meta" data-jira-issue-meta-inline ${metaHtml ? "" : "hidden"}>${metaHtml}</div>
+            ${noticeHtml}
+          </div>
+        </div>
+        <label class="${selectorClasses.join(" ")}" aria-label="선택">
+          <input
+            type="${inputType}"
+            name="${inputName}"
+            ${checked}
+            ${disabled}
+            data-key="${safeKey}"
+            data-summary="${safeSummary}"
+            aria-label="선택"
+          >
+        </label>
+      </div>
+    </article>
+  `;
+}
+
+function syncIssueAccordionState() {
+  const checkedInputs = $("input[name='selected_issue']:checked, input[name='selected_issues']:checked");
+  const selectedInput = checkedInputs.first();
+  const selectedKey = String(selectedInput.data("key") || "").trim();
+  if (!selectedKey) {
+    jiraState.expandedIssueKey = null;
+    jiraState.issueAccordionCollapsed = false;
+  } else {
+    jiraState.expandedIssueKey = selectedKey;
+    jiraState.issueAccordionCollapsed = false;
+  }
+
+  issueAccordionItems().each(function () {
+    const item = $(this);
+    const input = item.find("input[name='selected_issue'], input[name='selected_issues']").first();
+    const checked = input.is(":checked");
+    const disabled = input.is(":disabled");
+    item.toggleClass("is-selected", checked);
+    item.toggleClass("is-unmapped", disabled);
+    item.find(".jira-backlog-item__selector")
+      .toggleClass("is-checked", checked)
+      .toggleClass("is-disabled", disabled);
+    item.find("[data-jira-issue-modal-open]").attr("aria-pressed", checked ? "true" : "false");
+  });
+}
+
 requestWorkflowClarification = function (button, payload) {
   button.prop("disabled", true).text("사전 확인 중..");
   clearResultActions("#workflow_result_actions");
@@ -4239,6 +4363,36 @@ requestWorkflowClarification = function (button, payload) {
 };
 
 $(document).ready(function () {
+  $("#save_config").off("click").on("click", function () {
+    $.ajax({
+      url: "/api/config/save",
+      method: "POST",
+      contentType: "application/json",
+      data: JSON.stringify(collectConfig()),
+    })
+      .done((data) => {
+        const savedTokenSpaces = new Set((data.repo_mapping_token_spaces || []).map((item) => String(item || "").trim().toUpperCase()));
+        const refreshedItems = currentRepoMappings().map((item) => ({
+          ...item,
+          scm_token: "",
+          github_token: "",
+          has_saved_token: savedTokenSpaces.has(item.space_key),
+          clear_saved_token: false,
+        }));
+        renderRepoMappings(refreshedItems);
+        $("#jira_api_token").val("");
+        setSavedSecretState("#jira_api_token", Boolean(data.jira_api_token_saved), "현재 저장된 토큰이 있습니다.", "Jira API Token");
+        setGithubTokenHelp(savedTokenSpaces.size > 0);
+        refreshBacklogLayout();
+        clearResultActions("#config_result_actions");
+        setResult("#config_result", data);
+      })
+      .fail((xhr) => {
+        clearResultActions("#config_result_actions");
+        setResult("#config_result", xhr.responseJSON || { ok: false, error: xhr.responseText });
+      });
+  });
+
   $("#run_automation").off("click").on("click", function () {
     const button = $(this);
     syncWorkflowClarificationAnswers();

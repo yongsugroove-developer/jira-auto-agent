@@ -208,10 +208,10 @@
       <div class="card-header">
         <div class="card-header__copy">
           <p class="section-kicker">Jira</p>
-          <h2>2. Jira 백로그 조회</h2>
+          <h2>2. Jira 로그 조회</h2>
         </div>
         <div class="card-header__actions">
-          <button id="load_backlog" type="button">백로그 조회</button>
+          <button id="load_backlog" type="button">로그 조회</button>
         </div>
       </div>
 
@@ -230,7 +230,7 @@
         <section id="jira_selection_summary" class="selection-summary">
           <div class="selection-summary__copy">
             <strong id="selected_issue_count">선택한 이슈 0건</strong>
-            <p id="selected_issue_keys" class="grid-note" hidden></p>
+            <ul id="selected_issue_keys" class="selection-summary__list" hidden></ul>
           </div>
           <div class="selection-summary__actions">
             <button id="clear_issue_selection" type="button" class="secondary-button">선택 해제</button>
@@ -249,7 +249,6 @@
         <div class="card-header__actions">
           <button id="check_repo" type="button">레포 상태 확인</button>
           <button id="prepare_workflow" type="button">배치 미리보기 갱신</button>
-          <button id="run_automation" type="button" class="primary-button">선택 이슈 배치 실행</button>
         </div>
       </div>
 
@@ -314,10 +313,15 @@
 
       <input id="test_command" type="hidden" value="">
 
-      <div class="actions">
-        <label class="checkbox-row"><input id="allow_auto_commit" type="checkbox" checked> 로컬 테스트 없이 자동 커밋 허용</label>
-        <label class="checkbox-row"><input id="allow_auto_push" type="checkbox" checked> 커밋 후 원격 저장소까지 push</label>
-        <label class="checkbox-row"><input id="enable_plan_review" type="checkbox"> 실행 전 계획 확인 사용</label>
+      <div id="workflow_execution_bar" class="workflow-execution-bar">
+        <div class="workflow-execution-bar__toggles">
+          <label class="checkbox-row checkbox-row--emphasis"><input id="allow_auto_commit" type="checkbox" checked> 로컬 테스트 없이 자동 커밋 허용</label>
+          <label class="checkbox-row checkbox-row--emphasis"><input id="allow_auto_push" type="checkbox" checked> 커밋 후 원격 저장소까지 push</label>
+          <label class="checkbox-row checkbox-row--emphasis"><input id="enable_plan_review" type="checkbox"> 실행 전 계획 확인 사용</label>
+        </div>
+        <div class="workflow-execution-bar__primary">
+          <button id="run_automation" type="button" class="primary-button">선택 이슈 배치 실행</button>
+        </div>
       </div>
 
       <div id="workflow_batch_actions" class="actions workflow-batch-actions"></div>
@@ -726,6 +730,10 @@
     window.__AGENTATION_CONFIG__ = {{ agentation_frontend|tojson }};
     window.__AGENT_PROVIDER_DEFAULT__ = {{ agent_provider_default|tojson }};
     window.__AGENT_PROVIDER_OPTIONS__ = {{ agent_provider_options|tojson }};
+    window.__CODEX_DEFAULT_MODEL__ = {{ codex_defaults.model|tojson }};
+    window.__CODEX_DEFAULT_REASONING_EFFORT__ = {{ codex_defaults.model_reasoning_effort|tojson }};
+    window.__CLAUDE_DEFAULT_MODEL__ = {{ claude_defaults.model|tojson }};
+    window.__CLAUDE_DEFAULT_PERMISSION_MODE__ = {{ claude_defaults.permission_mode|tojson }};
   </script>
   <script src="{{ url_for('static', filename='app.js') }}"></script>
   <script src="{{ url_for('static', filename='batch-workspace.js') }}"></script>

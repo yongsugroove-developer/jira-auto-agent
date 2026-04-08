@@ -141,6 +141,10 @@ def test_index_page_renders_automation_fields() -> None:
     assert "window.__AGENTATION_CONFIG__" in html
     assert "window.__AGENT_PROVIDER_DEFAULT__" in html
     assert "window.__AGENT_PROVIDER_OPTIONS__" in html
+    assert "window.__CODEX_DEFAULT_MODEL__" in html
+    assert "window.__CODEX_DEFAULT_REASONING_EFFORT__" in html
+    assert "window.__CLAUDE_DEFAULT_MODEL__" in html
+    assert "window.__CLAUDE_DEFAULT_PERMISSION_MODE__" in html
     assert 'id="mock_mode"' not in html
     assert 'id="backlog_result"' not in html
     assert "<h1>" not in html
@@ -149,11 +153,13 @@ def test_index_page_renders_automation_fields() -> None:
     assert 'id="workflow_batch_preview_list"' not in html
     assert 'id="workflow_batch_preview_count"' not in html
     assert 'id="workflow_batch_actions"' in html
+    assert 'id="workflow_execution_bar"' in html
     assert 'id="batch_flow_board"' in html
     assert 'id="batch_flow_caption"' in html
     assert 'id="jira_backlog_table_shell"' in html
     assert 'class="jira-backlog-list"' in html
     assert 'id="jira_backlog_pagination"' in html
+    assert 'id="selected_issue_keys" class="selection-summary__list"' in html
     assert 'id="jira_issue_modal"' in html
     assert 'id="jira_issue_modal_meta"' in html
     assert 'id="jira_issue_modal_description"' in html
@@ -558,12 +564,50 @@ def test_jira_backlog_script_uses_inline_meta_without_click_helper_copy() -> Non
     assert 'checked: index === 0' not in batch_script
 
 
+def test_jira_backlog_script_disables_unmapped_issue_selection() -> None:
+    script = Path("app/static/app.js").read_text(encoding="utf-8")
+
+    assert "function issueSpaceKeyFromValue(issueKey)" in script
+    assert "function mappedBacklogSpaceKeys()" in script
+    assert "function issueSelectionAvailability(issue)" in script
+    assert 'disabled="disabled"' in script
+    assert 'field-pill field-pill--muted">매핑 필요<' in script
+    assert 'data-issue-mapped="${availability.mapped ? "true" : "false"}"' in script
+    assert "refreshBacklogLayout();" in script
+
+
+def test_jira_backlog_style_highlights_unmapped_issue_cards() -> None:
+    style = Path("app/static/style.css").read_text(encoding="utf-8")
+
+    assert ".jira-backlog-item.is-unmapped" in style
+    assert ".jira-backlog-item__selector.is-disabled" in style
+    assert ".jira-backlog-item__notice" in style
+    assert ".field-pill--muted" in style
+
+
 def test_batch_workspace_script_limits_work_status_to_active_runs() -> None:
     batch_script = Path("app/static/batch-workspace.js").read_text(encoding="utf-8")
 
     assert 'const ACTIVE_RUN_STATUSES = ["queued", "running", "needs_input", "pending_plan_review"];' in batch_script
     assert 'const batches = (data.batches || []).filter((batch) => isCurrentBatch(batch));' in batch_script
     assert '$("#toggle_failed_runs")' not in batch_script
+
+
+def test_batch_workspace_script_uses_request_payload_fallbacks_for_run_overview() -> None:
+    batch_script = Path("app/static/batch-workspace.js").read_text(encoding="utf-8")
+
+    assert "function runRequestPayload(run, payload)" in batch_script
+    assert "requestPayload.resolved_repo_ref" in batch_script
+    assert "requestPayload.branch_name" in batch_script
+    assert 'const commitValue = commitSha || (commitMessage ? "커밋 대기" : "-");' in batch_script
+    assert 'setSummaryCard("현재 단계", latestEvent ? (phaseLabels[latestEvent.phase] || latestEvent.phase) : "-")' in batch_script
+
+
+def test_batch_workspace_style_hides_empty_state_when_hidden() -> None:
+    style = Path("app/static/style.css").read_text(encoding="utf-8")
+
+    assert ".work-status-empty[hidden]" in style
+    assert "display: none !important;" in style
 
 
 def test_batch_workspace_script_surfaces_clarification_debug_output() -> None:

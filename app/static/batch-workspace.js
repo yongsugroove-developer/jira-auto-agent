@@ -189,11 +189,18 @@
       return;
     }
     if (!issues.length) {
-      issueKeys.text("").attr("hidden", true);
+      issueKeys.empty().attr("hidden", true);
       return;
     }
     issueKeys
-      .text(issues.map((issue) => `${issue.issue_key} ${issue.issue_summary}`).join(" / "))
+      .html(
+        issues.map((issue) => `
+          <li class="selection-summary__item">
+            <strong>${escapeHtml(issue.issue_key)}</strong>
+            <span>${escapeHtml(issue.issue_summary)}</span>
+          </li>
+        `).join("")
+      )
       .attr("hidden", false);
   }
 
@@ -821,17 +828,118 @@
     return run.result || run.error || run;
   }
 
+  function runRequestPayload(run, payload) {
+    if (payload && typeof payload.request_payload === "object" && payload.request_payload) {
+      return payload.request_payload;
+    }
+    if (run && typeof run.request_payload === "object" && run.request_payload) {
+      return run.request_payload;
+    }
+    return {};
+  }
+
+  function resolveRunOverviewContext(run, payload) {
+    const requestPayload = runRequestPayload(run, payload);
+    const provider = String(
+      run.agent_provider
+      || payload.agent_provider
+      || requestPayload.agent_provider
+      || window.__AGENT_PROVIDER_DEFAULT__
+      || "codex"
+    ).trim() || "codex";
+    const providerLabel = payload.resolved_agent_label
+      || (payload.provider_metadata && payload.provider_metadata.label)
+      || (provider === "claude" ? "Claude Code" : "Codex");
+    const requestedModel = provider === "claude"
+      ? String(requestPayload.claude_model || "").trim()
+      : String(requestPayload.codex_model || "").trim();
+    const defaultModel = provider === "claude"
+      ? String(window.__CLAUDE_DEFAULT_MODEL__ || "").trim()
+      : String(window.__CODEX_DEFAULT_MODEL__ || "").trim();
+    const requestedExecutionMode = provider === "claude"
+      ? String(requestPayload.claude_permission_mode || "").trim()
+      : String(requestPayload.codex_reasoning_effort || "").trim();
+    const defaultExecutionMode = provider === "claude"
+      ? String(window.__CLAUDE_DEFAULT_PERMISSION_MODE__ || "").trim()
+      : String(window.__CODEX_DEFAULT_REASONING_EFFORT__ || "").trim();
+    const repoRef = String(
+      run.resolved_repo_ref
+      || payload.remote_repo_ref
+      || payload.resolved_repo_ref
+      || requestPayload.resolved_repo_ref
+      || (
+        requestPayload.resolved_repo_owner && requestPayload.resolved_repo_name
+          ? `${requestPayload.resolved_repo_owner}/${requestPayload.resolved_repo_name}`
+          : ""
+      )
+      || ""
+    ).trim();
+    const repoProvider = String(
+      run.resolved_repo_provider
+      || payload.remote_provider
+      || payload.resolved_repo_provider
+      || requestPayload.resolved_repo_provider
+      || ""
+    ).trim();
+    const localRepoPath = String(run.local_repo_path || payload.local_repo_path || "").trim();
+    const commitSha = String(payload.commit_sha || "").trim();
+    const commitMessage = String(payload.commit_message || requestPayload.commit_message || "").trim();
+    const commitValue = commitSha || (commitMessage ? "커밋 대기" : "-");
+    return {
+      requestPayload,
+      provider,
+      providerLabel,
+      modelLabel: String(
+        payload.resolved_agent_model
+        || payload.resolved_model
+        || payload.requested_agent_model
+        || payload.requested_model
+        || requestedModel
+        || defaultModel
+        || "-"
+      ).trim() || "-",
+      executionValue: String(
+        payload.resolved_agent_execution_mode
+        || payload.resolved_reasoning_effort
+        || payload.requested_agent_execution_mode
+        || payload.requested_reasoning_effort
+        || requestedExecutionMode
+        || defaultExecutionMode
+        || ""
+      ).trim(),
+      repoValue: repoRef || localRepoPath || "-",
+      repoDetail: [repoProvider, repoRef && localRepoPath ? localRepoPath : ""].filter(Boolean).join(" / "),
+      branchValue: String(payload.branch_name || requestPayload.branch_name || "-").trim() || "-",
+      branchDetail: String(
+        payload.current_branch
+          ? `현재 브랜치 ${payload.current_branch}`
+          : (payload.base_branch || payload.resolved_base_branch || run.resolved_base_branch || requestPayload.resolved_base_branch || "")
+            ? `기준 브랜치 ${payload.base_branch || payload.resolved_base_branch || run.resolved_base_branch || requestPayload.resolved_base_branch}`
+            : ""
+      ).trim(),
+      commitValue,
+      commitDetail: commitSha && commitMessage ? commitMessage : (!commitSha ? commitMessage : ""),
+      elapsedSeconds: payload.agent_elapsed_seconds != null ? payload.agent_elapsed_seconds : payload.codex_elapsed_seconds,
+    };
+  }
+
+  function agentExecutionModeDetail(provider, executionValue) {
+    if (!executionValue) {
+      return "";
+    }
+    return provider === "claude" ? `permission: ${executionValue}` : `reasoning: ${executionValue}`;
+  }
+
   function renderRunMeta(run, payload) {
-    const provider = String(run.agent_provider || payload.agent_provider || (run.request_payload || {}).agent_provider || "codex").trim() || "codex";
-    const providerLabel = payload.resolved_agent_label || (provider === "claude" ? "Claude Code" : "Codex");
+    const context = resolveRunOverviewContext(run, payload);
     const items = [
-      `<span class="field-pill">${escapeHtml(providerLabel)}</span>`,
+      `<span class="field-pill">${escapeHtml(context.providerLabel)}</span>`,
       statusBadge(run.status),
       queueMetaBadge(run),
       run.resolved_space_key ? `<span class="field-pill">${escapeHtml(run.resolved_space_key)}</span>` : "",
       run.local_repo_path ? `<span class="field-pill">${escapeHtml(run.local_repo_path)}</span>` : "",
-      payload.branch_name ? `<span class="field-pill">${escapeHtml(payload.branch_name)}</span>` : "",
-      payload.commit_message ? `<span class="field-pill">${escapeHtml(payload.commit_message)}</span>` : "",
+      context.branchValue !== "-" ? `<span class="field-pill">${escapeHtml(context.branchValue)}</span>` : "",
+      context.commitDetail ? `<span class="field-pill">${escapeHtml(context.commitDetail)}</span>` : "",
     ].filter(Boolean).join("");
     $("#batch_run_meta").html(items);
   }
@@ -958,23 +1066,31 @@
     $("#batch_flow_board").html(rows);
   }
 
-  function renderRunOverview(run, payload) {
+  function updateRunOverview(run, payload) {
     const latestEvent = typeof latestWorkflowEvent === "function" ? latestWorkflowEvent(run) : null;
     const phaseLabels = typeof WORKFLOW_PHASE_LABELS === "object" ? WORKFLOW_PHASE_LABELS : {};
     const syntaxReturncode = payload.syntax_check_returncode != null ? payload.syntax_check_returncode : payload.test_returncode;
     const syntaxFiles = payload.syntax_checked_files || [];
+    const context = resolveRunOverviewContext(run, payload);
     const cards = [
       setSummaryCard("상태", statusText(run.status || payload.status || "-")),
-      setSummaryCard("현재 단계", latestEvent ? (phaseLabels[latestEvent.phase] || latestEvent.phase) : "-", latestEvent ? latestEvent.message : ""),
-      setSummaryCard("경과 시간", typeof workflowElapsedLabel === "function" ? workflowElapsedLabel(run) : "-", payload.codex_elapsed_seconds != null ? `Codex ${payload.codex_elapsed_seconds}초` : ""),
-      setSummaryCard("모델", payload.resolved_model || payload.requested_model || "-", payload.resolved_reasoning_effort ? `reasoning: ${payload.resolved_reasoning_effort}` : ""),
-      setSummaryCard("브랜치", payload.branch_name || "-", payload.current_branch ? `현재 브랜치 ${payload.current_branch}` : ""),
-      setSummaryCard("커밋", payload.commit_sha || "-", payload.commit_message || ""),
+      setSummaryCard("현재 단계", latestEvent ? (phaseLabels[latestEvent.phase] || latestEvent.phase) : "-"),
+      setSummaryCard("Agent", context.providerLabel, payload.provider_metadata && payload.provider_metadata.execution_mode_label ? payload.provider_metadata.execution_mode_label : ""),
+      setSummaryCard("경과 시간", typeof workflowElapsedLabel === "function" ? workflowElapsedLabel(run) : "-", context.elapsedSeconds != null ? `${context.providerLabel} ${context.elapsedSeconds}초` : ""),
+      setSummaryCard("모델", context.modelLabel, agentExecutionModeDetail(context.provider, context.executionValue)),
+      setSummaryCard("저장소", context.repoValue, context.repoDetail),
+      setSummaryCard("브랜치", context.branchValue, context.branchDetail),
+      setSummaryCard("커밋", context.commitValue, context.commitDetail),
+      setSummaryCard("원격 Push", payload.push_succeeded ? "성공" : (payload.allow_auto_push ? "실패/미실행" : "비활성"), payload.remote_branch || ""),
       setSummaryCard("문법 검사", syntaxReturncode == null ? "-" : String(syntaxReturncode), syntaxFiles.length ? `대상 파일 ${syntaxFiles.length}개` : (payload.test_command || "")),
       setSummaryCard("업데이트", formatTimestamp(run.updated_at || run.finished_at || run.started_at || run.created_at)),
     ].join("");
     $("#batch_run_overview").html(cards);
     renderPlanReviewSection(run, payload);
+  }
+
+  function renderRunOverview(run, payload) {
+    updateRunOverview(run, payload);
   }
 
   function renderPlanMarkdown(markdown) {
@@ -1884,31 +2000,6 @@
     });
 
   });
-  renderRunOverview = function (run, payload) {
-    const latestEvent = typeof latestWorkflowEvent === "function" ? latestWorkflowEvent(run) : null;
-    const phaseLabels = typeof WORKFLOW_PHASE_LABELS === "object" ? WORKFLOW_PHASE_LABELS : {};
-    const syntaxReturncode = payload.syntax_check_returncode != null ? payload.syntax_check_returncode : payload.test_returncode;
-    const syntaxFiles = payload.syntax_checked_files || [];
-    const provider = String(run.agent_provider || payload.agent_provider || (run.request_payload || {}).agent_provider || "codex").trim() || "codex";
-    const providerLabel = payload.resolved_agent_label || (provider === "claude" ? "Claude Code" : "Codex");
-    const modelLabel = payload.resolved_agent_model || payload.resolved_model || payload.requested_agent_model || payload.requested_model || "-";
-    const executionValue = payload.resolved_agent_execution_mode || payload.resolved_reasoning_effort || payload.requested_agent_execution_mode || payload.requested_reasoning_effort || "";
-    const elapsedSeconds = payload.agent_elapsed_seconds != null ? payload.agent_elapsed_seconds : payload.codex_elapsed_seconds;
-    const cards = [
-      setSummaryCard("상태", statusText(run.status || payload.status || "-")),
-      setSummaryCard("현재 단계", latestEvent ? (phaseLabels[latestEvent.phase] || latestEvent.phase) : "-", latestEvent ? latestEvent.message : ""),
-      setSummaryCard("Agent", providerLabel, payload.provider_metadata && payload.provider_metadata.execution_mode_label ? payload.provider_metadata.execution_mode_label : ""),
-      setSummaryCard("경과 시간", typeof workflowElapsedLabel === "function" ? workflowElapsedLabel(run) : "-", elapsedSeconds != null ? `${providerLabel} ${elapsedSeconds}초` : ""),
-      setSummaryCard("모델", modelLabel, executionValue ? (provider === "claude" ? `permission: ${executionValue}` : `reasoning: ${executionValue}`) : ""),
-      setSummaryCard("저장소", run.resolved_repo_ref || payload.remote_repo_ref || "-", run.resolved_repo_provider || payload.remote_provider || ""),
-      setSummaryCard("브랜치", payload.branch_name || "-", payload.current_branch ? `현재 브랜치 ${payload.current_branch}` : ""),
-      setSummaryCard("커밋", payload.commit_sha || "-", payload.commit_message || ""),
-      setSummaryCard("원격 Push", payload.push_succeeded ? "성공" : (payload.allow_auto_push ? "실패/미실행" : "비활성"), payload.remote_branch || ""),
-      setSummaryCard("문법 검사", syntaxReturncode == null ? "-" : String(syntaxReturncode), syntaxFiles.length ? `대상 파일 ${syntaxFiles.length}개` : (payload.test_command || "")),
-      setSummaryCard("업데이트", formatTimestamp(run.updated_at || run.finished_at || run.started_at || run.created_at)),
-    ].join("");
-    $("#batch_run_overview").html(cards);
-    renderPlanReviewSection(run, payload);
-  };
+  renderRunOverview = updateRunOverview;
 })(jQuery);
 
