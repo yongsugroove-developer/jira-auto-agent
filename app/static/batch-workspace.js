@@ -401,9 +401,6 @@
   }
 
   function showWorkStatusSection(message) {
-    if (message) {
-      $("#work_status_hint").text(String(message));
-    }
     renderMonitoringPanels();
   }
 
@@ -725,6 +722,11 @@
     return currentRuns(batch);
   }
 
+  function canCancelRun(run) {
+    const status = String((run && run.status) || "").trim();
+    return ["queued", "running", "needs_input", "pending_plan_review"].includes(status);
+  }
+
   function activeFlowRuns(batch) {
     return currentRuns(batch);
   }
@@ -735,18 +737,30 @@
       const isActive = String(run.run_id) === String(activeRunId);
       const title = String(run.issue_summary || run.tab_label || run.issue_key || run.run_id || "").trim();
       return `
-        <button
-          type="button"
-          class="workspace-tab workspace-tab--run ${isActive ? "is-active" : ""}"
-          role="tab"
-          aria-selected="${isActive ? "true" : "false"}"
-          data-run-id="${escapeHtml(run.run_id)}"
-        >
-          <span class="workspace-tab__meta">
-            <span class="workspace-tab__eyebrow">${escapeHtml(run.issue_key || "Issue")}</span>
-            <strong>${escapeHtml(title || run.run_id)}</strong>
-          </span>
-        </button>
+        <div class="workspace-run-tab-row ${isActive ? "is-active" : ""}">
+          <button
+            type="button"
+            class="workspace-tab workspace-tab--run ${isActive ? "is-active" : ""}"
+            role="tab"
+            aria-selected="${isActive ? "true" : "false"}"
+            data-run-id="${escapeHtml(run.run_id)}"
+          >
+            <span class="workspace-tab__meta">
+              <span class="workspace-tab__eyebrow">${escapeHtml(run.issue_key || "Issue")}</span>
+              <strong>${escapeHtml(title || run.run_id)}</strong>
+            </span>
+          </button>
+          ${canCancelRun(run) ? `
+            <button
+              type="button"
+              class="workspace-run-tab__cancel"
+              data-cancel-run-id="${escapeHtml(run.run_id)}"
+              data-run-issue-key="${escapeHtml(run.issue_key || "")}"
+            >
+              작업 취소
+            </button>
+          ` : ""}
+        </div>
       `;
     }).join("");
     $("#batch_run_tabs").html(tabs || '<p class="batch-list__empty">표시할 실행 탭이 없다.</p>');
@@ -1057,11 +1071,6 @@
     $("#action_center_section").prop("hidden", false);
     $("#action_center_content").prop("hidden", !hasContent);
     $("#action_center_empty").prop("hidden", hasContent);
-    $("#action_center_hint").text(
-      hasContent
-        ? "지금 필요한 확인과 승인을 여기에서 바로 처리한다."
-        : "질문 응답이나 계획 승인이 필요한 경우 이 영역에 바로 표시된다."
-    );
   }
 
   function ensurePlanReviewUi() {
@@ -1309,7 +1318,6 @@
       safeStorageRemove(batchRunStorageKey(previousBatchId));
       safeStorageRemove(batchDetailStorageKey(previousBatchId));
     }
-    $("#work_status_hint").text("현재 진행 중인 작업이 없습니다.");
     $("#work_status_empty").prop("hidden", false);
     $("#work_status_content").prop("hidden", true);
     $("#batch_flow_panel").prop("hidden", true);
@@ -1563,6 +1571,50 @@
       });
   }
 
+  function cancelBatchRun(button) {
+    const batch = batchWorkspaceState.activeBatch;
+    if (!batch) {
+      setResult("#workflow_result", { ok: false, error: "active_batch_required", message: "현재 선택된 배치를 찾을 수 없다." });
+      return;
+    }
+    const runId = String(button.attr("data-cancel-run-id") || "").trim();
+    if (!runId) {
+      setResult("#workflow_result", { ok: false, error: "workflow_run_not_found", message: "취소할 작업을 찾을 수 없다." });
+      return;
+    }
+    const originalLabel = button.text();
+    clearResultActions("#workflow_result_actions");
+    button.prop("disabled", true).text("취소 중...");
+    $.ajax({
+      url: `/api/workflow/batch/${encodeURIComponent(batch.batch_id)}/runs/${encodeURIComponent(runId)}/cancel`,
+      method: "POST",
+      contentType: "application/json",
+      data: JSON.stringify({}),
+    })
+      .done((data) => {
+        setResult("#workflow_result", data);
+        loadWorkflowLogs();
+        if (!data.batch) {
+          loadRecentBatches("", true);
+          return;
+        }
+        if (!isCurrentBatch(data.batch)) {
+          stopBatchPolling();
+          clearActiveBatchView();
+          loadRecentBatches("", true);
+          return;
+        }
+        renderActiveBatch(data.batch, { preserveSelection: true });
+        if (currentBatchShouldPoll(data.batch) || data.status === "cancel_requested") {
+          scheduleBatchPoll(data.batch.batch_id);
+        }
+      })
+      .fail((xhr) => {
+        button.prop("disabled", false).text(originalLabel);
+        setResult("#workflow_result", xhr.responseJSON || { ok: false, error: xhr.responseText });
+      });
+  }
+
   function runBatchAutomation(button) {
     const payload = workflowCommonPayload();
     if (!payload.issues.length) {
@@ -1678,6 +1730,11 @@
       }
       setActiveRun(batch.batch_id, runId);
       renderActiveBatch(batch, { preserveSelection: true });
+    });
+
+    $(document).on("click", "[data-cancel-run-id]", function (event) {
+      event.stopPropagation();
+      cancelBatchRun($(this));
     });
 
     $(document).on("click", "[data-action-center-run-id]", function () {

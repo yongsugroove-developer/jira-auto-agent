@@ -213,8 +213,9 @@ def test_index_page_renders_automation_fields() -> None:
     assert 'id="batch_run_sync_status_card"' in html
     assert 'id="submit_batch_run_answers"' in html
     assert 'src="/static/batch-workspace.js"' in html
-    assert 'id="work_status_hint"' in html
+    assert 'id="work_status_hint"' not in html
     assert "현재 진행 중인 작업이 없습니다." in html
+    assert "진행 중 작업과 작업 로그를 한 영역에서 전환해 확인한다." not in html
     assert "예) 승인 버튼 클릭 시 /api/approve를 호출하고, 기존 테이블 구조와 DOM id는 유지한다." in html
     assert "예) 승인 버튼 클릭 시 API가 1회 호출된다." in html
     assert 'class="repo-mapping-empty-state"' in html
@@ -563,6 +564,14 @@ def test_batch_workspace_script_limits_work_status_to_active_runs() -> None:
     assert '$("#toggle_failed_runs")' not in batch_script
 
 
+def test_batch_workspace_script_supports_run_cancel_actions() -> None:
+    batch_script = Path("app/static/batch-workspace.js").read_text(encoding="utf-8")
+
+    assert 'data-cancel-run-id' in batch_script
+    assert '/runs/${encodeURIComponent(runId)}/cancel' in batch_script
+    assert "작업 취소" in batch_script
+
+
 def test_mock_jira_issue_detail_returns_description_and_comments() -> None:
     app = create_app()
     client = app.test_client()
@@ -752,6 +761,70 @@ def test_build_codex_prompt_uses_resolved_space_key_for_project_memory(monkeypat
 
     assert captured["space_key"] == "DEMO"
     assert "space scoped memory" in prompt
+
+
+def test_build_codex_prompt_includes_likely_relevant_files(monkeypatch) -> None:
+    monkeypatch.setattr(main_module, "_safe_build_project_memory_block", lambda repo_path, max_history=5, space_key="": "cached project memory")
+    monkeypatch.setattr(
+        main_module,
+        "_safe_build_file_map_prompt_context",
+        lambda repo_path, payload, space_key="": {
+            "file_map_block": "Likely relevant files:\n- app/main.py\n  backend workflow file. Related: tests/test_app.py.",
+            "file_map_candidates_count": 2,
+            "file_map_selected_paths": ["app/main.py"],
+        },
+    )
+
+    prompt = main_module._build_codex_prompt(
+        {
+            "issue_key": "DEMO-14",
+            "issue_summary": "file map prompt",
+            "branch_name": "feature/DEMO-14-file-map",
+            "commit_message": "DEMO-14: file map prompt",
+            "work_instruction": "관련 파일부터 본다.",
+            "resolved_space_key": "DEMO",
+        },
+        main_module.BASE_DIR,
+    )
+
+    assert "Likely relevant files:" in prompt
+    assert "- app/main.py" in prompt
+    assert "Start with the likely relevant files below before doing broad repository search." in prompt
+    assert "Expand to wider repo search only if these hints are insufficient." in prompt
+
+
+def test_build_codex_clarification_prompt_does_not_include_likely_relevant_files(monkeypatch) -> None:
+    monkeypatch.setattr(main_module, "_safe_build_project_memory_block", lambda repo_path, max_history=5, space_key="": "cached project memory")
+
+    prompt = main_module._build_codex_clarification_prompt(
+        {
+            "issue_key": "DEMO-15",
+            "issue_summary": "clarification prompt",
+            "branch_name": "feature/DEMO-15-clarification",
+            "commit_message": "DEMO-15: clarification prompt",
+            "work_instruction": "clarification only",
+        },
+        main_module.BASE_DIR,
+    )
+
+    assert "Likely relevant files:" not in prompt
+
+
+def test_build_agent_plan_review_prompt_does_not_include_likely_relevant_files(monkeypatch) -> None:
+    monkeypatch.setattr(main_module, "_safe_build_project_memory_block", lambda repo_path, max_history=5, space_key="": "cached project memory")
+
+    prompt = main_module._build_agent_plan_review_prompt(
+        {
+            "issue_key": "DEMO-16",
+            "issue_summary": "plan review prompt",
+            "branch_name": "feature/DEMO-16-plan",
+            "commit_message": "DEMO-16: plan review prompt",
+            "work_instruction": "plan review only",
+        },
+        main_module.BASE_DIR,
+    )
+
+    assert "Likely relevant files:" not in prompt
 
 
 def test_jira_comment_browser_url_points_to_issue_comment() -> None:
@@ -2936,6 +3009,274 @@ def test_cancel_workflow_batch_run_plan_updates_persisted_run_after_app_recreati
     assert final_batch["runs"][0]["status"] == "cancelled"
     assert final_batch["runs"][0]["plan_review_status"] == "cancelled"
     assert final_batch["status"] == "cancelled"
+
+
+def test_cancel_workflow_batch_run_from_needs_input(monkeypatch, tmp_path) -> None:
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+    (repo_path / ".git").mkdir()
+    _isolate_workflow_storage(monkeypatch, tmp_path)
+    monkeypatch.setattr(main_module, "_safe_ensure_project_memory", lambda repo_path, space_key="": None)
+    monkeypatch.setattr(main_module, "_safe_record_project_history", lambda repo_path, workflow_run, space_key="": None)
+
+    def fake_load(self, provider: str):  # noqa: ANN001
+        if provider == "github":
+            return _github_mapping_payload(_repo_mapping_line("DEMO", repo_path))
+        if provider == "jira":
+            return {
+                "base_url": "https://example.atlassian.net",
+                "email": "tester@example.com",
+                "api_token": "token",
+                "jql": "project = DEMO",
+            }
+        return None
+
+    def fake_run_codex_clarification(repo_path, payload):  # noqa: ANN001
+        return {
+            "needs_input": True,
+            "analysis_summary": "추가 질문이 필요합니다.",
+            "requested_information": [
+                {
+                    "field": "layout_scope",
+                    "label": "레이아웃 범위",
+                    "message": "변경 범위를 알려 주세요.",
+                }
+            ],
+        }
+
+    monkeypatch.setattr(main_module.CredentialStore, "load", fake_load)
+    monkeypatch.setattr(main_module, "_find_codex_launcher", lambda: ["codex"])
+    monkeypatch.setattr(main_module, "_run_codex_clarification", fake_run_codex_clarification)
+
+    app = create_app()
+    client = app.test_client()
+    response = client.post(
+        "/api/workflow/batch/run",
+        json={
+            "issues": [{"issue_key": "DEMO-20", "issue_summary": "cancel needs input"}],
+            "work_instruction": "질문 단계에서 취소한다.",
+            "allow_auto_commit": False,
+        },
+    )
+
+    assert response.status_code == 202
+    batch_id = response.get_json()["batch_id"]
+    batch_data = client.get(f"/api/workflow/batch/{batch_id}").get_json()
+    run_id = batch_data["runs"][0]["run_id"]
+    assert batch_data["runs"][0]["status"] == "needs_input"
+
+    cancel_response = client.post(f"/api/workflow/batch/{batch_id}/runs/{run_id}/cancel", json={})
+
+    assert cancel_response.status_code == 200
+    cancel_payload = cancel_response.get_json()
+    assert cancel_payload is not None
+    assert cancel_payload["status"] == "cancelled"
+    assert cancel_payload["run"]["status"] == "cancelled"
+    assert cancel_payload["run"]["clarification_status"] == "cancelled"
+    assert cancel_payload["batch"]["status"] == "cancelled"
+
+
+def test_cancel_workflow_batch_run_while_running(monkeypatch, tmp_path) -> None:
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+    (repo_path / ".git").mkdir()
+    _isolate_workflow_storage(monkeypatch, tmp_path)
+    monkeypatch.setattr(main_module, "_safe_ensure_project_memory", lambda repo_path, space_key="": None)
+    monkeypatch.setattr(main_module, "_safe_record_project_history", lambda repo_path, workflow_run, space_key="": None)
+    monkeypatch.setattr(main_module, "_safe_record_project_file_map", lambda repo_path, workflow_run, space_key="": {})
+
+    started = threading.Event()
+
+    def fake_load(self, provider: str):  # noqa: ANN001
+        if provider == "github":
+            return _github_mapping_payload(_repo_mapping_line("DEMO", repo_path))
+        if provider == "jira":
+            return {
+                "base_url": "https://example.atlassian.net",
+                "email": "tester@example.com",
+                "api_token": "token",
+                "jql": "project = DEMO",
+            }
+        return None
+
+    def fake_run_codex_clarification(repo_path, payload):  # noqa: ANN001
+        return {"needs_input": False, "analysis_summary": "ready", "requested_information": []}
+
+    def fake_execute_agent_workflow(repo_path, scm_config, payload, reporter=None, cancel_event=None, process_tracker=None):  # noqa: ANN001
+        started.set()
+        deadline = time.time() + 3
+        while cancel_event is not None and not cancel_event.is_set():
+            if time.time() >= deadline:
+                pytest.fail("cancel_event가 설정되지 않았다.")
+            time.sleep(0.01)
+        return {
+            "ok": False,
+            "status": "cancelled",
+            "message": "사용자 요청으로 작업을 취소했다.",
+            "processed_files": [],
+            "diff": "",
+            "test_output": "",
+            "execution_log_tail": "",
+            "risks": [],
+            "syntax_checked_files": [],
+            "provider_metadata": {},
+        }
+
+    monkeypatch.setattr(main_module.CredentialStore, "load", fake_load)
+    monkeypatch.setattr(main_module, "_find_codex_launcher", lambda: ["codex"])
+    monkeypatch.setattr(main_module, "_run_codex_clarification", fake_run_codex_clarification)
+    monkeypatch.setattr(main_module, "_execute_agent_workflow", fake_execute_agent_workflow)
+
+    app = create_app()
+    client = app.test_client()
+    response = client.post(
+        "/api/workflow/batch/run",
+        json={
+            "issues": [{"issue_key": "DEMO-21", "issue_summary": "cancel running"}],
+            "work_instruction": "실행 중 취소를 확인한다.",
+            "allow_auto_commit": False,
+        },
+    )
+
+    assert response.status_code == 202
+    batch_id = response.get_json()["batch_id"]
+
+    deadline = time.time() + 3
+    batch_data = None
+    run = None
+    while time.time() < deadline:
+        batch_data = client.get(f"/api/workflow/batch/{batch_id}").get_json()
+        run = batch_data["runs"][0]
+        if run["status"] == "running" and started.is_set():
+            break
+        time.sleep(0.02)
+    assert run is not None
+    assert run["status"] == "running"
+    run_id = run["run_id"]
+
+    cancel_response = client.post(f"/api/workflow/batch/{batch_id}/runs/{run_id}/cancel", json={})
+
+    assert cancel_response.status_code == 200
+    cancel_payload = cancel_response.get_json()
+    assert cancel_payload is not None
+    assert cancel_payload["status"] in {"cancel_requested", "cancelled"}
+
+    deadline = time.time() + 3
+    final_batch = None
+    final_run = None
+    while time.time() < deadline:
+        final_batch = client.get(f"/api/workflow/batch/{batch_id}").get_json()
+        final_run = final_batch["runs"][0]
+        if final_run["status"] == "cancelled":
+            break
+        time.sleep(0.02)
+
+    assert final_run is not None
+    assert final_run["status"] == "cancelled"
+    assert final_batch["status"] == "cancelled"
+
+
+def test_completed_batch_run_records_project_file_map_metadata(monkeypatch, tmp_path) -> None:
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+    (repo_path / ".git").mkdir()
+    _isolate_workflow_storage(monkeypatch, tmp_path)
+
+    file_map_calls: list[tuple[str, str, str]] = []
+
+    def fake_load(self, provider: str):  # noqa: ANN001
+        if provider == "github":
+            return _github_mapping_payload(_repo_mapping_line("DEMO", repo_path))
+        if provider == "jira":
+            return {
+                "base_url": "https://example.atlassian.net",
+                "email": "tester@example.com",
+                "api_token": "token",
+                "jql": "project = DEMO",
+            }
+        return None
+
+    def fake_run_codex_clarification(repo_path, payload):  # noqa: ANN001
+        return {"needs_input": False, "analysis_summary": "ready", "requested_information": []}
+
+    def fake_execute(repo_path, github_config, payload, reporter=None):  # noqa: ANN001
+        return {
+            "ok": True,
+            "status": "ready_for_manual_commit",
+            "message": "완료",
+            "requested_model": "",
+            "requested_reasoning_effort": "",
+            "resolved_model": "gpt-5.4",
+            "resolved_reasoning_effort": "medium",
+            "codex_default_model": "gpt-5.4",
+            "codex_default_reasoning_effort": "medium",
+            "model_intent": "record file map",
+            "implementation_summary": "record file map",
+            "validation_summary": "ok",
+            "processed_files": ["app/main.py"],
+            "diff": "diff --git a/app/main.py b/app/main.py",
+            "test_output": "",
+            "execution_log_tail": "completed",
+            "risks": [],
+            "syntax_check_output": "ok",
+            "syntax_checked_files": ["app/main.py"],
+            "provider_metadata": {},
+        }
+
+    def fake_record_file_map(repo_path, workflow_run, space_key=""):  # noqa: ANN001
+        file_map_calls.append((str(repo_path), str(workflow_run.get("run_id", "")), space_key))
+        return {
+            "file_map_observed_count": 2,
+            "file_map_updated_count": 1,
+        }
+
+    class ImmediateThread:
+        def __init__(self, target=None, name=None, daemon=None, args=(), kwargs=None, **extra):  # noqa: ANN001
+            self._target = target
+            self._args = args
+            self._kwargs = kwargs or {}
+
+        def start(self) -> None:
+            if self._target is not None:
+                self._target(*self._args, **self._kwargs)
+
+        def join(self, timeout=None) -> None:  # noqa: ANN001
+            return None
+
+        def is_alive(self) -> bool:
+            return False
+
+    monkeypatch.setattr(main_module.CredentialStore, "load", fake_load)
+    monkeypatch.setattr(main_module, "_find_codex_launcher", lambda: ["codex"])
+    monkeypatch.setattr(main_module, "_safe_ensure_project_memory", lambda repo_path, space_key="": None)
+    monkeypatch.setattr(main_module, "_safe_record_project_history", lambda repo_path, workflow_run, space_key="": None)
+    monkeypatch.setattr(main_module, "_safe_record_project_file_map", fake_record_file_map)
+    monkeypatch.setattr(main_module, "_resolve_commit_identity", lambda repo_path, payload: ({"name": "Codex Bot", "email": "codex@example.com"}, []))
+    monkeypatch.setattr(main_module, "_run_codex_clarification", fake_run_codex_clarification)
+    monkeypatch.setattr(main_module, "_execute_coding_workflow", fake_execute)
+    monkeypatch.setattr(main_module.threading, "Thread", ImmediateThread)
+
+    app = create_app()
+    client = app.test_client()
+    response = client.post(
+        "/api/workflow/batch/run",
+        json={
+            "issues": [{"issue_key": "DEMO-51", "issue_summary": "record file map"}],
+            "work_instruction": "record file map",
+            "allow_auto_commit": False,
+        },
+    )
+
+    assert response.status_code == 202
+    batch_id = response.get_json()["batch_id"]
+    batch_data = client.get(f"/api/workflow/batch/{batch_id}").get_json()
+    run = batch_data["runs"][0]
+
+    assert file_map_calls
+    assert run["result"]["file_map_observed_count"] == 2
+    assert run["result"]["file_map_updated_count"] == 1
+    assert run["result"]["provider_metadata"]["file_map_observed_count"] == 2
+    assert run["result"]["provider_metadata"]["file_map_updated_count"] == 1
 
 
 def test_workflow_batch_persists_across_app_recreation(monkeypatch, tmp_path) -> None:

@@ -224,3 +224,142 @@ def test_project_memory_is_scoped_by_space_key(tmp_path) -> None:
     assert "Jira space key: OPS" in ops_block
     assert "OPS-1" in ops_block
     assert "DEMO-1" not in ops_block
+
+
+def test_record_project_file_map_creates_snapshot_from_processed_and_command_paths(tmp_path) -> None:
+    repo_path = tmp_path / "repo"
+    app_data_dir = tmp_path / "app-data"
+    _init_repo(repo_path)
+    (repo_path / "app" / "static").mkdir(parents=True, exist_ok=True)
+    (repo_path / "app" / "templates").mkdir(parents=True, exist_ok=True)
+    (repo_path / "app" / "static" / "app.js").write_text("function renderBacklog() {}\n", encoding="utf-8")
+    (repo_path / "app" / "templates" / "index.html").write_text('<section id="jira-backlog"></section>\n', encoding="utf-8")
+
+    snapshot = project_memory.ensure_project_memory(repo_path, app_data_dir=app_data_dir, space_key="DEMO")
+    result = project_memory.record_project_file_map(
+        repo_path,
+        {
+            "run_id": "run-map-1",
+            "agent_provider": "codex",
+            "issue_key": "DEMO-31",
+            "finished_at": "2026-04-08T01:00:00+00:00",
+            "events": [
+                {"phase": "codex_command", "message": "명령 실행: Get-Content -Path app/static/app.js -TotalCount 20"},
+            ],
+            "result": {
+                "processed_files": ["app/main.py"],
+                "syntax_checked_files": ["app/main.py"],
+                "diff": "diff --git a/app/templates/index.html b/app/templates/index.html\n--- a/app/templates/index.html\n+++ b/app/templates/index.html\n",
+            },
+        },
+        app_data_dir=app_data_dir,
+        space_key="DEMO",
+    )
+
+    entries = project_memory._load_file_map_entries(app_data_dir / "project-memory" / snapshot.repo_key / "file-map.snapshot.json")
+    entries_by_path = {entry.path: entry for entry in entries}
+
+    assert result["file_map_observed_count"] == 3
+    assert "app/main.py" in entries_by_path
+    assert "app/static/app.js" in entries_by_path
+    assert "app/templates/index.html" in entries_by_path
+    assert entries_by_path["app/main.py"].source_counts["processed"] >= 1
+    assert entries_by_path["app/main.py"].source_counts["syntax_checked"] >= 1
+    assert entries_by_path["app/static/app.js"].source_counts["command_observed"] >= 1
+    assert entries_by_path["app/main.py"].last_issue_keys[0] == "DEMO-31"
+
+
+def test_build_file_map_prompt_context_prefers_relevant_files_and_skips_deleted_paths(tmp_path) -> None:
+    repo_path = tmp_path / "repo"
+    app_data_dir = tmp_path / "app-data"
+    _init_repo(repo_path)
+    (repo_path / "app" / "static").mkdir(parents=True, exist_ok=True)
+    (repo_path / "app" / "templates").mkdir(parents=True, exist_ok=True)
+    (repo_path / "app" / "static" / "app.js").write_text(
+        "const jiraBacklogRoot = '#jira-backlog';\nfunction renderBacklog(){ return jiraBacklogRoot; }\n",
+        encoding="utf-8",
+    )
+    (repo_path / "app" / "templates" / "index.html").write_text(
+        "<section id=\"jira-backlog\"><h2>Jira Backlog</h2></section>\n",
+        encoding="utf-8",
+    )
+
+    project_memory.ensure_project_memory(repo_path, app_data_dir=app_data_dir, space_key="DEMO")
+    project_memory.record_project_history(
+        repo_path,
+        {
+            "run_id": "run-history-1",
+            "issue_key": "DEMO-41",
+            "status": "completed",
+            "finished_at": "2026-04-08T01:10:00+00:00",
+            "message": "done",
+            "result": {
+                "issue_key": "DEMO-41",
+                "status": "committed",
+                "message": "Committed",
+                "model_intent": "Update backlog UI",
+                "implementation_summary": "Touched app/static/app.js and app/templates/index.html",
+                "validation_summary": "ok",
+                "risks": [],
+            },
+            "error": None,
+        },
+        app_data_dir=app_data_dir,
+        space_key="DEMO",
+    )
+    project_memory.record_project_file_map(
+        repo_path,
+        {
+            "run_id": "run-map-2",
+            "agent_provider": "codex",
+            "issue_key": "DEMO-41",
+            "finished_at": "2026-04-08T01:10:00+00:00",
+            "events": [],
+            "result": {
+                "processed_files": ["app/static/app.js", "app/templates/index.html"],
+                "syntax_checked_files": ["app/static/app.js"],
+                "diff": "",
+            },
+        },
+        app_data_dir=app_data_dir,
+        space_key="DEMO",
+    )
+
+    (repo_path / "app" / "templates" / "index.html").unlink()
+    project_memory.record_project_file_map(
+        repo_path,
+        {
+            "run_id": "run-map-3",
+            "agent_provider": "codex",
+            "issue_key": "DEMO-42",
+            "finished_at": "2026-04-08T01:20:00+00:00",
+            "events": [],
+            "result": {
+                "processed_files": ["app/main.py"],
+                "syntax_checked_files": ["app/main.py"],
+                "diff": "",
+            },
+        },
+        app_data_dir=app_data_dir,
+        space_key="DEMO",
+    )
+
+    context = project_memory.build_file_map_prompt_context(
+        repo_path,
+        {
+            "issue_key": "DEMO-43",
+            "issue_summary": "Jira backlog dropdown UI update",
+            "issue_description": "app.js 기반 backlog dropdown과 Jira 목록 UI를 조정한다.",
+            "work_instruction": "frontend backlog ui update",
+            "acceptance_criteria": "Jira backlog dropdown behaves correctly",
+            "clarification_answers": {"ui_scope": "backlog dropdown"},
+        },
+        app_data_dir=app_data_dir,
+        space_key="DEMO",
+    )
+
+    assert context["file_map_candidates_count"] >= 1
+    assert "Likely relevant files:" in context["file_map_block"]
+    assert "app/static/app.js" in context["file_map_block"]
+    assert "app/templates/index.html" not in context["file_map_selected_paths"]
+    assert len(context["file_map_block"]) <= project_memory.MAX_FILE_MAP_BLOCK_CHARS
