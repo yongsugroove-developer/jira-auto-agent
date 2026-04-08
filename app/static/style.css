@@ -465,6 +465,10 @@ table {
   color: var(--muted);
 }
 
+.grid-note.is-error {
+  color: #a33a2b;
+}
+
 .jira-backlog-shell {
   margin-top: 12px;
   display: grid;

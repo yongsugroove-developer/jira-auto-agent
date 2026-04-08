@@ -1151,7 +1151,8 @@ function setSavedSecretState(selector, hasSaved, savedPlaceholder, defaultPlaceh
 
 function uniqueTrimmedValues(values) {
   const seen = new Set();
-  return (values || [])
+  const source = Array.isArray(values) ? values : [];
+  return source
     .map((value) => String(value || "").trim())
     .filter((value) => {
       if (!value || seen.has(value)) {
@@ -4638,6 +4639,44 @@ requestWorkflowClarification = function (button, payload) {
       button.prop("disabled", false).text(agentRunButtonLabel());
     });
 };
+
+$(document).ready(function () {
+  applyJiraJqlConfig({
+    jira_jql_mode: "builder",
+    jira_jql_builder: defaultJiraJqlBuilder(),
+  });
+  setJiraOptionSyncStatus("프로젝트와 담당자 목록은 Jira 옵션 동기화로 불러온다. 여러 값은 Ctrl 또는 Shift로 함께 선택한다.", false);
+
+  $("#sync_jira_filter_options").off("click").on("click", function () {
+    syncJiraFilterOptions({ button: $(this) });
+  });
+
+  $("#jira_jql_advanced_toggle").off("change").on("change", function () {
+    setJiraJqlMode($(this).is(":checked") ? "manual" : "builder");
+    updateConfigFlowState();
+  });
+
+  $("#jira_jql_projects, #jira_jql_assignees, #jira_jql_statuses, #jira_jql_sort_direction")
+    .off("change")
+    .on("change", function () {
+      syncJiraJqlField();
+      updateConfigFlowState();
+    });
+
+  $("#jira_jql_manual")
+    .off("input change")
+    .on("input change", function () {
+      syncJiraJqlField();
+      updateConfigFlowState();
+    });
+
+  $("#jira_base_url, #jira_email, #jira_api_token")
+    .off("input.jiraJql change.jiraJql")
+    .on("input.jiraJql change.jiraJql", function () {
+      markJiraOptionSyncStale();
+      syncJiraJqlField();
+    });
+});
 
 $(document).ready(function () {
   $("#save_config").off("click").on("click", function () {

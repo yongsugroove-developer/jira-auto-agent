@@ -168,6 +168,15 @@ def test_index_page_renders_automation_fields() -> None:
     assert 'id="browse_mapping_local_repo_path"' in html
     assert 'id="repo_mapping_settings_panel"' in html
     assert 'id="repo_mapping_settings_summary"' in html
+    assert 'id="jira_jql" type="hidden"' in html
+    assert 'id="jira_jql_builder_panel"' in html
+    assert 'id="sync_jira_filter_options"' in html
+    assert 'id="jira_jql_advanced_toggle"' in html
+    assert 'id="jira_jql_projects"' in html
+    assert 'id="jira_jql_assignees"' in html
+    assert 'id="jira_jql_statuses"' in html
+    assert 'id="jira_jql_sort_direction"' in html
+    assert 'id="jira_jql_manual"' in html
     assert 'id="config_result"' not in html
     assert 'id="config_result_actions"' not in html
     assert 'id="test_command" type="hidden"' in html
@@ -1508,6 +1517,164 @@ def test_save_config_stores_space_tokens_separately_and_hides_them(monkeypatch, 
     assert load_data["gitlab_base_url"] == ""
     assert load_data["repo_mapping_token_spaces"] == ["DEMO"]
     assert "repo_mapping_tokens" not in load_data
+
+
+def test_save_config_stores_jql_builder_state(monkeypatch, tmp_path) -> None:
+    db_path = tmp_path / "app.db"
+    monkeypatch.setattr(main_module, "DB_PATH", db_path)
+    monkeypatch.setattr(main_module, "DATA_DIR", tmp_path)
+    monkeypatch.setenv("APP_ENC_KEY", main_module.Fernet.generate_key().decode("utf-8"))
+
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+
+    app = create_app()
+    client = app.test_client()
+
+    response = client.post(
+        "/api/config/save",
+        json={
+            "jira_base_url": "https://example.atlassian.net",
+            "jira_email": "tester@example.com",
+            "jira_api_token": "jira-token",
+            "jira_jql": "",
+            "jira_jql_mode": "builder",
+            "jira_jql_manual": "",
+            "jira_jql_builder": {
+                "project_keys": ["DEMO", "OPS"],
+                "assignee_account_ids": ["account-1"],
+                "status_names": ["Backlog", "Done"],
+                "sort_direction": "ASC",
+            },
+            "repo_mappings": f"DEMO|team|demo-repo|main|{repo_path}",
+            "repo_mapping_tokens": {"DEMO": "space-token"},
+        },
+    )
+
+    assert response.status_code == 200
+
+    store = main_module.CredentialStore(db_path, main_module._load_encryption_key())
+    jira_payload = store.load("jira")
+    assert jira_payload is not None
+    assert jira_payload["jql"] == (
+        'project in ("DEMO", "OPS") AND assignee in ("account-1") AND status in ("Backlog", "Done") ORDER BY updated ASC'
+    )
+    assert jira_payload["jql_mode"] == "builder"
+    assert jira_payload["jql_manual"] == ""
+    assert jira_payload["jql_builder"] == {
+        "project_keys": ["DEMO", "OPS"],
+        "assignee_account_ids": ["account-1"],
+        "status_names": ["Backlog", "Done"],
+        "sort_direction": "ASC",
+    }
+
+    load_response = client.get("/api/config")
+    assert load_response.status_code == 200
+    load_data = load_response.get_json()
+    assert load_data is not None
+    assert load_data["jira_jql_mode"] == "builder"
+    assert load_data["jira_jql_manual"] == ""
+    assert load_data["jira_jql_builder"] == jira_payload["jql_builder"]
+
+
+def test_get_config_treats_legacy_saved_jql_as_manual_mode(monkeypatch, tmp_path) -> None:
+    db_path = tmp_path / "app.db"
+    monkeypatch.setattr(main_module, "DB_PATH", db_path)
+    monkeypatch.setattr(main_module, "DATA_DIR", tmp_path)
+    monkeypatch.setenv("APP_ENC_KEY", main_module.Fernet.generate_key().decode("utf-8"))
+
+    store = main_module.CredentialStore(db_path, main_module._load_encryption_key())
+    store.save(
+        "jira",
+        {
+            "base_url": "https://example.atlassian.net",
+            "email": "tester@example.com",
+            "api_token": "jira-token",
+            "jql": "project = DEMO ORDER BY updated DESC",
+        },
+    )
+
+    app = create_app()
+    client = app.test_client()
+    response = client.get("/api/config")
+
+    assert response.status_code == 200
+    data = response.get_json()
+    assert data is not None
+    assert data["jira_jql_mode"] == "manual"
+    assert data["jira_jql_manual"] == "project = DEMO ORDER BY updated DESC"
+    assert data["jira_jql_builder"] == {
+        "project_keys": [],
+        "assignee_account_ids": [],
+        "status_names": [],
+        "sort_direction": "DESC",
+    }
+
+
+def test_jira_options_returns_projects_and_assignees(monkeypatch) -> None:
+    class FakeResponse:
+        def __init__(self, payload: object) -> None:
+            self.status_code = 200
+            self.text = ""
+            self._payload = payload
+
+        def json(self) -> object:
+            return self._payload
+
+    def fake_request(method: str, url: str, **kwargs):  # noqa: ANN001
+        assert method == "GET"
+        if url.endswith("/rest/api/3/project/search"):
+            return FakeResponse(
+                {
+                    "values": [
+                        {"key": "DEMO", "name": "Demo Project"},
+                        {"key": "OPS", "name": "Ops Project"},
+                    ],
+                    "isLast": True,
+                }
+            )
+        if url.endswith("/rest/api/3/users/search"):
+            return FakeResponse(
+                [
+                    {
+                        "accountId": "account-1",
+                        "displayName": "Tester",
+                        "emailAddress": "tester@example.com",
+                        "active": True,
+                    },
+                    {
+                        "accountId": "inactive-account",
+                        "displayName": "Inactive",
+                        "active": False,
+                    },
+                ]
+            )
+        raise AssertionError(f"unexpected url: {url}")
+
+    monkeypatch.setattr(main_module, "_request_with_logging", fake_request)
+
+    app = create_app()
+    client = app.test_client()
+    response = client.post(
+        "/api/jira/options",
+        json={
+            "jira_base_url": "https://example.atlassian.net",
+            "jira_email": "tester@example.com",
+            "jira_api_token": "jira-token",
+        },
+    )
+
+    assert response.status_code == 200
+    data = response.get_json()
+    assert data is not None
+    assert data["ok"] is True
+    assert data["projects"] == [
+        {"value": "DEMO", "label": "DEMO - Demo Project"},
+        {"value": "OPS", "label": "OPS - Ops Project"},
+    ]
+    assert data["assignees"] == [{"value": "account-1", "label": "Tester - tester@example.com"}]
+    assert [item["value"] for item in data["status_options"]] == ["Backlog", "To Do", "In Progress", "Done"]
+    assert [item["value"] for item in data["sort_options"]] == ["DESC", "ASC"]
 
 
 def test_jira_backlog_fetches_all_pages(monkeypatch) -> None:

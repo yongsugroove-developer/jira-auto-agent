@@ -3193,7 +3193,7 @@ def _fetch_jira_projects(config: JiraConfig) -> tuple[list[dict[str, str]], requ
             projects.append(
                 {
                     "value": key,
-                    "label": key if not name or name == key else f"{key} · {name}",
+                    "label": key if not name or name == key else f"{key} - {name}",
                 }
             )
             seen_keys.add(key)
@@ -3246,7 +3246,7 @@ def _fetch_jira_users(config: JiraConfig) -> tuple[list[dict[str, str]], request
                 continue
             label = display_name or email or account_id
             if email and email != label:
-                label = f"{label} · {email}"
+                label = f"{label} - {email}"
             users.append({"value": account_id, "label": label})
             seen_account_ids.add(account_id)
 
