@@ -51,6 +51,24 @@ const jiraState = {
   backlogItemsPerPage: 1,
 };
 
+const JIRA_STATUS_FILTER_OPTIONS = [
+  { value: "Backlog", label: "백로그" },
+  { value: "To Do", label: "할일" },
+  { value: "In Progress", label: "진행중" },
+  { value: "Done", label: "완료" },
+];
+
+const JIRA_SORT_DIRECTION_OPTIONS = [
+  { value: "DESC", label: "updated DESC" },
+  { value: "ASC", label: "updated ASC" },
+];
+
+const jiraConfigState = {
+  projectOptions: [],
+  assigneeOptions: [],
+  optionsLoaded: false,
+};
+
 const workflowState = {
   pollTimer: null,
   activeRunId: null,
@@ -1129,6 +1147,253 @@ function setSavedSecretState(selector, hasSaved, savedPlaceholder, defaultPlaceh
   const hasValue = Boolean(String(element.val() || "").trim());
   element.attr("data-has-saved-secret", hasSaved ? "true" : "false");
   element.attr("placeholder", hasSaved && !hasValue ? normalizedSaved : normalizedDefault);
+}
+
+function uniqueTrimmedValues(values) {
+  const seen = new Set();
+  return (values || [])
+    .map((value) => String(value || "").trim())
+    .filter((value) => {
+      if (!value || seen.has(value)) {
+        return false;
+      }
+      seen.add(value);
+      return true;
+    });
+}
+
+function normalizeJiraJqlMode(value) {
+  return String(value || "").trim().toLowerCase() === "manual" ? "manual" : "builder";
+}
+
+function normalizeJiraSortDirection(value) {
+  return String(value || "").trim().toUpperCase() === "ASC" ? "ASC" : "DESC";
+}
+
+function defaultJiraJqlBuilder() {
+  return {
+    project_keys: [],
+    assignee_account_ids: [],
+    status_names: [],
+    sort_direction: "DESC",
+  };
+}
+
+function normalizeJiraJqlBuilder(value) {
+  const payload = value && typeof value === "object" ? value : {};
+  const allowedStatuses = new Set(JIRA_STATUS_FILTER_OPTIONS.map((item) => item.value));
+  return {
+    project_keys: uniqueTrimmedValues(payload.project_keys).map((item) => item.toUpperCase()),
+    assignee_account_ids: uniqueTrimmedValues(payload.assignee_account_ids),
+    status_names: uniqueTrimmedValues(payload.status_names).filter((item) => allowedStatuses.has(item)),
+    sort_direction: normalizeJiraSortDirection(payload.sort_direction),
+  };
+}
+
+function currentJiraJqlMode() {
+  return $("#jira_jql_advanced_toggle").is(":checked") ? "manual" : "builder";
+}
+
+function quoteJqlLiteral(value) {
+  const escaped = String(value || "").trim()
+    .replaceAll("\\", "\\\\")
+    .replaceAll('"', '\\"');
+  return `"${escaped}"`;
+}
+
+function buildJiraJqlFromBuilder(builder) {
+  const normalized = normalizeJiraJqlBuilder(builder);
+  const clauses = [];
+  if (normalized.project_keys.length) {
+    clauses.push(`project in (${normalized.project_keys.map((item) => quoteJqlLiteral(item)).join(", ")})`);
+  }
+  if (normalized.assignee_account_ids.length) {
+    clauses.push(`assignee in (${normalized.assignee_account_ids.map((item) => quoteJqlLiteral(item)).join(", ")})`);
+  }
+  if (normalized.status_names.length) {
+    clauses.push(`status in (${normalized.status_names.map((item) => quoteJqlLiteral(item)).join(", ")})`);
+  }
+  const orderClause = `ORDER BY updated ${normalized.sort_direction}`;
+  return clauses.length ? `${clauses.join(" AND ")} ${orderClause}` : orderClause;
+}
+
+function collectJiraJqlBuilder() {
+  return normalizeJiraJqlBuilder({
+    project_keys: $("#jira_jql_projects").val() || [],
+    assignee_account_ids: $("#jira_jql_assignees").val() || [],
+    status_names: $("#jira_jql_statuses").val() || [],
+    sort_direction: $("#jira_jql_sort_direction").val() || "DESC",
+  });
+}
+
+function setJiraOptionSyncStatus(message, isError) {
+  const target = $("#jira_option_sync_status");
+  if (!target.length) {
+    return;
+  }
+  target.text(String(message || "").trim() || "프로젝트와 담당자 목록은 Jira 옵션 동기화로 불러온다.");
+  target.toggleClass("is-error", Boolean(isError));
+}
+
+function setSelectOptions(selector, options, selectedValues, emptyMessage) {
+  const element = $(selector);
+  if (!element.length) {
+    return;
+  }
+
+  const normalizedSelected = uniqueTrimmedValues(selectedValues);
+  const normalizedOptions = [];
+  const seenValues = new Set();
+
+  (options || []).forEach((item) => {
+    const value = String(item && item.value ? item.value : "").trim();
+    const label = String(item && item.label ? item.label : value).trim() || value;
+    if (!value || seenValues.has(value)) {
+      return;
+    }
+    normalizedOptions.push({ value, label });
+    seenValues.add(value);
+  });
+
+  normalizedSelected.forEach((value) => {
+    if (!seenValues.has(value)) {
+      normalizedOptions.push({ value, label: value });
+      seenValues.add(value);
+    }
+  });
+
+  if (!normalizedOptions.length) {
+    element.html(`<option value="" disabled>${escapeHtml(emptyMessage || "선택할 항목이 없다.")}</option>`);
+    element.val([]);
+    return;
+  }
+
+  element.html(
+    normalizedOptions
+      .map((item) => `<option value="${escapeHtml(item.value)}">${escapeHtml(item.label)}</option>`)
+      .join("")
+  );
+  element.val(normalizedSelected);
+}
+
+function renderJiraProjectOptions(selectedValues) {
+  setSelectOptions(
+    "#jira_jql_projects",
+    jiraConfigState.projectOptions,
+    selectedValues,
+    "Jira 옵션 동기화 후 프로젝트 목록을 표시한다."
+  );
+}
+
+function renderJiraAssigneeOptions(selectedValues) {
+  setSelectOptions(
+    "#jira_jql_assignees",
+    jiraConfigState.assigneeOptions,
+    selectedValues,
+    "Jira 옵션 동기화 후 담당자 목록을 표시한다."
+  );
+}
+
+function renderJiraStatusOptions(selectedValues) {
+  setSelectOptions("#jira_jql_statuses", JIRA_STATUS_FILTER_OPTIONS, selectedValues, "상태를 선택한다.");
+}
+
+function renderJiraSortOptions(selectedValue) {
+  setSelectOptions("#jira_jql_sort_direction", JIRA_SORT_DIRECTION_OPTIONS, [normalizeJiraSortDirection(selectedValue)], "");
+}
+
+function syncJiraJqlField() {
+  const mode = currentJiraJqlMode();
+  const manualText = readTextValue("#jira_jql_manual");
+  const builderJql = buildJiraJqlFromBuilder(collectJiraJqlBuilder());
+  const effectiveJql = mode === "manual" ? manualText : builderJql;
+  $("#jira_jql").val(effectiveJql);
+  $("#jira_jql_preview")
+    .text(effectiveJql || "JQL이 아직 없다.")
+    .toggleClass("is-empty", !effectiveJql);
+  return effectiveJql;
+}
+
+function setJiraJqlMode(mode) {
+  const normalizedMode = normalizeJiraJqlMode(mode);
+  const isManual = normalizedMode === "manual";
+  $("#jira_jql_advanced_toggle").prop("checked", isManual);
+  $("#jira_jql_builder_filters").prop("hidden", isManual);
+  $("#jira_jql_advanced_panel").prop("hidden", !isManual);
+  syncJiraJqlField();
+}
+
+function applyJiraJqlConfig(data) {
+  const builder = normalizeJiraJqlBuilder((data && data.jira_jql_builder) || defaultJiraJqlBuilder());
+  const mode = normalizeJiraJqlMode((data && data.jira_jql_mode) || (data && data.jira_jql ? "manual" : "builder"));
+  const manualText = String((data && data.jira_jql_manual) || (mode === "manual" ? data.jira_jql || "" : "") || "").trim();
+
+  renderJiraProjectOptions(builder.project_keys);
+  renderJiraAssigneeOptions(builder.assignee_account_ids);
+  renderJiraStatusOptions(builder.status_names);
+  renderJiraSortOptions(builder.sort_direction);
+  $("#jira_jql_manual").val(manualText);
+  $("#jira_jql").val(String((data && data.jira_jql) || "").trim());
+  setJiraJqlMode(mode);
+}
+
+function markJiraOptionSyncStale() {
+  jiraConfigState.optionsLoaded = false;
+  setJiraOptionSyncStatus("Jira 연결 정보가 바뀌면 옵션 동기화를 다시 실행한다.", false);
+}
+
+function completeJiraOptionSync(data) {
+  const currentBuilder = collectJiraJqlBuilder();
+  jiraConfigState.projectOptions = Array.isArray(data && data.projects) ? data.projects : [];
+  jiraConfigState.assigneeOptions = Array.isArray(data && data.assignees) ? data.assignees : [];
+  jiraConfigState.optionsLoaded = true;
+  renderJiraProjectOptions(currentBuilder.project_keys);
+  renderJiraAssigneeOptions(currentBuilder.assignee_account_ids);
+  renderJiraStatusOptions(currentBuilder.status_names);
+  renderJiraSortOptions(currentBuilder.sort_direction);
+  syncJiraJqlField();
+  setJiraOptionSyncStatus(
+    `프로젝트 ${jiraConfigState.projectOptions.length}개와 담당자 ${jiraConfigState.assigneeOptions.length}명을 Jira에서 불러왔다.`,
+    false
+  );
+}
+
+function syncJiraFilterOptions(options) {
+  const settings = options || {};
+  const payload = {
+    jira_base_url: readTextValue("#jira_base_url"),
+    jira_email: readTextValue("#jira_email"),
+    jira_api_token: readTextValue("#jira_api_token"),
+  };
+
+  const executeRequest = (done) => {
+    $.ajax({
+      url: "/api/jira/options",
+      method: "POST",
+      contentType: "application/json",
+      data: JSON.stringify(payload),
+    })
+      .done((data) => {
+        completeJiraOptionSync(data);
+        if (typeof done === "function") {
+          done();
+        }
+      })
+      .fail((xhr) => {
+        const data = xhr.responseJSON || { ok: false, error: xhr.responseText };
+        const message = data.message || "Jira 옵션 동기화에 실패했다.";
+        setJiraOptionSyncStatus(message, true);
+        if (typeof done === "function") {
+          done();
+        }
+      });
+  };
+
+  if (settings.button && settings.button.length) {
+    withButtonBusy(settings.button, executeRequest);
+    return;
+  }
+  executeRequest();
 }
 
 function syncModalBodyState() {
@@ -3620,17 +3885,26 @@ fillConfig = function (data) {
       el.val(data[key]);
     }
   });
+  applyJiraJqlConfig(data);
   setSavedSecretState("#jira_api_token", Boolean(data.jira_api_token_saved), "현재 저장한 토큰이 있다.", "Jira API Token");
   updateRepoMappingProviderUI();
   setGithubTokenHelp(savedTokenSpaces.size > 0);
   updateConfigFlowState();
   refreshBacklogLayout();
+  if (readTextValue("#jira_base_url") && readTextValue("#jira_email") && (readTextValue("#jira_api_token") || hasSavedSecret("#jira_api_token"))) {
+    syncJiraFilterOptions();
+  } else {
+    markJiraOptionSyncStale();
+  }
 };
 
 collectConfig = function () {
   syncRepoMappingsField();
   const repoMappingTokens = {};
   const repoMappingTokenClears = [];
+  const jiraJqlMode = currentJiraJqlMode();
+  const jiraJqlBuilder = collectJiraJqlBuilder();
+  const jiraJql = syncJiraJqlField();
   currentRepoMappings().forEach((item) => {
     const token = String(item.scm_token || item.github_token || "").trim();
     if (token) {
@@ -3645,7 +3919,10 @@ collectConfig = function () {
     jira_base_url: readTextValue("#jira_base_url"),
     jira_email: readTextValue("#jira_email"),
     jira_api_token: readTextValue("#jira_api_token"),
-    jira_jql: readTextValue("#jira_jql"),
+    jira_jql: jiraJql,
+    jira_jql_mode: jiraJqlMode,
+    jira_jql_manual: readTextValue("#jira_jql_manual"),
+    jira_jql_builder: jiraJqlBuilder,
     gitlab_base_url: readTextValue("#gitlab_base_url"),
     repo_mappings: readTextValue("#repo_mappings"),
     repo_mapping_tokens: repoMappingTokens,

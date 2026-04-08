@@ -60,7 +60,61 @@
                   <label>Jira Base URL<input id="jira_base_url" type="text" placeholder="https://your-domain.atlassian.net"></label>
                   <label>Jira Email<input id="jira_email" type="email" placeholder="user@example.com"></label>
                   <label>Jira API Token<input id="jira_api_token" type="password" placeholder="Jira API Token"></label>
-                  <label>JQL<input id="jira_jql" type="text" placeholder="assignee = currentUser() AND status in (Backlog, 'To Do')"></label>
+                  <input id="jira_jql" type="hidden">
+                  <section id="jira_jql_builder_panel" class="jira-jql-builder wide">
+                    <div class="jira-jql-builder__header">
+                      <div class="jira-jql-builder__copy">
+                        <strong>JQL 설정</strong>
+                        <p>프로젝트, 담당자, 상태, 정렬을 고르면 JQL을 자동으로 만든다.</p>
+                      </div>
+                      <div class="jira-jql-builder__actions">
+                        <button id="sync_jira_filter_options" type="button" class="ghost-button">Jira 옵션 동기화</button>
+                        <label class="jira-jql-builder__toggle">
+                          <input id="jira_jql_advanced_toggle" type="checkbox">
+                          <span>고급 JQL 직접 입력</span>
+                        </label>
+                      </div>
+                    </div>
+
+                    <div id="jira_jql_builder_filters" class="jira-jql-builder__filters">
+                      <label class="wide">
+                        프로젝트
+                        <select id="jira_jql_projects" multiple size="5"></select>
+                        <span class="grid-note">선택하지 않으면 전체 프로젝트를 조회한다.</span>
+                      </label>
+                      <label class="wide">
+                        담당자
+                        <select id="jira_jql_assignees" multiple size="5"></select>
+                        <span class="grid-note">권한이 있는 전체 사용자를 Jira에서 불러온다.</span>
+                      </label>
+                      <label>
+                        일감 상태
+                        <select id="jira_jql_statuses" multiple size="4"></select>
+                        <span class="grid-note">백로그, 할일, 진행중, 완료를 복수 선택할 수 있다.</span>
+                      </label>
+                      <label>
+                        정렬
+                        <select id="jira_jql_sort_direction"></select>
+                        <span class="grid-note">updated 기준으로 DESC 또는 ASC를 선택한다.</span>
+                      </label>
+                    </div>
+
+                    <div id="jira_jql_advanced_panel" class="jira-jql-builder__advanced" hidden>
+                      <label class="wide">
+                        고급 JQL
+                        <textarea id="jira_jql_manual" rows="5" placeholder="project in (DEMO) AND status in (Backlog, &quot;To Do&quot;) ORDER BY updated DESC"></textarea>
+                        <span class="grid-note">고급 모드를 켜면 드롭다운을 숨기고 원문 JQL을 그대로 사용한다.</span>
+                      </label>
+                    </div>
+
+                    <div class="jira-jql-builder__footer">
+                      <p id="jira_option_sync_status" class="grid-note">프로젝트와 담당자 목록은 Jira 옵션 동기화로 불러온다. 여러 값은 Ctrl 또는 Shift로 함께 선택한다.</p>
+                      <div class="jira-jql-builder__preview">
+                        <span class="jira-jql-builder__preview-label">현재 JQL</span>
+                        <code id="jira_jql_preview">ORDER BY updated DESC</code>
+                      </div>
+                    </div>
+                  </section>
                 </div>
               </div>
             </div>
