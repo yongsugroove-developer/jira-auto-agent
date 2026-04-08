@@ -1882,6 +1882,12 @@
     loadWorkflowLogs();
     loadRecentBatches("", true);
 
+    $(document).on("jira:backlog-rendered", function () {
+      syncPrimaryIssueFields();
+      renderSelectionSummary();
+      scheduleBatchPreview();
+    });
+
     $(document).on("change", "input[name='selected_issues']", function () {
       if (typeof jiraState !== "undefined") {
         jiraState.expandedIssueKey = String($(this).data("key") || "").trim();
