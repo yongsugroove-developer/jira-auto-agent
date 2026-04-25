@@ -47,46 +47,6 @@ def _isolate_workflow_storage(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -
     monkeypatch.setattr(main_module, "WORKFLOW_BATCHES_DIR", tmp_path / "workflow-batches")
 
 
-@pytest.mark.skip(reason="Replaced by v0.3.5 setup guide checks")
-@pytest.mark.skip(reason="Replaced by v0.3.5 setup guide checks")
-def test_setup_guide_contains_expected_sections_and_steps() -> None:
-    app = create_app()
-    client = app.test_client()
-
-    response = client.get("/api/setup-guide")
-    assert response.status_code == 200
-
-    data = response.get_json()
-    assert data is not None
-    assert data["version"] == 5
-
-    sections = data["sections"]
-    assert [section["id"] for section in sections] == ["jira", "github", "local_repo", "automation"]
-    sections_by_id = {section["id"]: section for section in sections}
-
-    step_ids = {step["id"] for section in sections for step in section["steps"]}
-    assert "jira-api-token" in step_ids
-    assert "github-base-branch" in step_ids
-    assert "local-repo-path" in step_ids
-    assert "automation-codex-model" in step_ids
-    assert "automation-plan-review" in step_ids
-    assert "automation-test-command" in step_ids
-    assert "automation-git-author" in step_ids
-
-    github_steps = {step["id"]: step for step in sections_by_id["github"]["steps"]}
-    assert "전역 기본 저장소" in sections_by_id["github"]["summary"]
-    assert github_steps["github-owner-repo"]["target_fields"] == ["mapping_repo_owner", "mapping_repo_name"]
-    assert github_steps["github-token"]["target_fields"] == ["mapping_github_token"]
-    assert github_steps["github-space-repo-mappings"]["target_fields"] == ["mapping_space_key", "mapping_local_repo_path"]
-
-    automation_steps = {step["id"]: step for step in sections_by_id["automation"]["steps"]}
-    assert automation_steps["automation-plan-review"]["target_fields"] == ["enable_plan_review"]
-    assert "Codex와 Claude Code" in automation_steps["automation-agent-provider"]["purpose"]
-    assert automation_steps["automation-agent-provider"]["target_fields"] == ["agent_provider"]
-    assert automation_steps["automation-claude-model"]["target_fields"] == ["claude_model", "claude_permission_mode"]
-    assert automation_steps["automation-plan-review"]["target_fields"] == ["enable_plan_review"]
-    assert "숨겨져 있지만" in automation_steps["automation-test-command"]["purpose"]
-    assert automation_steps["automation-test-command"]["target_fields"] == ["allow_auto_commit", "commit_checklist"]
 
 
 def test_validate_config_missing_fields_include_guide_metadata(monkeypatch, tmp_path) -> None:
@@ -504,62 +464,6 @@ def test_parse_claude_json_message_uses_structured_output() -> None:
     assert parsed == payload["structured_output"]
 
 
-@pytest.mark.skip(reason="Replaced by v0.3.5 packaging checks")
-def test_windows_packaging_scripts_exist_with_phase1_defaults() -> None:
-    bootstrap = Path("scripts/bootstrap-dev.ps1").read_text(encoding="utf-8")
-    check_env = Path("scripts/check-env.ps1").read_text(encoding="utf-8")
-    run_dev = Path("scripts/run-dev.ps1").read_text(encoding="utf-8")
-    freeze = Path("scripts/freeze-phase1.ps1").read_text(encoding="utf-8")
-
-    assert '$PinnedCodexVersion = "0.104.0"' in bootstrap
-    assert '@openai/codex@$PinnedCodexVersion' in bootstrap
-    assert 'CODEX_CLI_PATH' in check_env
-    assert 'CLAUDE_CLI_PATH' in check_env
-    assert 'claude doctor' in check_env
-    assert '@("--version")' in check_env
-    assert 'auth login' in check_env
-    assert 'Invoke-ExternalCommandWithTimeout' in check_env
-    assert 'Claude Code install' in bootstrap
-    assert 'CLAUDE_CLI_PATH' in run_dev
-    assert 'AGENTATION_ENABLED = "0"' in run_dev
-    assert 'phase-1-freeze' in freeze
-
-
-def test_jira_backlog_script_uses_inline_meta_without_click_helper_copy() -> None:
-    script = Path("app/static/app.js").read_text(encoding="utf-8")
-    batch_script = Path("app/static/batch-workspace.js").read_text(encoding="utf-8")
-
-    assert 'data-jira-issue-meta-inline' in script
-    assert 'data-jira-issue-meta-body' in script
-    assert 'issueAccordionCollapsed' in script
-    assert 'label class="jira-backlog-item__selector" aria-label="선택"' in script
-    assert 'label class="jira-backlog-item__selector" aria-label="선택"' in script
-    assert '<div class="jira-backlog-item__trigger"' in script
-    assert '<button type="button" class="jira-backlog-item__trigger"' not in script
-    assert '이슈를 선택하면 상세 설명을 표시한다.' in script
-    assert '최근 코멘트가 없습니다.' in script
-    assert '클릭하면 이슈 상세와 최근 코멘트를 펼친다.' not in script
-    assert 'data-jira-issue-meta></div>' not in script
-    assert 'checked: idx === 0' not in script
-    assert 'checked: index === 0' not in batch_script
-
-
-def test_jira_backlog_script_uses_inline_meta_without_click_helper_copy() -> None:
-    script = Path("app/static/app.js").read_text(encoding="utf-8")
-    batch_script = Path("app/static/batch-workspace.js").read_text(encoding="utf-8")
-
-    assert 'data-jira-issue-meta-inline' in script
-    assert 'issueAccordionCollapsed' in script
-    assert 'label class="jira-backlog-item__selector" aria-label="?좏깮"' in script
-    assert '<button type="button" class="jira-backlog-item__trigger"' not in script
-    assert '<div class="jira-backlog-item__trigger"' in script
-    assert 'data-jira-issue-modal-open' in script
-    assert 'renderIssueModal' in script
-    assert 'openIssueModal' in script
-    assert 'closeIssueModal' in script
-    assert 'checked: idx === 0' not in script
-    assert 'checked: index === 0' not in batch_script
-
 
 def test_jira_backlog_script_uses_inline_meta_without_click_helper_copy() -> None:
     script = Path("app/static/app.js").read_text(encoding="utf-8")
@@ -711,6 +615,30 @@ def test_prepare_workflow_branch_and_requested_information() -> None:
     assert "acceptEdits" in data["allowed_claude_permission_modes"]
     requested_fields = [item["field"] for item in data["requested_information"]]
     assert requested_fields == ["work_instruction", "commit_checklist"]
+
+
+def test_prepare_workflow_requires_issue_key_and_summary() -> None:
+    app = create_app()
+    client = app.test_client()
+
+    response = client.post("/api/workflow/prepare", json={})
+    assert response.status_code == 400
+
+    data = response.get_json()
+    assert data is not None
+    assert data == {"error": "issue_key_and_summary_required"}
+
+
+def test_preview_workflow_batch_requires_issues() -> None:
+    app = create_app()
+    client = app.test_client()
+
+    response = client.post("/api/workflow/batch/preview", json={})
+    assert response.status_code == 400
+
+    data = response.get_json()
+    assert data is not None
+    assert data == {"ok": False, "error": "batch_issues_required", "fields": ["issues"]}
 
 
 def test_run_workflow_missing_fields_include_automation_guide() -> None:
@@ -4546,42 +4474,3 @@ def test_batch_queue_runs_different_repo_paths_in_parallel(monkeypatch, tmp_path
     assert active["max"] >= 2
 
 
-@pytest.mark.skip(reason="Replaced by v0.3.5 setup guide checks")
-def test_setup_guide_contains_expected_sections_and_steps() -> None:
-    app = create_app()
-    client = app.test_client()
-
-    response = client.get("/api/setup-guide")
-    assert response.status_code == 200
-
-    data = response.get_json()
-    assert data is not None
-    assert data["version"] == 7
-
-    sections = data["sections"]
-    assert [section["id"] for section in sections] == ["jira", "github", "local_repo", "automation"]
-    sections_by_id = {section["id"]: section for section in sections}
-
-    step_ids = {step["id"] for section in sections for step in section["steps"]}
-    assert "jira-api-token" in step_ids
-    assert "github-base-branch" in step_ids
-    assert "gitlab-base-url" in step_ids
-    assert "local-repo-path" in step_ids
-    assert "automation-agent-provider" in step_ids
-    assert "automation-codex-model" in step_ids
-    assert "automation-claude-model" in step_ids
-    assert "automation-plan-review" in step_ids
-    assert "automation-test-command" in step_ids
-    assert "automation-git-author" in step_ids
-
-    github_steps = {step["id"]: step for step in sections_by_id["github"]["steps"]}
-    assert "전역 기본 저장소를 쓰지 않고" in sections_by_id["github"]["summary"]
-    assert github_steps["github-owner-repo"]["target_fields"] == ["mapping_provider", "mapping_repo_owner", "mapping_repo_name"]
-    assert github_steps["gitlab-base-url"]["target_fields"] == ["gitlab_base_url", "mapping_repo_ref"]
-    assert github_steps["github-token"]["target_fields"] == ["mapping_scm_token"]
-    assert github_steps["github-space-repo-mappings"]["target_fields"] == ["mapping_space_key", "mapping_local_repo_path"]
-
-    automation_steps = {step["id"]: step for step in sections_by_id["automation"]["steps"]}
-    assert "hidden input으로 유지" in automation_steps["automation-test-command"]["purpose"]
-    assert automation_steps["automation-test-command"]["target_fields"] == ["allow_auto_commit", "commit_checklist"]
-    assert automation_steps["automation-commit-mode"]["target_fields"] == ["allow_auto_commit", "allow_auto_push"]

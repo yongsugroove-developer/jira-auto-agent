@@ -4,6 +4,8 @@
 
 이 문서는 현재 `jira-auto-agent` 화면 기준으로 설정, 실행, 확인 절차를 정리한 운영 가이드다. 기준 버전은 `v0.3.5`다.
 
+이 문서에서 말하는 `Agentation 제외`는 독립 설치/배포 대상으로 별도 패키징하지 않는다는 뜻이다. 현재 개발용 `scripts/run-dev.ps1`는 저장소에 포함된 Agentation 패널 자산과 로컬 endpoint를 함께 켜는 통합 실행 경로를 사용한다.
+
 대상 사용자:
 
 - 로컬 PC에서 앱을 직접 실행하는 운영자
@@ -18,6 +20,12 @@
 - Claude Code를 쓸 경우 `claude auth status`, `claude doctor` 완료
 - 실제 작업 대상 저장소가 로컬 PC에 clone 되어 있음
 - Jira API Token과 공간 전용 SCM Token 준비 완료
+
+### 2.1 패키징 점검과 개발 실행의 차이
+
+- `check-env.ps1`는 패키징 직전 기준으로 현재 셸에서 `AGENTATION_ENABLED=0` 상태를 경고/점검한다.
+- `run-dev.ps1`는 실제 통합 UI 확인을 위해 `AGENTATION_ENABLED=1`, `AGENTATION_AUTOSTART=1`로 실행한다.
+- 따라서 `check-env.ps1` 결과와 `run-dev.ps1`의 런타임 환경값은 의도적으로 다를 수 있다.
 
 ## 3. 화면 구성
 

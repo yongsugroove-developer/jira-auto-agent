@@ -1,6 +1,7 @@
 __pycache__/
 *.pyc
 .venv/
+.pytest_cache/
 .pytest-tmp/
 frontend/node_modules/
 .tools/

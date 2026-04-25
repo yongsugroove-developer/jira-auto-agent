@@ -63,6 +63,7 @@ def test_packaging_scripts_reference_v035_defaults() -> None:
     check_env = Path("scripts/check-env.ps1").read_text(encoding="utf-8")
     run_dev = Path("scripts/run-dev.ps1").read_text(encoding="utf-8")
     freeze = Path("scripts/freeze-phase1.ps1").read_text(encoding="utf-8")
+    gitignore = Path(".gitignore").read_text(encoding="utf-8")
 
     assert '$PinnedCodexVersion = "0.104.0"' in bootstrap
     assert "@openai/codex@$PinnedCodexVersion" in bootstrap
@@ -77,6 +78,11 @@ def test_packaging_scripts_reference_v035_defaults() -> None:
     assert 'AGENTATION_ENABLED = "1"' in run_dev
     assert 'TagName = "v0.3.5"' in freeze
     assert 'Name: v0.3.5' in freeze
+    assert '.pytest_cache/' in gitignore
+    assert '.pytest_cache' in freeze
+    assert '__pycache__/' in gitignore
+    assert '__pycache__' in freeze
+    assert 'docs\\operator-guide.md' in freeze
 
 
 def test_readme_mentions_v035_and_agent_provider_scope() -> None:

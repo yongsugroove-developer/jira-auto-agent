@@ -12,6 +12,7 @@ $VenvPython = Join-Path $RepoRoot ".venv\Scripts\python.exe"
 $GitCmd = (Get-Command git.exe -ErrorAction Stop).Source
 $RequiredFiles = @(
     (Join-Path $RepoRoot "README.md"),
+    (Join-Path $RepoRoot "docs\operator-guide.md"),
     (Join-Path $RepoRoot "docs\phase-1-freeze.md"),
     (Join-Path $RepoRoot "scripts\bootstrap-dev.ps1"),
     (Join-Path $RepoRoot "scripts\check-env.ps1"),
@@ -30,7 +31,7 @@ foreach ($requiredFile in $RequiredFiles) {
 }
 
 Write-Step "Checking tracked runtime files"
-$trackedRuntime = @(& $GitCmd ls-files data/workflow-batches data/workflow-runs data/project-memory data/.enc_key data/app.db .tools)
+$trackedRuntime = @(& $GitCmd ls-files data/workflow-batches data/workflow-runs data/project-memory data/.enc_key data/app.db .tools .pytest_cache __pycache__)
 $trackedRuntime = @($trackedRuntime | Where-Object { $_ -and $_.Trim() })
 if ($trackedRuntime.Count -gt 0) {
     throw "Runtime files are still tracked by git.`n$($trackedRuntime -join [Environment]::NewLine)"

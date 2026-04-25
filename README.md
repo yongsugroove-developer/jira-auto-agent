@@ -2,14 +2,14 @@
 
 Jira 백로그 이슈를 기준으로 로컬 Git 저장소 작업을 준비하고, Agent CLI 배치 실행 상태를 웹 UI에서 관리하는 Flask 기반 도구다.
 
-현재 기준 릴리스는 `v0.3.5`다. 이 버전은 `Codex`와 `Claude Code`를 같은 작업 흐름으로 다루며, `Agentation`은 패키징 범위에서 제외한다.
+현재 기준 릴리스는 `v0.3.5`다. 이 버전은 `Codex`와 `Claude Code`를 같은 작업 흐름으로 다루며, `Agentation`은 독립 설치/배포 대상으로 패키징하지 않는다. 대신 현재 개발용 `run-dev.ps1`는 저장소에 포함된 Agentation 패널 자산과 로컬 endpoint를 함께 켜 두는 통합 실행 흐름을 사용한다.
 
 ## 릴리스 기준
 
 - 현재 버전: `v0.3.5`
 - 기본 패키징 태그: `v0.3.5`
 - 대상 플랫폼: Windows PowerShell
-- 제외 범위: Agentation, Docker/devcontainer, 외부 서비스 자동 인증
+- 제외 범위: Agentation 독립 설치/배포 패키지, Docker/devcontainer, 외부 서비스 자동 인증
 
 ## 포함 기능
 
@@ -121,7 +121,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\check-env.ps1
 - Claude CLI 경로와 버전
 - Claude 인증 상태
 - `claude doctor`
-- `AGENTATION_ENABLED=0` 전제
+- 패키징 점검 직전 셸 기준 `AGENTATION_ENABLED=0` 상태
 - Git 작성자 정보
 
 ### 7. 앱 실행
@@ -136,10 +136,15 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\run-dev.ps1
 
 `run-dev.ps1`는 아래 값을 고정한다.
 
-- `AGENTATION_ENABLED=0`
-- `AGENTATION_AUTOSTART=0`
+- `AGENTATION_ENABLED=1`
+- `AGENTATION_AUTOSTART=1`
 - `CODEX_CLI_PATH=<repo-local codex.cmd>`
 - `CLAUDE_CLI_PATH=<이미 설정되어 있으면 그대로 사용>`
+
+의미:
+
+- 패키징 범위에서 Agentation을 독립 설치 대상으로 보지 않더라도, 현재 개발용 실행 스크립트는 저장소에 포함된 Agentation 패널과 로컬 endpoint를 함께 켜서 통합 UI 상태를 확인한다.
+- 반대로 `check-env.ps1`의 `AGENTATION_ENABLED=0` 점검은 “패키징 직전 셸이 별도 Agentation 강제 주입 없이 시작되는가”를 보는 기준이다.
 
 ## 환경 변수
 
@@ -339,4 +344,6 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\freeze-phase1.ps1
 
 - 운영 가이드: [docs/operator-guide.md](./docs/operator-guide.md)
 - 패키징 기준: [docs/phase-1-freeze.md](./docs/phase-1-freeze.md)
+- `app/main.py` 분리 설계안: [docs/main-py-modularization-plan.md](./docs/main-py-modularization-plan.md)
+- 런타임 산출물 정책: [docs/runtime-artifact-policy.md](./docs/runtime-artifact-policy.md)
 - 작업 메모: [docs/todo.md](./docs/todo.md)

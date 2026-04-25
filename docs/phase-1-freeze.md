@@ -26,7 +26,7 @@
 
 ## 3. 제외 범위
 
-- Agentation 설치와 실행
+- Agentation 독립 설치와 배포 패키징
 - Docker, devcontainer, WSL 전용 패키징
 - Jira, GitHub, GitLab, Claude 자동 인증
 - 실제 작업 대상 저장소 자동 clone
@@ -52,6 +52,7 @@ Claude Code는 버전을 문서에서 고정하지 않는다. 대신 로컬 CLI 
 - `data/project-memory/`
 - `.tools/`
 - `.venv/`
+- `.pytest_cache/`
 
 런타임 산출물이 git 추적 대상에 남아 있으면 패키징 전에 먼저 정리해야 한다.
 
@@ -102,3 +103,5 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\freeze-phase1.ps1
 - 작업 현황은 현재 진행 중인 run만 보여준다.
 - 작업 로그는 완료 또는 실패한 과거 이력을 요약한다.
 - Agent Provider는 Codex와 Claude Code를 지원한다.
+- `run-dev.ps1`는 현재 통합 UI 확인을 위해 Agentation 패널과 로컬 endpoint를 함께 켠다.
+- 다만 Agentation은 별도 설치 패키지나 독립 배포 산출물로 보지 않으므로, 패키징 체크리스트에서는 독립 설치 보장을 요구하지 않는다.
